@@ -11,6 +11,7 @@ mame_patches=(
     "$repo_root/patches/mame/0003-akai-dsp-reset-voice-state-on-key-on.patch"
     "$repo_root/patches/mame/0004-pipewire-audio-clock-and-low-latency-buffer.patch"
     "$repo_root/patches/mame/0005-skip-emulation-warning-with-skip-gameinfo.patch"
+    "$repo_root/patches/mame/0006-sdl-asynchronous-rendering.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then

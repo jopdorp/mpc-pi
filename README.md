@@ -128,7 +128,7 @@ PIPEWIRE_LATENCY=128/48000 .cache/mame/mpc mpc2000xl \
 ```
 
 The launcher wraps this as `scripts/run-mpc.sh <machine> <frames>`. It defaults
-to 128 frames. `pw-jack` is for JACK clients running on PipeWire and is not
+to 64 frames. `pw-jack` is for JACK clients running on PipeWire and is not
 needed for MAME's native PipeWire backend.
 
 The launcher also uses `nice -10` and round-robin real-time scheduling at
@@ -138,20 +138,42 @@ needed.
 
 The launcher enables the patched PipeWire audio clock and disables MAME's
 independent video throttle. Fast loading remains unpaced, but at normal speed
-the complete group of MAME output streams is paced from PipeWire with a 4 ms
-prebuffer. This avoids independently dropping or repeating samples to reconcile
-the host and emulator clocks.
+the complete group of MAME output streams is paced from PipeWire with a
+four-quantum prebuffer (5.33 ms at 64/48 kHz). This avoids independently
+dropping or repeating samples to reconcile the host and emulator clocks.
 
-Run the MPC2000XL timing regression with:
+The default desktop video path is the complete MPC panel, rendered with
+bilinear OpenGL at a non-maximized 1240x894. The OpenGL path hands completed
+primitive lists to a low-priority presenter thread without waiting and drops a
+visual frame if the presenter is busy. The SDL software path keeps SDL texture
+upload and presentation on the main thread, as required by SDL, while a
+low-priority worker rasterizes primitives into double-buffered pixel storage.
+It also drops a visual frame before primitive-list generation if the worker is
+busy. Both `-scalemode none` and `-scalemode hwbest` pass the live timing test
+on the accelerated desktop display.
+
+For a compact LCD-only view (for example on a Raspberry Pi display or for
+diagnostics), use:
+
+```bash
+MPC_VIEW_NAME='Screen 0' MPC_WINDOW_RESOLUTION=1240x300 scripts/run-mpc.sh
+```
+
+Override `MPC_VIEW_NAME`, `MPC_WINDOW_RESOLUTION`, `MPC_FILTER_MODE`,
+`MPC_VIDEO_MODE`, or `MPC_ASYNC_PRESENT` as needed.
+
+Run the deterministic offline and full live MPC2000XL timing regressions with:
 
 ```bash
 ./scripts/diagnostics/test-mpc2000xl-timing.sh
+MPC_ASYNC_PRESENT=1 MPC_VIDEO_MODE=opengl MPC_VIEW_NAME='Screen 0' \
+  ./scripts/diagnostics/test-mpc2000xl-live-timing.sh
 ```
 
-It requires two byte-identical reference renders (0.00-sample run-to-run
-jitter), zero steady-state PipeWire buffer corrections while a loaded project
-plays, and a live delivered-frame rate within one 48-frame PipeWire period of
-48 kHz.
+The live test captures exactly what the PipeWire callback delivered, requires
+zero buffer corrections during playback, rejects inserted or removed whole
+samples, and removes one fitted constant fractional offset before requiring a
+maximum residual below 0.01 sample.
 
 For every setting record:
 

@@ -1,0 +1,722 @@
+diff --git a/src/osd/modules/osdwindow.h b/src/osd/modules/osdwindow.h
+index 340261bb..acfb61dd 100644
+--- a/src/osd/modules/osdwindow.h
++++ b/src/osd/modules/osdwindow.h
+@@ -16,6 +16,7 @@
+ #include "../frontend/mame/ui/menuitem.h"
+ 
+ #include <cassert>
++#include <atomic>
+ #include <chrono>
+ #include <memory>
+ #include <string>
+@@ -64,7 +65,7 @@ public:
+ 
+ 	bool has_renderer() const { return m_renderer != nullptr; }
+ 	osd_renderer &renderer() const { return *m_renderer; }
+-	void renderer_reset() { m_renderer.reset(); } // public because OSD object calls it directly during teardown
++	void renderer_reset() { renderer_reset_prepare(); m_renderer.reset(); } // public because OSD object calls it directly during teardown
+ 
+ 	int index() const { return m_index; }
+ 	int prescale() const { return m_prescale; }
+@@ -97,6 +98,8 @@ public:
+ 	virtual void complete_destroy() = 0;
+ 
+ protected:
++	virtual void renderer_reset_prepare() { }
++
+ 	static inline constexpr int CLICK_DISTANCE = 16; // in pointer units squared
+ 	static inline constexpr int TAP_DISTANCE = 49; // taps are less repeatable than clicks
+ 
+@@ -357,9 +360,9 @@ public:
+ 
+ 	osd_window &window() const { return m_window; }
+ 
+-	bool has_flags(const int flag) const { return ((m_flags & flag)) == flag; }
+-	void set_flags(int aflag) { m_flags |= aflag; }
+-	void clear_flags(int aflag) { m_flags &= ~aflag; }
++	bool has_flags(const int flag) const { return ((m_flags.load(std::memory_order_relaxed) & flag)) == flag; }
++	void set_flags(int aflag) { m_flags.fetch_or(aflag, std::memory_order_relaxed); }
++	void clear_flags(int aflag) { m_flags.fetch_and(~aflag, std::memory_order_relaxed); }
+ 
+ 	void notify_changed() { set_flags(FI_CHANGED); }
+ 
+@@ -367,6 +370,7 @@ public:
+ 
+ 	virtual int create() = 0;
+ 	virtual render_primitive_list *get_primitives() = 0;
++	virtual bool ready_for_frame() { return true; }
+ 
+ 	virtual void add_audio_to_recording(const int16_t *buffer, int samples_this_frame) { }
+ 	virtual std::vector<ui::menu_item> get_slider_list() { return m_sliders; }
+@@ -387,7 +391,7 @@ protected:
+ 
+ private:
+ 	osd_window &m_window;
+-	int         m_flags;
++	std::atomic<int> m_flags;
+ };
+ 
+ 
+diff --git a/src/osd/modules/render/drawsdl.cpp b/src/osd/modules/render/drawsdl.cpp
+index 77ae714b..1e3a75ea 100644
+--- a/src/osd/modules/render/drawsdl.cpp
++++ b/src/osd/modules/render/drawsdl.cpp
+@@ -33,9 +33,18 @@
+ #include <SDL2/SDL.h>
+ 
+ // standard C headers
++#include <array>
+ #include <cmath>
++#include <condition_variable>
++#include <cstdlib>
++#include <cstring>
+ #include <cstdio>
+ #include <memory>
++#include <mutex>
++#include <pthread.h>
++#include <sched.h>
++#include <thread>
++#include <vector>
+ 
+ 
+ namespace osd {
+@@ -82,12 +91,32 @@ public:
+ 		, m_last_vofs(0)
+ 		, m_blit_dim(0, 0)
+ 		, m_last_dim(0, 0)
++		, m_async_requested([]()
++			{
++				char const *const value = std::getenv("MAME_ASYNC_PRESENT");
++				return value && std::strcmp(value, "0");
++			}())
++		, m_async_stop(false)
++		, m_async_pending(false)
++		, m_async_busy(false)
++		, m_async_ready(false)
++		, m_async_write_buffer(0)
++		, m_async_ready_buffer(0)
++		, m_async_primlist(nullptr)
++		, m_async_width(0)
++		, m_async_height(0)
++		, m_async_pitch(0)
++		, m_async_rmask(0)
++		, m_async_fw(1.0f)
++		, m_async_fh(1.0f)
++		, m_async_first_present(true)
+ 	{
+ 	}
+ 	virtual ~renderer_sdl1();
+ 
+ 	virtual int create() override;
+ 	virtual int draw(const int update) override;
++	virtual bool ready_for_frame() override;
+ 	virtual int xy_to_render_target(const int x, const int y, int *xt, int *yt) override;
+ 	virtual render_primitive_list *get_primitives() override;
+ 
+@@ -99,6 +128,20 @@ private:
+ 	void setup_texture(const osd_dim &size);
+ 	void yuv_lookup_set(unsigned int pen, unsigned char red,
+ 				unsigned char green, unsigned char blue);
++	int draw_async();
++	void start_async_worker();
++	void stop_async_worker();
++	void wait_async_worker();
++	void async_worker_loop();
++	void render_async_primitives(
++			render_primitive_list &primlist,
++			uint8_t *pixels,
++			int width,
++			int height,
++			int pitch,
++			Uint32 rmask,
++			float fw,
++			float fh);
+ 
+ 	int32_t               m_blittimer;
+ 
+@@ -117,6 +160,26 @@ private:
+ 	int                 m_last_vofs;
+ 	osd_dim             m_blit_dim;
+ 	osd_dim             m_last_dim;
++
++	bool                m_async_requested;
++	bool                m_async_stop;
++	bool                m_async_pending;
++	bool                m_async_busy;
++	bool                m_async_ready;
++	unsigned            m_async_write_buffer;
++	unsigned            m_async_ready_buffer;
++	render_primitive_list *m_async_primlist;
++	int                 m_async_width;
++	int                 m_async_height;
++	int                 m_async_pitch;
++	Uint32              m_async_rmask;
++	float               m_async_fw;
++	float               m_async_fh;
++	bool                m_async_first_present;
++	std::array<std::vector<uint8_t>, 2> m_async_pixels;
++	std::mutex          m_async_mutex;
++	std::condition_variable m_async_condition;
++	std::thread         m_async_thread;
+ };
+ 
+ 
+@@ -274,6 +337,8 @@ int renderer_sdl1::create()
+ 	m_blittimer = 0;
+ 
+ 	yuv_init();
++	if (m_async_requested && !m_scale_mode.is_yuv)
++		start_async_worker();
+ 	osd_printf_verbose("Leave renderer_sdl1::create\n");
+ 	return 0;
+ }
+@@ -284,6 +349,7 @@ int renderer_sdl1::create()
+ 
+ renderer_sdl1::~renderer_sdl1()
+ {
++	stop_async_worker();
+ 	destroy_all_textures();
+ 
+ 	SDL_DestroyRenderer(m_sdl_renderer);
+@@ -314,6 +380,214 @@ void renderer_sdl1::destroy_all_textures()
+ 	m_texture_id = nullptr;
+ }
+ 
++void renderer_sdl1::start_async_worker()
++{
++	m_async_thread = std::thread(&renderer_sdl1::async_worker_loop, this);
++}
++
++void renderer_sdl1::stop_async_worker()
++{
++	if (!m_async_thread.joinable())
++		return;
++	{
++		std::lock_guard<std::mutex> lock(m_async_mutex);
++		m_async_stop = true;
++		m_async_pending = false;
++	}
++	m_async_condition.notify_all();
++	m_async_thread.join();
++}
++
++void renderer_sdl1::wait_async_worker()
++{
++	std::unique_lock<std::mutex> lock(m_async_mutex);
++	m_async_condition.wait(lock, [this]() { return !m_async_pending && !m_async_busy; });
++	m_async_ready = false;
++}
++
++bool renderer_sdl1::ready_for_frame()
++{
++	if (!m_async_thread.joinable())
++		return true;
++	std::unique_lock<std::mutex> lock(m_async_mutex, std::try_to_lock);
++	return lock.owns_lock() && !m_async_pending && !m_async_busy;
++}
++
++void renderer_sdl1::render_async_primitives(
++		render_primitive_list &primlist,
++		uint8_t *const pixels,
++		int const width,
++		int const height,
++		int const pitch,
++		Uint32 const rmask,
++		float const fw,
++		float const fh)
++{
++	primlist.acquire_lock();
++	for (render_primitive &prim : primlist)
++	{
++		prim.bounds.x0 = std::floor(fw * prim.bounds.x0 + 0.5f);
++		prim.bounds.x1 = std::floor(fw * prim.bounds.x1 + 0.5f);
++		prim.bounds.y0 = std::floor(fh * prim.bounds.y0 + 0.5f);
++		prim.bounds.y1 = std::floor(fh * prim.bounds.y1 + 0.5f);
++	}
++
++	switch (rmask)
++	{
++		case 0xff000000:
++			software_renderer<uint32_t, 0,0,0, 24,16,8>::draw_primitives(primlist, pixels, width, height, pitch / 4);
++			break;
++
++		case 0x0000ff00:
++			software_renderer<uint32_t, 0,0,0, 8,16,24>::draw_primitives(primlist, pixels, width, height, pitch / 4);
++			break;
++
++		case 0x00ff0000:
++			software_renderer<uint32_t, 0,0,0, 16,8,0>::draw_primitives(primlist, pixels, width, height, pitch / 4);
++			break;
++
++		case 0x000000ff:
++			software_renderer<uint32_t, 0,0,0, 0,8,16>::draw_primitives(primlist, pixels, width, height, pitch / 4);
++			break;
++
++		case 0xf800:
++			software_renderer<uint16_t, 3,2,3, 11,5,0>::draw_primitives(primlist, pixels, width, height, pitch / 2);
++			break;
++
++		case 0x7c00:
++			software_renderer<uint16_t, 3,3,3, 10,5,0>::draw_primitives(primlist, pixels, width, height, pitch / 2);
++			break;
++
++		default:
++			osd_printf_error("SDL: ERROR! Unknown async video mode: R=%08X\n", rmask);
++			break;
++	}
++	primlist.release_lock();
++}
++
++void renderer_sdl1::async_worker_loop()
++{
++	// The emulator may use a real-time policy.  Rasterization must not inherit it
++	// and compete with the audio/emulation timeline.
++	sched_param parameters { };
++	pthread_setschedparam(pthread_self(), SCHED_OTHER, &parameters);
++
++	for (;;)
++	{
++		std::unique_lock<std::mutex> lock(m_async_mutex);
++		m_async_condition.wait(lock, [this]() { return m_async_stop || m_async_pending; });
++		if (m_async_stop)
++			break;
++
++		unsigned const buffer = m_async_write_buffer;
++		render_primitive_list *const primlist = m_async_primlist;
++		int const width = m_async_width;
++		int const height = m_async_height;
++		int const pitch = m_async_pitch;
++		Uint32 const rmask = m_async_rmask;
++		float const fw = m_async_fw;
++		float const fh = m_async_fh;
++		m_async_pending = false;
++		m_async_busy = true;
++		lock.unlock();
++
++		render_async_primitives(*primlist, m_async_pixels[buffer].data(), width, height, pitch, rmask, fw, fh);
++
++		lock.lock();
++		m_async_ready_buffer = buffer;
++		m_async_ready = true;
++		m_async_busy = false;
++		lock.unlock();
++		m_async_condition.notify_all();
++	}
++}
++
++int renderer_sdl1::draw_async()
++{
++	osd_dim const wdim = window().get_size();
++	if (has_flags(FI_CHANGED) || (wdim != m_last_dim))
++	{
++		wait_async_worker();
++		destroy_all_textures();
++		clear_flags(FI_CHANGED);
++		m_last_dim = wdim;
++		SDL_RenderSetViewport(m_sdl_renderer, nullptr);
++		setup_texture(m_blit_dim);
++		m_blittimer = 3;
++	}
++
++	Uint32 format, rmask, gmask, bmask, amask;
++	int access, width, height, bits_per_pixel;
++	SDL_QueryTexture(m_texture_id, &format, &access, &width, &height);
++	SDL_PixelFormatEnumToMasks(format, &bits_per_pixel, &rmask, &gmask, &bmask, &amask);
++	int const bytes_per_pixel = bits_per_pixel / 8;
++	int const mamewidth = width / m_scale_mode.mult_w;
++	int const mameheight = height / m_scale_mode.mult_h;
++	int const pitch = mamewidth * bytes_per_pixel;
++
++	int vofs = 0;
++	int hofs = 0;
++	int blitwidth = std::min(m_blit_dim.width(), wdim.width());
++	int blitheight = std::min(m_blit_dim.height(), wdim.height());
++	if ((m_blit_dim.width() <= wdim.width()) && video_config.centerh)
++		hofs = (wdim.width() - m_blit_dim.width()) / 2;
++	if ((m_blit_dim.height() <= wdim.height()) && video_config.centerv)
++		vofs = (wdim.height() - m_blit_dim.height()) / 2;
++	m_last_hofs = hofs;
++	m_last_vofs = vofs;
++
++	unsigned ready_buffer = 0;
++	bool have_ready = false;
++	{
++		std::lock_guard<std::mutex> lock(m_async_mutex);
++		if (m_async_ready)
++		{
++			ready_buffer = m_async_ready_buffer;
++			m_async_ready = false;
++			have_ready = true;
++		}
++	}
++
++	if (have_ready)
++	{
++		SDL_UpdateTexture(m_texture_id, nullptr, m_async_pixels[ready_buffer].data(), pitch);
++		if (m_blittimer > 0)
++		{
++			SDL_SetRenderDrawColor(m_sdl_renderer, 0, 0, 0, 0);
++			SDL_RenderFillRect(m_sdl_renderer, nullptr);
++			--m_blittimer;
++		}
++		SDL_Rect const destination { hofs, vofs, blitwidth, blitheight };
++		SDL_RenderCopy(m_sdl_renderer, m_texture_id, nullptr, &destination);
++		SDL_RenderPresent(m_sdl_renderer);
++		if (m_async_first_present)
++		{
++			m_async_first_present = false;
++			osd_printf_warning("SDL soft: asynchronous rasterizer first frame presented on main thread\n");
++		}
++	}
++
++	{
++		std::lock_guard<std::mutex> lock(m_async_mutex);
++		if (!m_async_pending && !m_async_busy && !m_async_ready)
++		{
++			m_async_write_buffer ^= 1;
++			auto &pixels = m_async_pixels[m_async_write_buffer];
++			pixels.resize(std::size_t(pitch) * mameheight);
++			m_async_primlist = window().m_primlist;
++			m_async_width = mamewidth;
++			m_async_height = mameheight;
++			m_async_pitch = pitch;
++			m_async_rmask = rmask;
++			m_async_fw = float(mamewidth) / float(blitwidth);
++			m_async_fh = float(mameheight) / float(blitheight);
++			m_async_pending = true;
++		}
++	}
++	m_async_condition.notify_one();
++	return 0;
++}
++
+ 
+ //============================================================
+ //  renderer_sdl2::draw
+@@ -321,6 +595,9 @@ void renderer_sdl1::destroy_all_textures()
+ 
+ int renderer_sdl1::draw(int update)
+ {
++	if (m_async_thread.joinable())
++		return draw_async();
++
+ 	uint8_t *surfptr;
+ 	int32_t pitch;
+ 	Uint32 rmask, gmask, bmask;
+diff --git a/src/osd/modules/render/sdlglcontext.h b/src/osd/modules/render/sdlglcontext.h
+index b62f757c..7b18caae 100644
+--- a/src/osd/modules/render/sdlglcontext.h
++++ b/src/osd/modules/render/sdlglcontext.h
+@@ -24,6 +24,7 @@
+ #endif
+ 
+ #include <string>
++#include <cstdio>
+ 
+ 
+ class sdl_gl_context : public osd_gl_context
+@@ -58,7 +59,8 @@ public:
+ 
+ 	virtual void make_current() override
+ 	{
+-		SDL_GL_MakeCurrent(m_window, m_context);
++		if (SDL_GL_MakeCurrent(m_window, m_context) < 0)
++			fprintf(stderr, "OpenGL: SDL_GL_MakeCurrent failed: %s\n", SDL_GetError());
+ 	}
+ 
+ 	virtual bool set_swap_interval(const int swap) override
+diff --git a/src/osd/sdl/window.cpp b/src/osd/sdl/window.cpp
+index 0e395fd1..7180bb98 100644
+--- a/src/osd/sdl/window.cpp
++++ b/src/osd/sdl/window.cpp
+@@ -27,8 +27,12 @@
+ #include <algorithm>
+ #include <cassert>
+ #include <cmath>
++#include <cstdlib>
++#include <ctime>
+ #include <list>
+ #include <memory>
++#include <pthread.h>
++#include <sched.h>
+ 
+ #ifndef _MSC_VER
+ #include <unistd.h>
+@@ -304,6 +308,12 @@ void sdl_window_info::update_cursor_state()
+ 
+ int sdl_window_info::xy_to_render_target(int x, int y, int *xt, int *yt)
+ {
++	if (m_async_present_active)
++	{
++		std::unique_lock<std::mutex> lock(m_present_mutex, std::try_to_lock);
++		if (!lock.owns_lock() || m_present_busy)
++			return 0;
++	}
+ 	return renderer().xy_to_render_target(x, y, xt, yt);
+ }
+ 
+@@ -715,8 +725,38 @@ osd_dim sdl_window_info::pick_best_mode()
+ 
+ void sdl_window_info::update()
+ {
++	static const bool profile_video = std::getenv("MAME_VIDEO_STATS") != nullptr;
++	static uint64_t profile_frames = 0;
++	static uint64_t profile_wall_ns[4] = { 0, 0, 0, 0 };
++	static uint64_t profile_cpu_ns[4] = { 0, 0, 0, 0 };
++	static uint64_t profile_max_wall_ns[4] = { 0, 0, 0, 0 };
++	auto const wall_now = []() { return std::chrono::steady_clock::now(); };
++	auto const cpu_now = []()
++	{
++		timespec value;
++		clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value);
++		return uint64_t(value.tv_sec) * 1'000'000'000U + value.tv_nsec;
++	};
++	auto wall_mark = wall_now();
++	auto cpu_mark = cpu_now();
++	auto profile_stage = [&](unsigned stage)
++	{
++		if (!profile_video)
++			return;
++		auto const next_wall = wall_now();
++		auto const next_cpu = cpu_now();
++		auto const wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(next_wall - wall_mark).count();
++		auto const cpu_ns = next_cpu - cpu_mark;
++		profile_wall_ns[stage] += wall_ns;
++		profile_cpu_ns[stage] += cpu_ns;
++		profile_max_wall_ns[stage] = std::max<uint64_t>(profile_max_wall_ns[stage], wall_ns);
++		wall_mark = next_wall;
++		cpu_mark = next_cpu;
++	};
++
+ 	// adjust the cursor state
+ 	update_cursor_state();
++	profile_stage(0);
+ 
+ 	// if we're visible and running and not in the middle of a resize, draw
+ 	if (target() != nullptr)
+@@ -740,6 +780,7 @@ void sdl_window_info::update()
+ 				resize(tmp.width(), tmp.height());
+ 			}
+ 		}
++		profile_stage(1);
+ 
+ 		osd_ticks_t event_wait_ticks;
+ 		if (video_config.waitvsync && video_config.syncrefresh)
+@@ -749,11 +790,25 @@ void sdl_window_info::update()
+ 
+ 		if (m_rendered_event.wait(event_wait_ticks))
+ 		{
++			std::unique_lock<std::mutex> present_lock;
++			if (m_async_present_active)
++			{
++				present_lock = std::unique_lock<std::mutex>(m_present_mutex, std::try_to_lock);
++				if (!present_lock.owns_lock() || m_present_pending || m_present_busy)
++					return;
++			}
++
+ 			const int update = 1;
++			if (!renderer().ready_for_frame())
++			{
++				m_rendered_event.set();
++				return;
++			}
+ 
+ 			// ensure the target bounds are up-to-date, and then get the primitives
+ 
+ 			render_primitive_list &primlist = *renderer().get_primitives();
++			profile_stage(2);
+ 
+ 			// and redraw now
+ 
+@@ -776,16 +831,39 @@ void sdl_window_info::update()
+ 			else
+ 			{
+ 				// otherwise, render with our drawing system
+-				if (video_config.perftest)
++				if (m_async_present_active)
++				{
++					m_present_pending = true;
++					present_lock.unlock();
++					m_present_condition.notify_one();
++				}
++				else if (video_config.perftest)
+ 					measure_fps(update);
+ 				else
+ 					renderer().draw(update);
++				profile_stage(3);
+ 			}
+ 
+ 			// all done, ready for next
+ 			m_rendered_event.set();
+ 		}
+ 	}
++
++	if (profile_video && (++profile_frames >= 80))
++	{
++		static const char *const names[4] = { "cursor", "layout", "primitives", "draw" };
++		for (unsigned stage = 0; stage != 4; ++stage)
++		{
++			osd_printf_warning(
++				"Video profile: stage=%s wall_avg_us=%.1f cpu_avg_us=%.1f wall_max_us=%.1f\n",
++				names[stage],
++				double(profile_wall_ns[stage]) / profile_frames / 1000.0,
++				double(profile_cpu_ns[stage]) / profile_frames / 1000.0,
++				double(profile_max_wall_ns[stage]) / 1000.0);
++			profile_wall_ns[stage] = profile_cpu_ns[stage] = profile_max_wall_ns[stage] = 0;
++		}
++		profile_frames = 0;
++	}
+ }
+ 
+ 
+@@ -974,6 +1052,7 @@ int sdl_window_info::complete_create()
+ 	// initialize the drawing backend
+ 	if (renderer().create())
+ 		return 1;
++	start_async_present();
+ 
+ 	// Make sure we have a consistent state
+ 	SDL_ShowCursor(SDL_DISABLE);
+@@ -982,6 +1061,83 @@ int sdl_window_info::complete_create()
+ 	return 0;
+ }
+ 
++void sdl_window_info::start_async_present()
++{
++	if (!m_async_present_requested || !renderer_sdl_needs_opengl())
++		return;
++
++	// The renderer creates and initializes its GL context on this thread.  Release
++	// it before the presenter thread makes it current for all subsequent draws.
++	if (SDL_GL_MakeCurrent(nullptr, nullptr) < 0)
++		osd_printf_error("OpenGL: failed to release context for async presentation: %s\n", SDL_GetError());
++	{
++		std::lock_guard<std::mutex> lock(m_present_mutex);
++		m_present_stop = false;
++		m_present_pending = false;
++		m_present_busy = false;
++		m_async_present_active = true;
++	}
++	m_present_thread = std::thread(&sdl_window_info::async_present_loop, this);
++}
++
++void sdl_window_info::stop_async_present()
++{
++	if (!m_present_thread.joinable())
++		return;
++	{
++		std::lock_guard<std::mutex> lock(m_present_mutex);
++		m_present_stop = true;
++		m_present_pending = false;
++	}
++	m_present_condition.notify_one();
++	m_present_thread.join();
++	std::lock_guard<std::mutex> lock(m_present_mutex);
++	m_async_present_active = false;
++	m_present_stop = false;
++	m_present_busy = false;
++}
++
++void sdl_window_info::renderer_reset_prepare()
++{
++	stop_async_present();
++}
++
++void sdl_window_info::async_present_loop()
++{
++	// The emulator is launched SCHED_RR for audio stability.  Presentation must
++	// never inherit that policy and compete with the emulation timeline.
++	sched_param parameters { };
++	pthread_setschedparam(pthread_self(), SCHED_OTHER, &parameters);
++
++	bool first_present = true;
++	for (;;)
++	{
++		std::unique_lock<std::mutex> lock(m_present_mutex);
++		m_present_condition.wait(lock, [this]() { return m_present_stop || m_present_pending; });
++		if (m_present_stop)
++			break;
++		m_present_pending = false;
++		m_present_busy = true;
++		lock.unlock();
++
++		renderer().draw(1);
++		if (first_present)
++		{
++			first_present = false;
++			osd_printf_warning(
++				"OpenGL: async presenter first frame: context=%p window=%p\n",
++				SDL_GL_GetCurrentContext(),
++				static_cast<void *>(SDL_GL_GetCurrentWindow()));
++		}
++
++		lock.lock();
++		m_present_busy = false;
++	}
++
++	if (SDL_GL_MakeCurrent(nullptr, nullptr) < 0)
++		osd_printf_error("OpenGL: async presenter failed to release context: %s\n", SDL_GetError());
++}
++
+ 
+ //============================================================
+ //  draw_video_contents
+@@ -1333,6 +1489,15 @@ sdl_window_info::sdl_window_info(
+ 	, m_minimum_dim(0, 0)
+ 	, m_windowed_dim(0, 0)
+ 	, m_rendered_event(0, 1)
++	, m_async_present_requested([]()
++		{
++			const char *const value = std::getenv("MAME_ASYNC_PRESENT");
++			return value && std::strcmp(value, "0");
++		}())
++	, m_async_present_active(false)
++	, m_present_stop(false)
++	, m_present_pending(false)
++	, m_present_busy(false)
+ 	, m_extra_flags(0)
+ 	, m_mouse_captured(false)
+ 	, m_mouse_hidden(false)
+diff --git a/src/osd/sdl/window.h b/src/osd/sdl/window.h
+index 5f55419a..22f2a7c4 100644
+--- a/src/osd/sdl/window.h
++++ b/src/osd/sdl/window.h
+@@ -17,8 +17,11 @@
+ #include <SDL2/SDL.h>
+ 
+ #include <chrono>
++#include <condition_variable>
+ #include <cstdint>
+ #include <memory>
++#include <mutex>
++#include <thread>
+ #include <vector>
+ 
+ 
+@@ -97,6 +100,10 @@ private:
+ 	osd_dim get_min_bounds(int constrain);
+ 	osd_dim get_max_bounds(int constrain);
+ 	void update_cursor_state();
++	void renderer_reset_prepare() override;
++	void start_async_present();
++	void stop_async_present();
++	void async_present_loop();
+ 	osd_dim pick_best_mode();
+ 	void set_fullscreen(int afullscreen) { m_fullscreen = afullscreen; }
+ 
+@@ -113,6 +120,14 @@ private:
+ 
+ 	// rendering info
+ 	osd_event           m_rendered_event;
++	bool                m_async_present_requested;
++	bool                m_async_present_active;
++	bool                m_present_stop;
++	bool                m_present_pending;
++	bool                m_present_busy;
++	std::mutex          m_present_mutex;
++	std::condition_variable m_present_condition;
++	std::thread         m_present_thread;
+ 
+ 	// Original display_mode
+ 	SDL_DisplayMode     m_original_mode;

@@ -68,23 +68,43 @@ if ! awk '
         }
         if (generated >= 0 && queued >= 0 && wall >= 0) {
             delivered = generated - queued
-            if (!count++) { first_delivered = delivered; first_wall = wall }
-            last_delivered = delivered
-            last_wall = wall
+            x[count] = wall / 1000000
+            y[count] = delivered
+            sx += x[count]
+            sy += y[count]
+            count++
         }
     }
     END {
         if (count < 5) exit 1
-        actual = last_delivered - first_delivered
-        expected = (last_wall - first_wall) * 48000 / 1000000
-        error = actual - expected
-        if (error < 0) error = -error
-        exit !(error <= 48)
+        mean_x = sx / count
+        mean_y = sy / count
+        for (i = 0; i < count; i++) {
+            dx = x[i] - mean_x
+            variance += dx * dx
+            covariance += dx * (y[i] - mean_y)
+        }
+        if (variance == 0) exit 1
+        slope = covariance / variance
+        intercept = mean_y - slope * mean_x
+        duration = x[count - 1] - x[0]
+        drift = (slope - 48000) * duration
+        if (drift < 0) drift = -drift
+        max_residual = 0
+        for (i = 0; i < count; i++) {
+            residual = y[i] - (intercept + slope * x[i])
+            if (residual < 0) residual = -residual
+            if (residual > max_residual) max_residual = residual
+        }
+        printf "fitted_delivery_rate_hz=%.6f\n", slope
+        printf "fitted_drift_over_capture_samples=%.6f\n", drift
+        printf "wall_clock_fit_max_residual_samples=%.6f\n", max_residual
+        exit !((drift <= 48) && (max_residual <= 48))
     }
 ' "$result_dir/pipewire.log"; then
-    printf 'FAIL: live audio clock rate differs from 48 kHz by more than one frame period\n' >&2
+    printf 'FAIL: fitted live audio clock differs from the 48 kHz timeline by more than one frame period\n' >&2
     grep 'PipeWire: audio clock:' "$result_dir/pipewire.log" >&2
     exit 1
 fi
-printf 'PASS: live PipeWire delivery rate tracks 48 kHz within one frame period\n'
+printf 'PASS: fitted live PipeWire delivery tracks 48 kHz within one frame period\n'
 printf 'Artifacts: %s\n' "$result_dir"

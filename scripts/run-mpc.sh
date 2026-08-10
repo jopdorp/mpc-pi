@@ -7,11 +7,17 @@ mame_bin=${MAME_BIN:-"$mame_source_dir/mpc"}
 rom_dir=${MAME_ROM_DIR:-"$repo_root/roms"}
 runtime_dir=${MAME_RUNTIME_DIR:-"$repo_root/results/runtime"}
 system_name=${1:-mpc2000xl}
-pipewire_frames=${2:-128}
+pipewire_frames=${2:-64}
 pipewire_rate=${PIPEWIRE_RATE_HZ:-48000}
 mame_nice=${MAME_NICE:--10}
 mame_rt_priority=${MAME_RT_PRIORITY:-20}
 mame_cpuset=${MAME_CPUSET:-0-11}
+timing_master=${MAME_TIMING_MASTER:-audio}
+video_mode=${MPC_VIDEO_MODE:-opengl}
+view_name=${MPC_VIEW_NAME:-Default Layout}
+filter_mode=${MPC_FILTER_MODE:-1}
+window_resolution=${MPC_WINDOW_RESOLUTION:-1240x894}
+async_present=${MPC_ASYNC_PRESENT:-1}
 bios_name=${MAME_BIOS:-}
 
 if (( $# > 0 )); then shift; fi
@@ -61,6 +67,30 @@ if ! taskset --cpu-list "$mame_cpuset" true 2>/dev/null; then
     exit 2
 fi
 
+case "$filter_mode" in
+    0) filter_option=-nofilter ;;
+    1) filter_option=-filter ;;
+    *)
+        printf 'error: MPC_FILTER_MODE must be 0 or 1\n' >&2
+        exit 2
+        ;;
+esac
+
+case "$timing_master" in
+    video)
+        clock_environment=(-u MAME_PIPEWIRE_AUDIO_CLOCK)
+        throttle_option=-throttle
+        ;;
+    audio)
+        clock_environment=(MAME_PIPEWIRE_AUDIO_CLOCK=1)
+        throttle_option=-nothrottle
+        ;;
+    *)
+        printf 'error: MAME_TIMING_MASTER must be video or audio, got %s\n' "$timing_master" >&2
+        exit 2
+        ;;
+esac
+
 if [[ ! -x "$mame_bin" ]]; then
     printf 'error: release MAME binary not found at %s; run scripts/build-mame.sh first\n' "$mame_bin" >&2
     exit 1
@@ -74,9 +104,13 @@ printf 'Starting %s BIOS %s with native PipeWire; PIPEWIRE_LATENCY=%s (~%s ms pe
     "$system_name" "$bios_name" "$pipewire_latency" "$latency_ms"
 printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s (PipeWire runs above it at RR 90)\n' \
     "$mame_cpuset" "$mame_nice" "$mame_rt_priority"
+printf 'Timing master: %s\n' "$timing_master"
+printf 'Video: %s, async=%s, view=%s, resolution=%s, bilinear=%s\n' \
+    "$video_mode" "$async_present" "$view_name" "$window_resolution" "$filter_mode"
 
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
-    env -u MAME_PIPEWIRE_AUDIO_CLOCK PIPEWIRE_LATENCY="$pipewire_latency" "$mame_bin" "$system_name" \
+    env "${clock_environment[@]}" MAME_ASYNC_PRESENT="$async_present" \
+    PIPEWIRE_LATENCY="$pipewire_latency" "$mame_bin" "$system_name" \
     -rompath "$rom_dir" \
     -bios "$bios_name" \
     -sound pipewire \
@@ -87,5 +121,10 @@ exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_
     -snapshot_directory "$runtime_dir/snap" \
     -state_directory "$runtime_dir/sta" \
     -window \
-    -throttle \
+	-video "$video_mode" \
+	-view "$view_name" \
+	"$filter_option" \
+	-nomaximize \
+	-resolution "$window_resolution" \
+    "$throttle_option" \
     "$@"
