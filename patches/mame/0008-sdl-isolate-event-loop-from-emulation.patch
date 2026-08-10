@@ -1,0 +1,554 @@
+diff --git a/src/osd/sdl/osdsdl.cpp b/src/osd/sdl/osdsdl.cpp
+index 0072a50d7ee62ddbd3f4f0c58d9ffe2b750972bd..d279e3748e14dba343c979aa6450496fd1b46770 100644
+--- a/src/osd/sdl/osdsdl.cpp
++++ b/src/osd/sdl/osdsdl.cpp
+@@ -21,6 +21,7 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ 
+ 
+@@ -170,7 +171,20 @@ sdl_osd_interface::sdl_osd_interface(sdl_options &options) :
+ 	m_last_click_x(0),
+ 	m_last_click_y(0),
+ 	m_enable_touch(false),
+-	m_next_ptrdev(0)
++	m_next_ptrdev(0),
++	m_external_event_loop([]()
++		{
++#if defined(SDLMAME_LINUX)
++			char const *const value = std::getenv("MAME_SDL_EXTERNAL_EVENT_LOOP");
++			return value && std::strcmp(value, "0");
++#else
++			return false;
++#endif
++		}()),
++	m_external_event_state(external_event_state::IDLE),
++	m_external_sdl_result(0),
++	m_external_pump_ready(false),
++	m_external_pump_active(false)
+ {
+ }
+ 
+@@ -295,7 +309,7 @@ void sdl_osd_interface::init(running_machine &machine)
+ #endif
+ 	/* Initialize SDL */
+ 
+-	if (SDL_InitSubSystem(SDL_INIT_VIDEO))
++	if (initialize_sdl_video())
+ 	{
+ 		osd_printf_error("Could not initialize SDL %s\n", SDL_GetError());
+ 		exit(-1);
+@@ -325,7 +339,8 @@ void sdl_osd_interface::init(running_machine &machine)
+ 
+ void sdl_osd_interface::input_update(bool relative_reset)
+ {
+-	process_events_buf();
++	if (!m_external_event_loop)
++		process_events_buf();
+ 	poll_input_modules(relative_reset);
+ }
+ 
+@@ -467,15 +482,34 @@ bool sdl_osd_interface::should_hide_mouse()
+ 
+ void sdl_osd_interface::process_events_buf()
+ {
++	if (async_presenter_busy())
++		return;
+ 	SDL_PumpEvents();
+ }
+ 
+ 
++bool sdl_osd_interface::async_presenter_busy()
++{
++	for (auto const &window : osd_common_t::window_list())
++		if (static_cast<sdl_window_info &>(*window).async_presenter_busy())
++			return true;
++	return false;
++}
++
++
+ void sdl_osd_interface::process_events()
+ {
++	if (!m_external_event_loop && async_presenter_busy())
++		return;
+ 	std::lock_guard<std::mutex> lock(subscription_mutex());
+ 	SDL_Event event;
+-	while (SDL_PollEvent(&event))
++	auto const next_event = [this, &event]()
++	{
++		if (m_external_event_loop)
++			return SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) == 1;
++		return SDL_PollEvent(&event) != 0;
++	};
++	while (next_event())
+ 	{
+ 		// handle UI events
+ 		switch (event.type)
+@@ -674,7 +708,95 @@ void sdl_osd_interface::osd_exit()
+ {
+ 	osd_common_t::osd_exit();
+ 
+-	SDL_QuitSubSystem(SDL_INIT_VIDEO);
++	shutdown_sdl_video();
++}
++
++
++int sdl_osd_interface::initialize_sdl_video()
++{
++	if (!m_external_event_loop)
++		return SDL_InitSubSystem(SDL_INIT_VIDEO);
++
++	std::unique_lock<std::mutex> lock(m_external_event_mutex);
++	m_external_event_state = external_event_state::INIT_REQUESTED;
++	m_external_event_condition.notify_all();
++	m_external_event_condition.wait(lock, [this]()
++		{
++			return m_external_event_state == external_event_state::INIT_COMPLETE;
++		});
++	return m_external_sdl_result;
++}
++
++
++void sdl_osd_interface::shutdown_sdl_video()
++{
++	if (!m_external_event_loop)
++	{
++		SDL_QuitSubSystem(SDL_INIT_VIDEO);
++		return;
++	}
++
++	set_external_event_pump_ready(false);
++	std::unique_lock<std::mutex> lock(m_external_event_mutex);
++	m_external_event_state = external_event_state::QUIT_REQUESTED;
++	m_external_event_condition.notify_all();
++	m_external_event_condition.wait(lock, [this]()
++		{
++			return m_external_event_state == external_event_state::QUIT_COMPLETE;
++		});
++}
++
++
++void sdl_osd_interface::set_external_event_pump_ready(bool ready)
++{
++	if (!m_external_event_loop)
++		return;
++
++	std::unique_lock<std::mutex> lock(m_external_event_mutex);
++	m_external_pump_ready = ready;
++	if (!ready)
++	{
++		m_external_event_condition.wait(lock, [this]() { return !m_external_pump_active; });
++	}
++}
++
++
++void sdl_osd_interface::service_external_event_loop()
++{
++	if (!m_external_event_loop)
++		return;
++
++	std::unique_lock<std::mutex> lock(m_external_event_mutex);
++	if (m_external_event_state == external_event_state::INIT_REQUESTED)
++	{
++		m_external_event_state = external_event_state::INIT_RUNNING;
++		lock.unlock();
++		int const result = SDL_InitSubSystem(SDL_INIT_VIDEO);
++		lock.lock();
++		m_external_sdl_result = result;
++		m_external_event_state = external_event_state::INIT_COMPLETE;
++		m_external_event_condition.notify_all();
++		return;
++	}
++	if (m_external_event_state == external_event_state::QUIT_REQUESTED)
++	{
++		m_external_event_state = external_event_state::QUIT_RUNNING;
++		lock.unlock();
++		SDL_QuitSubSystem(SDL_INIT_VIDEO);
++		lock.lock();
++		m_external_event_state = external_event_state::QUIT_COMPLETE;
++		m_external_event_condition.notify_all();
++		return;
++	}
++	if (!m_external_pump_ready || m_external_pump_active)
++		return;
++
++	m_external_pump_active = true;
++	lock.unlock();
++	SDL_PumpEvents();
++	lock.lock();
++	m_external_pump_active = false;
++	m_external_event_condition.notify_all();
+ }
+ 
+ 
+@@ -711,7 +833,7 @@ void sdl_osd_interface::process_window_event(SDL_Event const &event)
+ #endif
+ 		{
+ 			//osd_printf_info("got resize SDL window %s OSD window %p target %d (%d x %d)\n", event.window.windowID, window, window->target()->index(), event.window.data1, event.window.data2);
+-			window->renderer().notify_changed();
++			window->notify_resized(event.window.data1, event.window.data2);
+ 		}
+ 		break;
+ 
+diff --git a/src/osd/sdl/osdsdl.h b/src/osd/sdl/osdsdl.h
+index 74730f69df5222c54662eb8f971e13716b15d66a..b14b6d1fbcbf08ba8f5ecf93e047e04b9e4cb8a1 100644
+--- a/src/osd/sdl/osdsdl.h
++++ b/src/osd/sdl/osdsdl.h
+@@ -14,6 +14,7 @@
+ 
+ #include <cassert>
+ #include <chrono>
++#include <condition_variable>
+ #include <memory>
+ #include <mutex>
+ #include <unordered_map>
+@@ -163,6 +164,9 @@ public:
+ 	void release_keys();
+ 	bool should_hide_mouse();
+ 	void process_events_buf();
++	bool async_presenter_busy();
++	bool external_event_loop_enabled() const { return m_external_event_loop; }
++	void service_external_event_loop();
+ 
+ 	virtual sdl_options &options() override { return m_options; }
+ 
+@@ -187,6 +191,9 @@ private:
+ 
+ 	void process_window_event(SDL_Event const &event);
+ 	void process_textinput_event(SDL_Event const &event);
++	int initialize_sdl_video();
++	void shutdown_sdl_video();
++	void set_external_event_pump_ready(bool ready);
+ 
+ 	bool mouse_over_window() const { return m_mouse_over_window > 0; }
+ 	template <typename T> sdl_window_info *focus_window(T const &event) const;
+@@ -205,6 +212,25 @@ private:
+ 	bool m_enable_touch;
+ 	unsigned m_next_ptrdev;
+ 	std::vector<std::pair<SDL_TouchID, unsigned> > m_ptrdev_map;
++
++	enum class external_event_state
++	{
++		IDLE,
++		INIT_REQUESTED,
++		INIT_RUNNING,
++		INIT_COMPLETE,
++		QUIT_REQUESTED,
++		QUIT_RUNNING,
++		QUIT_COMPLETE
++	};
++
++	bool const m_external_event_loop;
++	std::mutex m_external_event_mutex;
++	std::condition_variable m_external_event_condition;
++	external_event_state m_external_event_state;
++	int m_external_sdl_result;
++	bool m_external_pump_ready;
++	bool m_external_pump_active;
+ };
+ 
+ //============================================================
+diff --git a/src/osd/sdl/sdlmain.cpp b/src/osd/sdl/sdlmain.cpp
+index 1933bde1de6feda029560ab93c52f7b2b9ad2207..170ad38a3e3134fe1904f9c200853735ee30b5be 100644
+--- a/src/osd/sdl/sdlmain.cpp
++++ b/src/osd/sdl/sdlmain.cpp
+@@ -28,6 +28,15 @@
+ 
+ // only for oslog callback
+ #include <functional>
++#include <atomic>
++#include <chrono>
++#include <thread>
++
++#if defined(SDLMAME_LINUX)
++#include <pthread.h>
++#include <sched.h>
++#include <sys/resource.h>
++#endif
+ 
+ #ifdef SDLMAME_UNIX
+ #if (!defined(SDLMAME_MACOSX)) && (!defined(SDLMAME_EMSCRIPTEN)) && (!defined(SDLMAME_ANDROID))
+@@ -97,7 +106,35 @@ int main(int argc, char** argv)
+ 		sdl_options options;
+ 		sdl_osd_interface osd(options);
+ 		osd.register_options();
+-		res = emulator_info::start_frontend(options, osd, args);
++		if (osd.external_event_loop_enabled())
++		{
++			std::atomic<bool> frontend_done(false);
++			std::thread frontend([&]()
++				{
++					res = emulator_info::start_frontend(options, osd, args);
++					frontend_done.store(true, std::memory_order_release);
++				});
++
++#if defined(SDLMAME_LINUX)
++			// The process is launched SCHED_RR for the emulation/audio timeline.
++			// The frontend worker inherits that policy; keep the SDL event loop
++			// deliberately low priority so desktop interaction cannot preempt it.
++			sched_param parameters { };
++			pthread_setschedparam(pthread_self(), SCHED_OTHER, &parameters);
++			setpriority(PRIO_PROCESS, 0, 19);
++#endif
++
++			while (!frontend_done.load(std::memory_order_acquire))
++			{
++				osd.service_external_event_loop();
++				std::this_thread::sleep_for(std::chrono::milliseconds(1));
++			}
++			frontend.join();
++		}
++		else
++		{
++			res = emulator_info::start_frontend(options, osd, args);
++		}
+ 	}
+ 
+ #ifdef SDLMAME_UNIX
+diff --git a/src/osd/sdl/video.cpp b/src/osd/sdl/video.cpp
+index 1ee788903260da0ea16c6791f34141406bfc4b07..b9a6e40a82500a98d92bc89f31c42d07a89f5ad7 100644
+--- a/src/osd/sdl/video.cpp
++++ b/src/osd/sdl/video.cpp
+@@ -85,6 +85,8 @@ bool sdl_osd_interface::video_init()
+ #endif
+ 	}
+ 
++	set_external_event_pump_ready(true);
++
+ 	return true;
+ }
+ 
+@@ -94,6 +96,7 @@ bool sdl_osd_interface::video_init()
+ 
+ void sdl_osd_interface::video_exit()
+ {
++	set_external_event_pump_ready(false);
+ 	window_exit();
+ }
+ 
+diff --git a/src/osd/sdl/window.cpp b/src/osd/sdl/window.cpp
+index 4ac482b15e6dd7f0bc8dd357b1b8163c22b99e85..9271735551b7a054501d0c5518a56f8d9b73551a 100644
+--- a/src/osd/sdl/window.cpp
++++ b/src/osd/sdl/window.cpp
+@@ -35,9 +35,11 @@
+ #include <sched.h>
+ 
+ #ifndef _MSC_VER
++#include <sys/resource.h>
+ #include <unistd.h>
+ #endif
+ 
++
+ #ifdef SDLMAME_WIN32
+ #include <windows.h>
+ #endif
+@@ -199,6 +201,20 @@ void sdl_window_info::notify_changed()
+ 	renderer().notify_changed();
+ }
+ 
++void sdl_window_info::notify_resized(int32_t width, int32_t height)
++{
++	m_pixel_width.store(width, std::memory_order_relaxed);
++	m_pixel_height.store(height, std::memory_order_relaxed);
++	renderer().notify_changed();
++}
++
++bool sdl_window_info::async_presenter_busy()
++{
++	if (!m_async_present_active)
++		return false;
++	std::unique_lock<std::mutex> lock(m_present_mutex, std::try_to_lock);
++	return !lock.owns_lock() || m_present_pending || m_present_busy;
++}
+ 
+ //============================================================
+ //  sdlwindow_toggle_full_screen
+@@ -790,61 +806,47 @@ void sdl_window_info::update()
+ 
+ 		if (m_rendered_event.wait(event_wait_ticks))
+ 		{
+-			std::unique_lock<std::mutex> present_lock;
+ 			if (m_async_present_active)
+ 			{
+-				present_lock = std::unique_lock<std::mutex>(m_present_mutex, std::try_to_lock);
++				std::unique_lock<std::mutex> present_lock(m_present_mutex, std::try_to_lock);
+ 				if (!present_lock.owns_lock() || m_present_pending || m_present_busy)
+ 				{
+ 					m_rendered_event.set();
+ 					return;
+ 				}
++				m_present_pending = true;
++				present_lock.unlock();
++				m_present_condition.notify_one();
+ 			}
+-
+-			const int update = 1;
+-			if (!renderer().ready_for_frame())
++			else
+ 			{
+-				m_rendered_event.set();
+-				return;
+-			}
+-
+-			// ensure the target bounds are up-to-date, and then get the primitives
+-
+-			render_primitive_list &primlist = *renderer().get_primitives();
+-			profile_stage(2);
+-
+-			// and redraw now
++				const int update = 1;
++				if (!renderer().ready_for_frame())
++				{
++					m_rendered_event.set();
++					return;
++				}
+ 
+-			// Check whether window has vector screens
++				// ensure the target bounds are up-to-date, and then get the primitives
++				render_primitive_list *const primlist = renderer().get_primitives();
++				profile_stage(2);
+ 
+-			{
++				// Check whether window has vector screens
+ 				const device_video_output_interface *screen = video_output_interface_enumerator(machine().root_device()).byindex(index());
+-				if ((screen != nullptr) && (screen->is_vector()))
++				if ((screen != nullptr) && screen->is_vector())
+ 					renderer().set_flags(osd_renderer::FLAG_HAS_VECTOR_SCREEN);
+ 				else
+ 					renderer().clear_flags(osd_renderer::FLAG_HAS_VECTOR_SCREEN);
+-			}
+-
+-			m_primlist = &primlist;
+ 
+-			if (m_primlist == nullptr)
+-			{
+-				// if no bitmap, just fill
+-			}
+-			else
+-			{
+-				// otherwise, render with our drawing system
+-				if (m_async_present_active)
++				m_primlist = primlist;
++				if (m_primlist != nullptr)
+ 				{
+-					m_present_pending = true;
+-					present_lock.unlock();
+-					m_present_condition.notify_one();
++					if (video_config.perftest)
++						measure_fps(update);
++					else
++						renderer().draw(update);
++					profile_stage(3);
+ 				}
+-				else if (video_config.perftest)
+-					measure_fps(update);
+-				else
+-					renderer().draw(update);
+-				profile_stage(3);
+ 			}
+ 
+ 			// all done, ready for next
+@@ -1008,6 +1010,10 @@ int sdl_window_info::complete_create()
+ 	}
+ 
+ 	set_platform_window(sdlwindow);
++	int initial_width, initial_height;
++	SDL_GetWindowSize(sdlwindow, &initial_width, &initial_height);
++	m_pixel_width.store(initial_width, std::memory_order_relaxed);
++	m_pixel_height.store(initial_height, std::memory_order_relaxed);
+ 	renderer_create();
+ 
+ 	if (fullscreen() && video_config.switchres)
+@@ -1111,6 +1117,9 @@ void sdl_window_info::async_present_loop()
+ 	// never inherit that policy and compete with the emulation timeline.
+ 	sched_param parameters { };
+ 	pthread_setschedparam(pthread_self(), SCHED_OTHER, &parameters);
++#ifndef _MSC_VER
++	setpriority(PRIO_PROCESS, 0, 19);
++#endif
+ 
+ 	bool first_present = true;
+ 	for (;;)
+@@ -1123,7 +1132,17 @@ void sdl_window_info::async_present_loop()
+ 		m_present_busy = true;
+ 		lock.unlock();
+ 
+-		renderer().draw(1);
++		// Primitive generation includes layout artwork scaling and must stay on
++		// this non-real-time worker along with OpenGL drawing/presentation.
++		render_primitive_list *const primlist = renderer().get_primitives();
++		const device_video_output_interface *screen = video_output_interface_enumerator(machine().root_device()).byindex(index());
++		if ((screen != nullptr) && screen->is_vector())
++			renderer().set_flags(osd_renderer::FLAG_HAS_VECTOR_SCREEN);
++		else
++			renderer().clear_flags(osd_renderer::FLAG_HAS_VECTOR_SCREEN);
++		m_primlist = primlist;
++		if (m_primlist != nullptr)
++			renderer().draw(1);
+ 		if (first_present)
+ 		{
+ 			first_present = false;
+@@ -1388,6 +1407,13 @@ osd_dim sdl_window_info::get_size()
+ 	return osd_dim(w, h);
+ }
+ 
++osd_dim sdl_window_info::get_size_pixels()
++{
++	int32_t const width = m_pixel_width.load(std::memory_order_relaxed);
++	int32_t const height = m_pixel_height.load(std::memory_order_relaxed);
++	return (width > 0 && height > 0) ? osd_dim(width, height) : get_size();
++}
++
+ 
+ //============================================================
+ //  get_max_bounds
+@@ -1491,6 +1517,8 @@ sdl_window_info::sdl_window_info(
+ 	// Following three are used by input code to defer resizes
+ 	, m_minimum_dim(0, 0)
+ 	, m_windowed_dim(0, 0)
++	, m_pixel_width(0)
++	, m_pixel_height(0)
+ 	, m_rendered_event(0, 1)
+ 	, m_async_present_requested([]()
+ 		{
+diff --git a/src/osd/sdl/window.h b/src/osd/sdl/window.h
+index 22f2a7c41e78b59993622ec2cee1584b0ef586ef..aed1fffedb304b16dd9f33edb3e36b08aea8c56a 100644
+--- a/src/osd/sdl/window.h
++++ b/src/osd/sdl/window.h
+@@ -16,6 +16,7 @@
+ 
+ #include <SDL2/SDL.h>
+ 
++#include <atomic>
+ #include <chrono>
+ #include <condition_variable>
+ #include <cstdint>
+@@ -56,6 +57,7 @@ public:
+ 	void hide_pointer() override;
+ 
+ 	virtual osd_dim get_size() override;
++	virtual osd_dim get_size_pixels() override;
+ 
+ 	int window_init();
+ 
+@@ -63,6 +65,8 @@ public:
+ 	void modify_prescale(int dir);
+ 	void resize(int32_t width, int32_t height);
+ 	void notify_changed();
++	void notify_resized(int32_t width, int32_t height);
++	bool async_presenter_busy();
+ 
+ 	int xy_to_render_target(int x, int y, int *xt, int *yt);
+ 
+@@ -117,6 +121,8 @@ private:
+ 	// dimensions
+ 	osd_dim             m_minimum_dim;
+ 	osd_dim             m_windowed_dim;
++	std::atomic<int32_t> m_pixel_width;
++	std::atomic<int32_t> m_pixel_height;
+ 
+ 	// rendering info
+ 	osd_event           m_rendered_event;

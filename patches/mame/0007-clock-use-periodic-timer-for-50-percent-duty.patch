@@ -1,0 +1,32 @@
+diff --git a/src/devices/machine/clock.cpp b/src/devices/machine/clock.cpp
+index 670dfba0..37c234d6 100644
+--- a/src/devices/machine/clock.cpp
++++ b/src/devices/machine/clock.cpp
+@@ -113,7 +113,17 @@ TIMER_CALLBACK_MEMBER(clock_device::clock_init)
+ 	}
+ 
+ 	attotime next = m_signal ? m_thigh : m_tlow;
+-	if (next < m_timer_tick->remaining())
++	if ((m_thigh == m_tlow) && !next.is_zero())
++	{
++		// A 50% duty clock has the same delay after every edge.  Use the
++		// scheduler's periodic timer support instead of removing and reinserting
++		// this timer in the queue for every transition.
++		attotime first = m_timer_tick->remaining();
++		if (next < first)
++			first = next;
++		m_timer_tick->adjust(first, 0, next);
++	}
++	else if (next < m_timer_tick->remaining())
+ 		m_timer_tick->adjust(next);
+ }
+ 
+@@ -126,6 +136,7 @@ TIMER_CALLBACK_MEMBER(clock_device::clock_tick)
+ 	else
+ 		m_signal ^= 1;
+ 
+-	m_timer_tick->adjust(m_signal ? m_thigh : m_tlow);
++	if (m_thigh != m_tlow)
++		m_timer_tick->adjust(m_signal ? m_thigh : m_tlow);
+ 	output();
+ }

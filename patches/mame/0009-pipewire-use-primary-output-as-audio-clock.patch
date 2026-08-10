@@ -1,0 +1,34 @@
+diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pipewire_sound.cpp
+index 94e0c464..d117642b 100644
+--- a/src/osd/modules/sound/pipewire_sound.cpp
++++ b/src/osd/modules/sound/pipewire_sound.cpp
+@@ -1031,18 +1031,18 @@ void sound_pipewire::main_update()
+ 
+ 	while (m_realtime_pacing)
+ 	{
+-		bool room = true;
+-		for (const auto &[id, stream] : m_streams)
+-		{
+-			if (stream.m_is_output && (stream.m_buffer.available() > stream.m_prebuffer_frames))
+-			{
+-				room = false;
+-				break;
+-			}
+-		}
+-		if (room)
++		auto const primary = m_streams.find(m_primary_output_id);
++		if ((primary == m_streams.end()) ||
++				(primary->second.m_buffer.available() <= primary->second.m_prebuffer_frames))
+ 			break;
+-		pw_thread_loop_wait(m_loop);
++
++		// One PipeWire stream is the audio clock. Waiting for every auxiliary
++		// MPC output lets a delayed secondary stream stall the audible primary.
++		// A short timeout also prevents a missed callback signal from stalling
++		// the emulation thread indefinitely.
++		timespec deadline;
++		pw_thread_loop_get_time(m_loop, &deadline, 250'000);
++		pw_thread_loop_timed_wait_full(m_loop, &deadline);
+ 	}
+ 	pw_thread_loop_unlock(m_loop);
+ }

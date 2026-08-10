@@ -143,7 +143,7 @@ four-quantum prebuffer (5.33 ms at 64/48 kHz). This avoids independently
 dropping or repeating samples to reconcile the host and emulator clocks.
 
 The default desktop video path is the complete MPC panel, rendered with
-bilinear OpenGL at a non-maximized 1240x894. The OpenGL path hands completed
+bilinear OpenGL in a maximized window. The OpenGL path hands completed
 primitive lists to a low-priority presenter thread without waiting and drops a
 visual frame if the presenter is busy. The SDL software path keeps SDL texture
 upload and presentation on the main thread, as required by SDL, while a
@@ -151,6 +151,32 @@ low-priority worker rasterizes primitives into double-buffered pixel storage.
 It also drops a visual frame before primitive-list generation if the worker is
 busy. Both `-scalemode none` and `-scalemode hwbest` pass the live timing test
 on the accelerated desktop display.
+
+The launcher also isolates stock SDL's desktop event loop from the emulation
+timeline on Linux. SDL initialization and event pumping stay on the process
+main thread at normal low priority, while MAME's frontend/emulation worker
+inherits the requested real-time policy. Interactive window resizing can block
+SDL for tens of milliseconds without pausing emulated audio. This uses the
+system SDL unchanged; no custom SDL build or runtime library override is
+required. Set `MPC_SDL_EXTERNAL_EVENT_LOOP=0` only for comparison with the
+original single-threaded event path.
+
+Audio-master pacing follows the main speaker output only. The MPC's auxiliary
+outputs remain synchronized, but a delayed auxiliary PipeWire callback cannot
+hold the emulation timeline or underrun the audible output. A bounded wait also
+prevents a missed callback notification from stalling the emulation thread.
+
+Profiling the normal-speed Logic-project playback path shows that rendering is
+not the steady-state bottleneck once asynchronous presentation is enabled. The
+full panel spends roughly 0.8--1.0 ms drawing a typical synchronous OpenGL
+frame on this workstation, while the LCD-only view spends roughly 0.13 ms.
+Most emulator CPU time is instead in the device scheduler and the MPC's two
+high-rate MIDI UART baud clocks. Patch 0007 preserves every clock edge but uses
+MAME's periodic timer support for 50-percent-duty clocks, eliminating a timer
+queue remove/reinsert on every transition. In the matched playback profile,
+`emu_timer::adjust` fell from 10.16 percent of samples to zero and total sampled
+CPU time fell by about 7.5 percent without changing the reference PCM or live
+timing result.
 
 For a compact LCD-only view (for example on a Raspberry Pi display or for
 diagnostics), use:
@@ -160,7 +186,9 @@ MPC_VIEW_NAME='Screen 0' MPC_WINDOW_RESOLUTION=1240x300 scripts/run-mpc.sh
 ```
 
 Override `MPC_VIEW_NAME`, `MPC_WINDOW_RESOLUTION`, `MPC_FILTER_MODE`,
-`MPC_VIDEO_MODE`, or `MPC_ASYNC_PRESENT` as needed.
+`MPC_VIDEO_MODE`, `MPC_ASYNC_PRESENT`, or `MPC_MAXIMIZE` as needed. Set
+`MPC_MAXIMIZE=0 MPC_WINDOW_RESOLUTION=1240x894` for a fixed-size desktop
+window.
 
 Run the deterministic offline and full live MPC2000XL timing regressions with:
 

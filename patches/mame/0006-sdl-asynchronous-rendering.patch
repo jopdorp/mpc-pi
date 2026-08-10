@@ -503,7 +503,7 @@ index 0e395fd1..7180bb98 100644
  
  		osd_ticks_t event_wait_ticks;
  		if (video_config.waitvsync && video_config.syncrefresh)
-@@ -749,11 +790,25 @@ void sdl_window_info::update()
+@@ -749,11 +790,28 @@ void sdl_window_info::update()
  
  		if (m_rendered_event.wait(event_wait_ticks))
  		{
@@ -512,7 +512,10 @@ index 0e395fd1..7180bb98 100644
 +			{
 +				present_lock = std::unique_lock<std::mutex>(m_present_mutex, std::try_to_lock);
 +				if (!present_lock.owns_lock() || m_present_pending || m_present_busy)
++				{
++					m_rendered_event.set();
 +					return;
++				}
 +			}
 +
  			const int update = 1;

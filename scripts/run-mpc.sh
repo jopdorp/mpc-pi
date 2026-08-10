@@ -16,8 +16,10 @@ timing_master=${MAME_TIMING_MASTER:-audio}
 video_mode=${MPC_VIDEO_MODE:-opengl}
 view_name=${MPC_VIEW_NAME:-Default Layout}
 filter_mode=${MPC_FILTER_MODE:-1}
-window_resolution=${MPC_WINDOW_RESOLUTION:-1240x894}
+window_resolution=${MPC_WINDOW_RESOLUTION:-auto}
 async_present=${MPC_ASYNC_PRESENT:-1}
+maximize_window=${MPC_MAXIMIZE:-1}
+external_event_loop=${MPC_SDL_EXTERNAL_EVENT_LOOP:-1}
 bios_name=${MAME_BIOS:-}
 
 if (( $# > 0 )); then shift; fi
@@ -76,6 +78,23 @@ case "$filter_mode" in
         ;;
 esac
 
+case "$maximize_window" in
+    0) maximize_option=-nomaximize ;;
+    1) maximize_option=-maximize ;;
+    *)
+        printf 'error: MPC_MAXIMIZE must be 0 or 1\n' >&2
+        exit 2
+        ;;
+esac
+
+case "$external_event_loop" in
+    0|1) ;;
+    *)
+        printf 'error: MPC_SDL_EXTERNAL_EVENT_LOOP must be 0 or 1\n' >&2
+        exit 2
+        ;;
+esac
+
 case "$timing_master" in
     video)
         clock_environment=(-u MAME_PIPEWIRE_AUDIO_CLOCK)
@@ -105,11 +124,12 @@ printf 'Starting %s BIOS %s with native PipeWire; PIPEWIRE_LATENCY=%s (~%s ms pe
 printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s (PipeWire runs above it at RR 90)\n' \
     "$mame_cpuset" "$mame_nice" "$mame_rt_priority"
 printf 'Timing master: %s\n' "$timing_master"
-printf 'Video: %s, async=%s, view=%s, resolution=%s, bilinear=%s\n' \
-    "$video_mode" "$async_present" "$view_name" "$window_resolution" "$filter_mode"
+printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, resolution=%s, bilinear=%s\n' \
+    "$video_mode" "$async_present" "$external_event_loop" "$view_name" "$window_resolution" "$filter_mode"
 
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
     env "${clock_environment[@]}" MAME_ASYNC_PRESENT="$async_present" \
+    MAME_SDL_EXTERNAL_EVENT_LOOP="$external_event_loop" \
     PIPEWIRE_LATENCY="$pipewire_latency" "$mame_bin" "$system_name" \
     -rompath "$rom_dir" \
     -bios "$bios_name" \
@@ -124,7 +144,7 @@ exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_
 	-video "$video_mode" \
 	-view "$view_name" \
 	"$filter_option" \
-	-nomaximize \
+	"$maximize_option" \
 	-resolution "$window_resolution" \
     "$throttle_option" \
     "$@"

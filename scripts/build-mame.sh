@@ -12,6 +12,9 @@ mame_patches=(
     "$repo_root/patches/mame/0004-pipewire-audio-clock-and-low-latency-buffer.patch"
     "$repo_root/patches/mame/0005-skip-emulation-warning-with-skip-gameinfo.patch"
     "$repo_root/patches/mame/0006-sdl-asynchronous-rendering.patch"
+    "$repo_root/patches/mame/0007-clock-use-periodic-timer-for-50-percent-duty.patch"
+    "$repo_root/patches/mame/0008-sdl-isolate-event-loop-from-emulation.patch"
+    "$repo_root/patches/mame/0009-pipewire-use-primary-output-as-audio-clock.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then
