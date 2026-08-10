@@ -1,0 +1,30 @@
+diff --git a/src/mame/akai/mpc60.cpp b/src/mame/akai/mpc60.cpp
+index 44ba8da4..a50c21a2 100644
+--- a/src/mame/akai/mpc60.cpp
++++ b/src/mame/akai/mpc60.cpp
+@@ -735,6 +735,12 @@ ROM_START(mpc60)
+ 	ROMX_LOAD("mpc60_v1-12_1.ic4", 0x20000, 0x10000, CRC(f202dbb1) SHA1(6fd82224a99b52b6c414b88d5c920abda32ffa32), ROM_BIOS(1) | ROM_SKIP(1))
+ 	ROMX_LOAD("mpc60_v1-12_3.ic5", 0x20001, 0x10000, CRC(ba5a1640) SHA1(1f9f49c49a3682b9a44d614ac411a7c043df399e), ROM_BIOS(1) | ROM_SKIP(1))
+ 
++	ROM_SYSTEM_BIOS(2, "vimana315", "Vimana 3.15")
++	ROMX_LOAD("mpc60_vimana_3.15_2.bin", 0x00000, 0x10000, CRC(85797e9d) SHA1(fcc090cbea07506acd893a55f26a735eac18bd99), ROM_BIOS(2) | ROM_SKIP(1))
++	ROMX_LOAD("mpc60_vimana_3.15_4.bin", 0x00001, 0x10000, CRC(d32ae74a) SHA1(7545f1fc400f41f4f20e28663be5bbc0b7622f1f), ROM_BIOS(2) | ROM_SKIP(1))
++	ROMX_LOAD("mpc60_vimana_3.15_1.bin", 0x20000, 0x10000, CRC(7143089a) SHA1(dd3bee5af72e0fe9ca08dd65aa9c90f61739a181), ROM_BIOS(2) | ROM_SKIP(1))
++	ROMX_LOAD("mpc60_vimana_3.15_3.bin", 0x20001, 0x10000, CRC(fcf8e1ed) SHA1(aba129a8bbf6e2de1ad862afeb3731d42a324519), ROM_BIOS(2) | ROM_SKIP(1))
++
+ 	ROM_REGION16_LE(0x10000, "waves", 0)
+ 	ROM_LOAD16_BYTE("mpc60_voice_1_v1-0.ic17", 0x00000, 0x08000, CRC(b8fdfe3e) SHA1(c2f0e1d8813d4178d2f883a3f3e461e036b56229)) // lowest nibble is unused
+ 	ROM_LOAD16_BYTE("mpc60_voice_2_v1-0.ic18", 0x00001, 0x08000, CRC(42f8e0a6) SHA1(a22dbefb9dafbb0c4095fd0bf4e63e67b5ec3b95))
+@@ -766,6 +772,12 @@ ROM_START(mpc60scsi)
+ 	ROMX_LOAD("mpc60_v1-12_1.ic4", 0x20000, 0x10000, CRC(f202dbb1) SHA1(6fd82224a99b52b6c414b88d5c920abda32ffa32), ROM_BIOS(2) | ROM_SKIP(1))
+ 	ROMX_LOAD("mpc60_v1-12_3.ic5", 0x20001, 0x10000, CRC(ba5a1640) SHA1(1f9f49c49a3682b9a44d614ac411a7c043df399e), ROM_BIOS(2) | ROM_SKIP(1))
+ 
++	ROM_SYSTEM_BIOS(3, "vimana315", "Vimana 3.15")
++	ROMX_LOAD("mpc60_vimana_3.15_2.bin", 0x00000, 0x10000, CRC(85797e9d) SHA1(fcc090cbea07506acd893a55f26a735eac18bd99), ROM_BIOS(3) | ROM_SKIP(1))
++	ROMX_LOAD("mpc60_vimana_3.15_4.bin", 0x00001, 0x10000, CRC(d32ae74a) SHA1(7545f1fc400f41f4f20e28663be5bbc0b7622f1f), ROM_BIOS(3) | ROM_SKIP(1))
++	ROMX_LOAD("mpc60_vimana_3.15_1.bin", 0x20000, 0x10000, CRC(7143089a) SHA1(dd3bee5af72e0fe9ca08dd65aa9c90f61739a181), ROM_BIOS(3) | ROM_SKIP(1))
++	ROMX_LOAD("mpc60_vimana_3.15_3.bin", 0x20001, 0x10000, CRC(fcf8e1ed) SHA1(aba129a8bbf6e2de1ad862afeb3731d42a324519), ROM_BIOS(3) | ROM_SKIP(1))
++
+ 	ROM_REGION16_LE(0x10000, "waves", 0)
+ 	ROM_LOAD16_BYTE("mpc60_voice_1_v1-0.ic17", 0x00000, 0x08000, CRC(b8fdfe3e) SHA1(c2f0e1d8813d4178d2f883a3f3e461e036b56229)) // lowest nibble is unused
+ 	ROM_LOAD16_BYTE("mpc60_voice_2_v1-0.ic18", 0x00001, 0x08000, CRC(42f8e0a6) SHA1(a22dbefb9dafbb0c4095fd0bf4e63e67b5ec3b95))

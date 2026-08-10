@@ -1,6 +1,33 @@
 # MPC Pi
 
-Yes. Here’s the **complete project plan as it stands**, with the software version first and FPGA as the later path.
+A compact, standalone MPC-style instrument built around an MPD pad assembly, with a software implementation first and an FPGA implementation as the later path.
+
+## Current implementation
+
+Phase 1 now has reproducible tooling for a focused MAME build and ROM audit:
+
+```bash
+./scripts/bootstrap-mame.sh
+./scripts/build-mame.sh
+./scripts/test-mame.sh
+```
+
+See [Phase 1: MAME baseline](docs/phase-1.md) for firmware placement, exact test scope, and the native PipeWire latency launcher.
+
+The selected MPC3000 listening default is MIDI Mark Demo Disk 1, sequence
+`96BPM-SNOOPBLAK`. With the downloaded disk in place, launch it at the default
+128-frame PipeWire period with:
+
+```bash
+./scripts/listen.sh
+```
+
+Pass another PipeWire period as the first argument, for example
+`./scripts/listen.sh 256`. Loading is accelerated; playback runs at normal
+speed. The patched launcher suppresses MAME's startup warning when
+`-skip_gameinfo` is used, so the audition starts without a manual key press.
+
+## Project plan
 
 ## Goal
 
@@ -79,23 +106,52 @@ MAME already treats the data entry control as an `IPT_DIAL`; the current 2000XL 
 
 This is probably the **single most important experiment**.
 
-Use MAME's **PortAudio** backend rather than SDL. MAME explicitly supports fractional `-audio_latency` settings with PortAudio; one MAME latency unit represents 20 ms. SDL/Pulse/PipeWire don't support this particular latency control. ([[MAME Documentation](https://docs.mamedev.org/commandline/commandline-all.html)][3])
+Use MAME's native **PipeWire** backend. The previous PortAudio test selected the
+ALSA compatibility device rather than opening a native low-latency stream, and
+MAME's PipeWire backend deliberately ignores `-audio_latency`. Request the
+per-client period from PipeWire instead with `PIPEWIRE_LATENCY`.
 
 So test approximately:
 
 ```text
--audio_latency 0.5     ~10 ms
--audio_latency 0.25     ~5 ms
--audio_latency 0.125    ~2.5 ms
--audio_latency 0.10     ~2 ms
+PIPEWIRE_LATENCY=256/48000     ~5.33 ms
+PIPEWIRE_LATENCY=128/48000     ~2.67 ms
+PIPEWIRE_LATENCY=64/48000      ~1.33 ms
+PIPEWIRE_LATENCY=32/48000      ~0.67 ms
 ```
 
 I'd also test at **44.1 kHz**, since that's the natural MPC domain:
 
 ```text
--sound portaudio
--samplerate 44100
+PIPEWIRE_LATENCY=128/48000 .cache/mame/mpc mpc2000xl \
+  -sound pipewire -samplerate 44100
 ```
+
+The launcher wraps this as `scripts/run-mpc.sh <machine> <frames>`. It defaults
+to 128 frames. `pw-jack` is for JACK clients running on PipeWire and is not
+needed for MAME's native PipeWire backend.
+
+The launcher also uses `nice -10` and round-robin real-time scheduling at
+priority 20. PipeWire runs at RR 90 on this host, so its processing remains
+higher priority. Override these with `MAME_NICE` and `MAME_RT_PRIORITY` when
+needed.
+
+The launcher enables the patched PipeWire audio clock and disables MAME's
+independent video throttle. Fast loading remains unpaced, but at normal speed
+the complete group of MAME output streams is paced from PipeWire with a 4 ms
+prebuffer. This avoids independently dropping or repeating samples to reconcile
+the host and emulator clocks.
+
+Run the MPC2000XL timing regression with:
+
+```bash
+./scripts/diagnostics/test-mpc2000xl-timing.sh
+```
+
+It requires two byte-identical reference renders (0.00-sample run-to-run
+jitter), zero steady-state PipeWire buffer corrections while a loaded project
+plays, and a live delivered-frame rate within one 48-frame PipeWire period of
+48 kHz.
 
 For every setting record:
 

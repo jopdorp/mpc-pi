@@ -1,0 +1,34 @@
+diff --git a/src/devices/video/hd61830.cpp b/src/devices/video/hd61830.cpp
+index d499b873..0f0fc020 100644
+--- a/src/devices/video/hd61830.cpp
++++ b/src/devices/video/hd61830.cpp
+@@ -81,7 +81,16 @@ hd61830_device::hd61830_device(const machine_config &mconfig, const char *tag, d
+ 	device_video_interface(mconfig, *this),
+ 	m_read_rd(*this, 0),
+ 	m_bf(false),
++	m_ir(0),
++	m_mcr(0),
++	m_dor(0),
++	m_dsa(0),
+ 	m_cac(0),
++	m_vp(0),
++	m_hp(0),
++	m_hn(0),
++	m_nx(0),
++	m_cp(0),
+ 	m_blink(0),
+ 	m_cursor(0),
+ 	m_space_config("videoram", ENDIANNESS_LITTLE, 8, 16, 0, address_map_constructor(FUNC(hd61830_device::hd61830), this)),
+@@ -461,6 +470,12 @@ void hd61830_device::draw_char(bitmap_ind16 &bitmap, const rectangle &cliprect,
+ 
+ void hd61830_device::update_text(bitmap_ind16 &bitmap, const rectangle &cliprect)
+ {
++	if (!m_vp)
++	{
++		bitmap.fill(0, cliprect);
++		return;
++	}
++
+ 	uint16_t ma = 0;
+ 	int rows = m_nx / m_vp;
+ 	uint16_t rac1 = m_dsa & 0xfff;

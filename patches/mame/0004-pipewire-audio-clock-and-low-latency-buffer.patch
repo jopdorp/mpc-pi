@@ -1,0 +1,232 @@
+diff --git a/src/emu/sound.h b/src/emu/sound.h
+index d454682c..15dda34d 100644
+--- a/src/emu/sound.h
++++ b/src/emu/sound.h
+@@ -123,7 +123,7 @@ public:
+ 		std::vector<channel_mapping> m_channel_mappings;
+ 	};
+ 
+-	static constexpr int STREAMS_UPDATE_FREQUENCY = 50;
++	static constexpr int STREAMS_UPDATE_FREQUENCY = 500;
+ 
+ 	// construction/destruction
+ 	sound_manager(running_machine &machine);
+diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pipewire_sound.cpp
+index 2e0c6475..1876a155 100644
+--- a/src/osd/modules/sound/pipewire_sound.cpp
++++ b/src/osd/modules/sound/pipewire_sound.cpp
+@@ -10,6 +10,8 @@
+ 
+ #include "sound_module.h"
+ #include "modules/osdmodule.h"
++#include "emu.h"
++#include "video.h"
+ 
+ #ifndef NO_USE_PIPEWIRE
+ 
+@@ -24,6 +26,9 @@
+ #include <spa/param/audio/raw-utils.h>
+ #include <rapidjson/document.h>
+ 
++#include <chrono>
++#include <cstdlib>
++#include <cstring>
+ #include <map>
+ 
+ class sound_pipewire : public osd_module, public sound_module
+@@ -49,6 +54,7 @@ public:
+ 	virtual void stream_close(uint32_t id) override;
+ 	virtual void stream_sink_update(uint32_t id, const int16_t *buffer, int samples_this_frame) override;
+ 	virtual void stream_source_update(uint32_t id, int16_t *buffer, int samples_this_frame) override;
++	virtual void begin_update() override;
+ 
+ private:
+ 	struct position_info {
+@@ -98,8 +104,14 @@ private:
+ 		pw_stream *m_stream;
+ 		std::vector<float> m_volumes;
+ 		abuffer m_buffer;
+-
+-		stream_info(sound_pipewire *wire, bool is_output, uint32_t osdid, uint32_t channels, uint32_t rate) : m_wire(wire), m_is_output(is_output), m_wait_stream(true), m_osdid(osdid), m_channels(channels), m_stream(nullptr), m_buffer(channels, rate) {}
++		uint32_t m_last_underruns;
++		uint32_t m_last_overruns;
++		uint32_t m_updates_since_report;
++		uint32_t m_prebuffer_frames;
++		bool m_prebuffering;
++		bool m_buffer_stats_ready;
++
++		stream_info(sound_pipewire *wire, bool is_output, uint32_t osdid, uint32_t channels, uint32_t rate) : m_wire(wire), m_is_output(is_output), m_wait_stream(true), m_osdid(osdid), m_channels(channels), m_stream(nullptr), m_buffer(channels, rate), m_last_underruns(0), m_last_overruns(0), m_updates_since_report(0), m_prebuffer_frames((rate + 249) / 250), m_prebuffering(true), m_buffer_stats_ready(false) {}
+ 	};
+ 
+ 	static const pw_core_events     core_events;
+@@ -113,6 +125,13 @@ private:
+ 	std::map<uint32_t, uint32_t> m_node_osdid_to_id;
+ 
+ 	std::map<uint32_t, stream_info> m_streams;
++	osd_common_t *m_osd = nullptr;
++	bool m_realtime_pacing = false;
++	bool m_audio_clock = false;
++	bool m_report_stats = false;
++	uint32_t m_primary_output_id = 0;
++	uint64_t m_realtime_generated_frames = 0;
++	std::chrono::steady_clock::time_point m_realtime_start;
+ 
+ 	pw_thread_loop *m_loop;
+ 	pw_context *m_context;
+@@ -479,6 +498,9 @@ int sound_pipewire::s_default_event_property(void *data, uint32_t subject, const
+ 
+ int sound_pipewire::init(osd_interface &osd, osd_options const &options)
+ {
++	m_osd = &downcast<osd_common_t &>(osd);
++	m_audio_clock = std::getenv("MAME_PIPEWIRE_AUDIO_CLOCK") != nullptr;
++	m_report_stats = std::getenv("MAME_PIPEWIRE_STATS") != nullptr;
+ 	spa_zero(m_core_listener);
+ 	spa_zero(m_registry_listener);
+ 	spa_zero(m_default_listener);
+@@ -610,8 +632,20 @@ void sound_pipewire::stream_sink_event_process(stream_info *stream)
+ 		return;
+ 
+ 	spa_buffer *sbuf = buffer->buffer;
+-	stream->m_buffer.get((int16_t *)(sbuf->datas[0].data), buffer->requested);
+-
++	int16_t *const output = (int16_t *)(sbuf->datas[0].data);
++	if (stream->m_prebuffering && (stream->m_buffer.available() < stream->m_prebuffer_frames))
++	{
++		std::memset(output, 0, buffer->requested * stream->m_channels * sizeof(*output));
++	}
++	else
++	{
++		stream->m_prebuffering = false;
++		const uint32_t underruns = stream->m_buffer.underruns();
++		stream->m_buffer.get(output, buffer->requested);
++		if (stream->m_buffer.underruns() != underruns)
++			stream->m_prebuffering = true;
++	}
++	pw_thread_loop_signal(stream->m_wire->m_loop, false);
+ 	sbuf->datas[0].chunk->offset = 0;
+ 	sbuf->datas[0].chunk->stride = stream->m_channels * 2;
+ 	sbuf->datas[0].chunk->size = buffer->requested * stream->m_channels * 2;
+@@ -681,6 +715,8 @@ uint32_t sound_pipewire::stream_sink_open(uint32_t node, std::string name, uint3
+ 
+ 	uint32_t id = m_stream_current_id++;
+ 	auto &stream = m_streams.emplace(id, stream_info(this, true, id, snode.m_sinks, rate)).first->second;
++	if (!m_primary_output_id)
++		m_primary_output_id = id;
+ 
+ 	stream.m_stream = pw_stream_new_simple(pw_thread_loop_get_loop(m_loop),
+ 										   name.c_str(),
+@@ -801,6 +837,15 @@ void sound_pipewire::stream_close(uint32_t id)
+ 		return;
+ 	}
+ 	stream_info &stream = si->second;
++	if (m_report_stats && stream.m_is_output)
++	{
++		osd_printf_warning(
++			"PipeWire: final audio buffer counters on stream %u: underruns=%u, overruns=%u, queued=%u frames\n",
++			id,
++			stream.m_buffer.underruns(),
++			stream.m_buffer.overruns(),
++			stream.m_buffer.available());
++	}
+ 	pw_stream_destroy(stream.m_stream);
+ 	m_streams.erase(si);
+ 	pw_thread_loop_unlock(m_loop);
+@@ -814,7 +859,84 @@ void sound_pipewire::stream_sink_update(uint32_t id, const int16_t *buffer, int
+ 		pw_thread_loop_unlock(m_loop);
+ 		return;
+ 	}
+-	si->second.m_buffer.push(buffer, samples_this_frame);
++	stream_info &stream = si->second;
++	if (m_realtime_pacing && (id == m_primary_output_id))
++		m_realtime_generated_frames += samples_this_frame;
++	stream.m_buffer.push(buffer, samples_this_frame);
++	const uint32_t underruns = stream.m_buffer.underruns();
++	const uint32_t overruns = stream.m_buffer.overruns();
++	stream.m_updates_since_report++;
++	if (m_report_stats && stream.m_buffer_stats_ready && (stream.m_updates_since_report >= 500))
++	{
++		osd_printf_warning(
++			"PipeWire: MAME audio buffer correction on stream %u: underruns=%u (+%u), overruns=%u (+%u), queued=%u frames\n",
++			id,
++			underruns,
++			underruns - stream.m_last_underruns,
++			overruns,
++			overruns - stream.m_last_overruns,
++			stream.m_buffer.available());
++		if (m_realtime_pacing && (id == m_primary_output_id))
++		{
++			const auto wall_us = std::chrono::duration_cast<std::chrono::microseconds>(
++				std::chrono::steady_clock::now() - m_realtime_start).count();
++			osd_printf_warning(
++				"PipeWire: audio clock: generated=%llu, queued=%u, wall_us=%lld\n",
++				(unsigned long long)m_realtime_generated_frames,
++				stream.m_buffer.available(),
++				(long long)wall_us);
++		}
++	}
++	if (!stream.m_buffer_stats_ready || (stream.m_updates_since_report >= 500))
++	{
++		stream.m_buffer_stats_ready = true;
++		stream.m_updates_since_report = 0;
++		stream.m_last_underruns = underruns;
++		stream.m_last_overruns = overruns;
++	}
++	pw_thread_loop_unlock(m_loop);
++}
++
++void sound_pipewire::begin_update()
++{
++	const bool realtime_pacing = m_audio_clock && (m_osd->machine().video().speed_factor() <= 1100);
++	pw_thread_loop_lock(m_loop);
++	if (realtime_pacing != m_realtime_pacing)
++	{
++		m_realtime_pacing = realtime_pacing;
++		if (realtime_pacing)
++		{
++			if (m_report_stats)
++				osd_printf_warning("PipeWire: realtime audio-clock pacing started\n");
++			m_realtime_generated_frames = 0;
++			m_realtime_start = std::chrono::steady_clock::now();
++			for (auto &[id, stream] : m_streams)
++			{
++				if (!stream.m_is_output)
++					continue;
++				stream.m_buffer.clear();
++				stream.m_prebuffering = true;
++				stream.m_buffer_stats_ready = false;
++				stream.m_updates_since_report = 0;
++			}
++		}
++	}
++
++	while (m_realtime_pacing)
++	{
++		bool room = true;
++		for (const auto &[id, stream] : m_streams)
++		{
++			if (stream.m_is_output && (stream.m_buffer.available() > stream.m_prebuffer_frames))
++			{
++				room = false;
++				break;
++			}
++		}
++		if (room)
++			break;
++		pw_thread_loop_wait(m_loop);
++	}
+ 	pw_thread_loop_unlock(m_loop);
+ }
+ 
+diff --git a/src/osd/modules/sound/sound_module.h b/src/osd/modules/sound/sound_module.h
+index 8d735b46..e6bb4a4a 100644
+--- a/src/osd/modules/sound/sound_module.h
++++ b/src/osd/modules/sound/sound_module.h
+@@ -45,6 +45,8 @@ protected:
+ 		void push(const int16_t *data, uint32_t samples);
+ 		uint32_t channels() const noexcept { return m_channels; }
+ 		uint32_t available() const noexcept;
++		uint32_t underruns() const noexcept { return m_underruns; }
++		uint32_t overruns() const noexcept { return m_overruns; }
+ 
+ 	private:
+ 		struct buffer {

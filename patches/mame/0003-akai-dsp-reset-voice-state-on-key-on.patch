@@ -1,0 +1,16 @@
+diff --git a/src/devices/sound/l7a1045_l6028_dsp_a.cpp b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+index bd1fe109..1f0c9207 100644
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -586,6 +586,11 @@ void l7a1045_sound_device::control_w(uint16_t data)
+ 
+ 		vptr->frac = 0;
+ 		vptr->pos = 0;
++		vptr->env_volume = (m_regs[L6028_Volume_Env][m_cur_channel] & 0xffff'0000) >> 16;
++		vptr->env_pos = 0;
++		vptr->flt_freq = (m_regs[L6028_Filter_Env][m_cur_channel] & 0xffff'0000) >> 16;
++		vptr->flt_pos = 0;
++		vptr->l = vptr->b = 0;
+ 		m_key |= 1 << m_cur_channel;
+ 
+ 		recalc_loop_start(vptr);

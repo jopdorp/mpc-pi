@@ -1,4 +1,15 @@
+# Local build and test artifacts
+.cache/
+.firecrawl/
+results/
+roms/
 
+# MAME runtime directories (normally redirected under results/)
+cfg/
+diff/
+nvram/
+snap/
+sta/
 
-#Ignore vscode AI rules
+# Ignore VS Code AI rules
 .github/instructions/codacy.instructions.md
