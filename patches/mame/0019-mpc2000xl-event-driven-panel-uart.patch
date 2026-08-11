@@ -1,0 +1,427 @@
+diff --git a/src/devices/cpu/nec/v5x.cpp b/src/devices/cpu/nec/v5x.cpp
+index 59db898..ddf7f73 100644
+--- a/src/devices/cpu/nec/v5x.cpp
++++ b/src/devices/cpu/nec/v5x.cpp
+@@ -163,8 +163,23 @@ void device_v5x_interface::brc_update()
+ 	{
+ 		const int divider = (m_BRC < 2) ? 2 : m_BRC;
+ 		const int period = (device().clock() / 2) / divider;
++		const attotime interval = attotime::from_hz(period);
++		const attotime scheduler_now = device().machine().time();
++		const attotime write_time = (std::max)(downcast<nec_common_device &>(device()).local_time(), scheduler_now);
+ 
+-		m_brc_timer->adjust(attotime::from_hz(period), 0, attotime::from_hz(period));
++		if (m_direct_brc_timer_enabled)
++		{
++			m_brc_timer->adjust(attotime::never);
++			m_direct_brc_interval = interval;
++			m_direct_brc_frequency = period;
++			m_direct_brc_next = write_time + interval;
++			m_direct_brc_timer->adjust(attotime::never);
++			direct_brc_reschedule(scheduler_now);
++		}
++		else
++		{
++			m_brc_timer->adjust((write_time - scheduler_now) + interval, 0, interval);
++		}
+ 	}
+ }
+ 
+@@ -176,6 +191,61 @@ TIMER_DEVICE_CALLBACK_MEMBER(device_v5x_interface::brc_timer_tick)
+ 	m_scu->write_rxc(1);
+ }
+ 
++TIMER_CALLBACK_MEMBER(device_v5x_interface::direct_brc_timer_tick)
++{
++	const attotime now = device().machine().time();
++	direct_brc_advance(now);
++	direct_brc_reschedule(now);
++}
++
++void device_v5x_interface::direct_brc_advance(const attotime &now)
++{
++	while (m_direct_brc_next <= now)
++	{
++		m_scu->clock_cycle_high();
++		m_direct_brc_next += m_direct_brc_interval;
++	}
++}
++
++void device_v5x_interface::direct_brc_fast_forward(const attotime &now)
++{
++	if (m_direct_brc_next <= now)
++	{
++		const u64 clocks = (now - m_direct_brc_next).as_ticks(m_direct_brc_frequency) + 1;
++		m_direct_brc_next += m_direct_brc_interval * clocks;
++	}
++}
++
++void device_v5x_interface::direct_brc_reschedule(const attotime &now)
++{
++	m_direct_brc_timer->adjust(attotime::never);
++	const int clocks = m_scu->clocks_until_event();
++	if (!m_brc_enable || !clocks)
++		return;
++
++	const attotime target = m_direct_brc_next + (m_direct_brc_interval * (clocks - 1));
++	m_direct_brc_timer->adjust(target > now ? target - now : attotime::zero);
++}
++
++void device_v5x_interface::rxd_w(int state)
++{
++	const attotime now = device().machine().time();
++	m_direct_rxd_state = state ? 1 : 0;
++
++	if (!m_direct_brc_timer_enabled || !m_brc_enable)
++	{
++		m_scu->write_rxd(m_direct_rxd_state);
++		return;
++	}
++
++	if (m_scu->clock_idle())
++		direct_brc_fast_forward(now);
++	else
++		direct_brc_advance(now);
++	m_scu->write_rxd(m_direct_rxd_state);
++	direct_brc_reschedule(now);
++}
++
+ void device_v5x_interface::tclk_w(int state)
+ {
+ 	if (BIT(m_TCKS, 2))
+@@ -200,11 +270,20 @@ void device_v5x_interface::interface_pre_reset()
+ 
+ 	m_TCKS = 0x00;
+ 	m_brc_enable = false;
++	m_direct_brc_interval = attotime::never;
++	m_direct_brc_next = attotime::never;
++	m_direct_brc_frequency = 0;
++	m_direct_rxd_state = 1;
++	if (m_direct_brc_timer)
++		m_direct_brc_timer->adjust(attotime::never);
+ 	tcu_clock_update();
+ }
+ 
+ void device_v5x_interface::interface_post_start()
+ {
++	if (m_direct_brc_timer_enabled)
++		m_direct_brc_timer = device().timer_alloc(FUNC(device_v5x_interface::direct_brc_timer_tick), this);
++
+ 	device().save_item(NAME(m_OPSEL));
+ 	device().save_item(NAME(m_SULA));
+ 	device().save_item(NAME(m_TULA));
+@@ -214,6 +293,10 @@ void device_v5x_interface::interface_post_start()
+ 	device().save_item(NAME(m_TCKS));
+ 	device().save_item(NAME(m_BRC));
+ 	device().save_item(NAME(m_brc_enable));
++	device().save_item(NAME(m_direct_brc_interval));
++	device().save_item(NAME(m_direct_brc_next));
++	device().save_item(NAME(m_direct_brc_frequency));
++	device().save_item(NAME(m_direct_rxd_state));
+ }
+ 
+ void device_v5x_interface::interface_post_load()
+@@ -275,6 +358,11 @@ device_v5x_interface::device_v5x_interface(const machine_config &mconfig, nec_co
+ 	, m_icu(device, "icu")
+ 	, m_scu(device, "scu")
+ 	, m_brc_timer(device, "brc_timer")
++	, m_direct_brc_timer(nullptr)
++	, m_direct_brc_interval(attotime::never)
++	, m_direct_brc_next(attotime::never)
++	, m_direct_brc_frequency(0)
++	, m_direct_rxd_state(1)
+ 	, m_internal_io_config("internal_io", ENDIANNESS_LITTLE, is_16bit ? 16 : 8, INTERNAL_IO_ADDR_WIDTH, 0, address_map_constructor(FUNC(device_v5x_interface::remappable_io_map), this))
+ 	, m_tclk(0.0)
+ 	, m_OPSEL(0)
+@@ -285,6 +373,7 @@ device_v5x_interface::device_v5x_interface(const machine_config &mconfig, nec_co
+ 	, m_OPHA(0)
+ 	, m_TCKS(0)
+ 	, m_brc_enable(false)
++	, m_direct_brc_timer_enabled(false)
+ {
+ }
+ 
+@@ -687,6 +776,8 @@ void v53_device::SCTL_w(u8 data)
+ 	else
+ 	{
+ 		m_brc_timer->adjust(attotime::never, 0, attotime::never);
++		if (m_direct_brc_timer)
++			m_direct_brc_timer->adjust(attotime::never);
+ 	}
+ }
+ 
+diff --git a/src/devices/cpu/nec/v5x.h b/src/devices/cpu/nec/v5x.h
+index 6b2f183..6b373d3 100644
+--- a/src/devices/cpu/nec/v5x.h
++++ b/src/devices/cpu/nec/v5x.h
+@@ -20,6 +20,7 @@ public:
+ 	// TCU
+ 	void set_tclk(double clk) { m_tclk = clk; }
+ 	void set_tclk(const XTAL &xtal) { set_tclk(xtal.dvalue()); }
++	void set_direct_brc_timer(bool enable) { m_direct_brc_timer_enabled = enable; }
+ 	void tclk_w(int state);
+ 
+ 	// DMAU
+@@ -37,7 +38,7 @@ public:
+ 
+ 	// SCU
+ 	auto txd_handler_cb() { return m_scu.lookup()->txd_handler(); }
+-	void rxd_w(int state) { m_scu->write_rxd(state); }
++	void rxd_w(int state);
+ 
+ protected:
+ 	device_v5x_interface(const machine_config &mconfig, nec_common_device &device, u32 clock, bool is_16bit);
+@@ -106,8 +107,12 @@ protected:
+ 
+ 	void tcu_clock_update();
+ 	void brc_update();
++	void direct_brc_advance(const attotime &now);
++	void direct_brc_fast_forward(const attotime &now);
++	void direct_brc_reschedule(const attotime &now);
+ 
+ 	TIMER_DEVICE_CALLBACK_MEMBER(brc_timer_tick);
++	TIMER_CALLBACK_MEMBER(direct_brc_timer_tick);
+ 
+ 	virtual void sint_w(int state) = 0;
+ 
+@@ -116,6 +121,11 @@ protected:
+ 	required_device<v5x_icu_device> m_icu;
+ 	required_device<v5x_scu_device> m_scu;
+ 	required_device<timer_device> m_brc_timer;
++	emu_timer *m_direct_brc_timer;
++	attotime m_direct_brc_interval;
++	attotime m_direct_brc_next;
++	u32 m_direct_brc_frequency;
++	int m_direct_rxd_state;
+ 
+ 	address_space_config m_internal_io_config;
+ 	address_space *m_internal_io;
+@@ -141,6 +151,7 @@ protected:
+ 	u8 m_BRC;
+ 
+ 	bool m_brc_enable;
++	bool m_direct_brc_timer_enabled;
+ };
+ 
+ class v50_base_device : public nec_common_device, public device_v5x_interface
+diff --git a/src/devices/machine/i8251.cpp b/src/devices/machine/i8251.cpp
+index 9d3ae63..851f4a8 100644
+--- a/src/devices/machine/i8251.cpp
++++ b/src/devices/machine/i8251.cpp
+@@ -848,8 +848,6 @@ void i8251_device::receive_character(uint8_t ch)
+ 	update_rx_ready();
+ }
+ 
+-
+-
+ /*-------------------------------------------------
+     data_r - read data
+ -------------------------------------------------*/
+@@ -960,6 +958,56 @@ void i8251_device::clock_cycle()
+ 	m_rxc = 0;
+ }
+ 
++void i8251_device::clock_cycle_high()
++{
++	// A complete high-low-high clock cycle matching the V5X internal BRC.
++	// TX advances on the falling edge before RX samples on the rising edge.
++	if (m_txc)
++		transmit_clock();
++	m_txc = 1;
++	m_rxc = 0;
++	if (m_sync_byte_count == 1)
++		sync1_rxc();
++	else if (m_sync_byte_count == 2)
++		sync2_rxc();
++	else
++		receive_clock();
++	m_rxc = 1;
++}
++
++bool i8251_device::clock_idle() const
++{
++	const bool receive_idle =
++		!BIT(m_command, 2) || (m_rxd && is_receive_register_idle_high());
++	const bool transmit_idle =
++		!m_sync_byte_count &&
++		is_transmit_register_empty() &&
++		((m_status & (I8251_STATUS_TX_READY | I8251_STATUS_TX_EMPTY)) ==
++			(I8251_STATUS_TX_READY | I8251_STATUS_TX_EMPTY)) &&
++		!m_break_release_pending;
++	return receive_idle && transmit_idle;
++}
++
++int i8251_device::clocks_until_event() const
++{
++	int clocks = 0;
++	if (BIT(m_command, 2) && (!m_rxd || !is_receive_register_idle_high()))
++		clocks = m_rxc_count ? m_rxc_count : 1;
++
++	const bool transmit_idle =
++		!m_sync_byte_count &&
++		is_transmit_register_empty() &&
++		((m_status & (I8251_STATUS_TX_READY | I8251_STATUS_TX_EMPTY)) ==
++			(I8251_STATUS_TX_READY | I8251_STATUS_TX_EMPTY)) &&
++		!m_break_release_pending;
++	if (!transmit_idle)
++	{
++		const int transmit_clocks = m_br_factor - m_txc_count;
++		clocks = clocks ? std::min(clocks, transmit_clocks) : transmit_clocks;
++	}
++	return clocks;
++}
++
+ // forcibly kill hunt mode
+ void i8251_device::write_syn(int state)
+ {
+diff --git a/src/devices/machine/i8251.h b/src/devices/machine/i8251.h
+index 09cb246..0c6fd9c 100644
+--- a/src/devices/machine/i8251.h
++++ b/src/devices/machine/i8251.h
+@@ -44,6 +44,9 @@ public:
+ 	void write_txc(int state);
+ 	void write_rxc(int state);
+ 	void clock_cycle();
++	void clock_cycle_high();
++	bool clock_idle() const;
++	int clocks_until_event() const;
+ 	void write_syn(int state);
+ 
+ 	int txrdy_r();
+diff --git a/src/emu/schedule.cpp b/src/emu/schedule.cpp
+index 4157ceb..dc8cb22 100644
+--- a/src/emu/schedule.cpp
++++ b/src/emu/schedule.cpp
+@@ -494,6 +494,12 @@ void device_scheduler::timeslice()
+ 						LOG("         (new target)\n");
+ 					}
+ 				}
++
++				// A device that ran earlier in this pass may have scheduled a timer
++				// before the original target.  Do not let later devices execute past
++				// that newly-discovered causal boundary.
++				if (m_timer_list->m_expire < target)
++					target = (std::max)(m_timer_list->m_expire, m_basetime);
+ 			}
+ 		}
+ 		m_executing_device = nullptr;
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+index 8d01899..5039655 100644
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -104,6 +104,7 @@ public:
+ 		, m_lcdx{ 0, 0 }
+ 		, m_lcdy{ 0, 0 }
+ 		, m_lcdcmd{ 0, 0 }
++		, m_panel_txd_timer(nullptr)
+ 	{
+ 		std::fill_n(&m_vram[0], std::size(m_vram), 0);
+ 	}
+@@ -138,6 +139,7 @@ private:
+ 	void mpc2000_map(address_map &map) ATTR_COLD;
+ 	void mpc2000_io_map(address_map &map) ATTR_COLD;
+ 	void mpc2000_sub_map(address_map &map) ATTR_COLD;
++	void add_panel(machine_config &config, bool event_driven);
+ 	void dsp_map(address_map &map) ATTR_COLD;
+ 	void dsp_rom_map(address_map &map) ATTR_COLD;
+ 
+@@ -163,6 +165,8 @@ private:
+ 	uint8_t an2_pads_r();
+ 	uint8_t an3_pads_r();
+ 	uint8_t an4_r();
++	void panel_txd_w(int state);
++	TIMER_CALLBACK_MEMBER(panel_txd_sync);
+ 
+ 	void fdc_scsi_w(int state);
+ 	void fdc_irq_w(int state);
+@@ -183,10 +187,12 @@ private:
+ 	uint16_t m_lcdx[2];
+ 	uint8_t m_lcdy[2], m_lcdcmd[2];
+ 	uint16_t m_vram[256*64];
++	emu_timer *m_panel_txd_timer;
+ };
+ 
+ void mpc2000_state::machine_start()
+ {
++	m_panel_txd_timer = timer_alloc(FUNC(mpc2000_state::panel_txd_sync), this);
+ 	save_item(NAME(m_key_scan_row));
+ 	save_item(NAME(m_drum_scan_row));
+ }
+@@ -572,6 +578,18 @@ uint8_t mpc2000_state::ts_r()
+ 	return imagedev->dskchg_r();
+ }
+ 
++void mpc2000_state::panel_txd_w(int state)
++{
++	const attotime now = machine().time();
++	const attotime source_time = m_subcpu->local_time();
++	m_panel_txd_timer->adjust(source_time > now ? source_time - now : attotime::zero, state ? 1 : 0);
++}
++
++TIMER_CALLBACK_MEMBER(mpc2000_state::panel_txd_sync)
++{
++	m_maincpu->rxd_w(param);
++}
++
+ void mpc2000_state::floppies(device_slot_interface &device)
+ {
+ 	device.option_add("35hd", FLOPPY_35_HD);
+@@ -589,9 +607,35 @@ static void add_formats(format_registration &fr)
+ 	fr.add(FLOPPY_HFE_FORMAT);
+ }
+ 
++void mpc2000_state::add_panel(machine_config &config, bool event_driven)
++{
++	UPD78C10(config, m_subcpu, 12_MHz_XTAL);
++	m_subcpu->set_addrmap(AS_PROGRAM, &mpc2000_state::mpc2000_sub_map);
++	if (event_driven)
++		m_subcpu->txd_func().set(FUNC(mpc2000_state::panel_txd_w));
++	else
++		m_subcpu->txd_func().set(m_maincpu, FUNC(v53a_device::rxd_w));
++	m_subcpu->pa_in_cb().set(FUNC(mpc2000_state::subcpu_pa_r));
++	m_subcpu->pb_in_cb().set(FUNC(mpc2000_state::subcpu_pb_r));
++	m_subcpu->pc_in_cb().set(FUNC(mpc2000_state::subcpu_pc_r));
++	m_subcpu->pb_out_cb().set(FUNC(mpc2000_state::subcpu_pb_w));
++	m_subcpu->pc_out_cb().set(FUNC(mpc2000_state::subcpu_pc_w));
++	m_subcpu->an0_func().set(FUNC(mpc2000_state::an0_pads_r));
++	m_subcpu->an1_func().set(FUNC(mpc2000_state::an1_pads_r));
++	m_subcpu->an2_func().set(FUNC(mpc2000_state::an2_pads_r));
++	m_subcpu->an3_func().set(FUNC(mpc2000_state::an3_pads_r));
++	m_subcpu->an4_func().set(FUNC(mpc2000_state::an4_r));
++}
++
+ void mpc2000_state::mpc2000(machine_config &config)
+ {
++	const char *const panel_mode = osd_getenv("MAME_MPC_PANEL_EVENT_DRIVEN");
++	const bool event_driven_panel = panel_mode && std::strcmp(panel_mode, "0");
++	if (event_driven_panel)
++		add_panel(config, true);
++
+ 	V53A(config, m_maincpu, 32_MHz_XTAL);
++	m_maincpu->set_direct_brc_timer(event_driven_panel);
+ 	m_maincpu->set_addrmap(AS_PROGRAM, &mpc2000_state::mpc2000_map);
+ 	m_maincpu->set_addrmap(AS_IO, &mpc2000_state::mpc2000_io_map);
+ 	m_maincpu->out_hreq_cb().set(m_maincpu, FUNC(v53a_device::hack_w));
+@@ -639,19 +683,8 @@ void mpc2000_state::mpc2000(machine_config &config)
+ 	hiledlatch.q_out_cb<6>().set_output("led14").invert(); // Bank C
+ 	hiledlatch.q_out_cb<7>().set_output("led15").invert(); // 16 Levels
+ 
+-	UPD78C10(config, m_subcpu, 12_MHz_XTAL);
+-	m_subcpu->set_addrmap(AS_PROGRAM, &mpc2000_state::mpc2000_sub_map);
+-	m_subcpu->txd_func().set(m_maincpu, FUNC(v53a_device::rxd_w));
+-	m_subcpu->pa_in_cb().set(FUNC(mpc2000_state::subcpu_pa_r));
+-	m_subcpu->pb_in_cb().set(FUNC(mpc2000_state::subcpu_pb_r));
+-	m_subcpu->pc_in_cb().set(FUNC(mpc2000_state::subcpu_pc_r));
+-	m_subcpu->pb_out_cb().set(FUNC(mpc2000_state::subcpu_pb_w));
+-	m_subcpu->pc_out_cb().set(FUNC(mpc2000_state::subcpu_pc_w));
+-	m_subcpu->an0_func().set(FUNC(mpc2000_state::an0_pads_r));
+-	m_subcpu->an1_func().set(FUNC(mpc2000_state::an1_pads_r));
+-	m_subcpu->an2_func().set(FUNC(mpc2000_state::an2_pads_r));
+-	m_subcpu->an3_func().set(FUNC(mpc2000_state::an3_pads_r));
+-	m_subcpu->an4_func().set(FUNC(mpc2000_state::an4_r));
++	if (!event_driven_panel)
++		add_panel(config, false);
+ 
+ 	SCREEN(config, m_screen).set_lcd();
+ 	m_screen->set_refresh_hz(80);
+

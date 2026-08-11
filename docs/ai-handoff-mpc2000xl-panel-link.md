@@ -1,99 +1,115 @@
-# MPC2000XL panel-link optimization handoff
+# MPC2000XL event-driven panel UART
 
-## Parked state
+## Current implementation
 
-- Branch: `fix/mpc-audio-timing`
-- Last implementation commit: `a3a55b4 Cache exact scheduler cycle divisors`
-- Repository was clean before this handoff was added.
-- Installed `.cache/mame/mpc` is the tested patch-0018 binary.
-- Keep PipeWire quantum/buffer at 32 frames and MAME sound cadence at 16
-  samples. Do not change those while optimizing the emulator.
-- No emulator or profiler processes were left running.
+Patch `0019-mpc2000xl-event-driven-panel-uart.patch` replaces the MPC2000XL's
+idle 2 MHz front-panel UART scheduling load with causal, event-driven receive
+clocking. The original periodic implementation remains available as the
+accuracy fallback.
 
-## Root cause found
+The panel is the uPD78C10 controller that scans pads, buttons, the data wheel
+and variation slider. It is not the LCD or the sound DSP. Its TX line feeds the
+V53's internal i8251-compatible SCU at 31.25 kbaud with 64x oversampling. The
+old driver therefore created two million global scheduler deadlines per
+emulated second even while the line was idle.
 
-The MPC2000XL V53 baud-rate counter generates a 2 MHz clock for the internal
-front-panel UART: 31.25 kbaud with 64x oversampling. This is neither the LCD
-refresh nor either CPU clock. It creates two million global scheduler deadlines
-per emulated second and is the main reason `device_scheduler::timeslice()` is
-about 35 percent of the profile.
+Event mode analytically advances dormant BRC phase, wakes at the next UART
+sample that can change state, and synchronizes panel TX transitions at the
+panel CPU's local emulated time. The scheduler also honors a causal timer
+boundary inserted by a device that ran earlier in the current timeslice.
 
-The panel uPD78C10 scans pads, buttons, the wheel and the variation slider, then
-sends status bytes to the V53 SCU. The current driver connects only panel TX to
-V53 RX. In a 42-second Logic-project trace, the accurate implementation ran
-about 84 million BRC callbacks to receive 1,426 useful characters.
+The project launcher selects event mode by default for MPC2000XL. Use the
+fallback explicitly with:
 
-## Results worth retaining
+```bash
+MPC_PANEL_MODE=accurate scripts/run-mpc.sh mpc2000xl 32 [MAME options]
+```
 
-An MPC-only direct BRC callback preserved every 0.5 us deadline and produced
-the exact reference PCM SHA-256
-`22f76ffaaedc4364b8279a79672a07a35f93997f180b8665e9ef3a576ae176a9`.
-Interleaved release A/B measurement:
+Standalone MAME defaults to the original path unless
+`MAME_MPC_PANEL_EVENT_DRIVEN=1` is set. MPC60 and MPC3000 are unchanged.
+PipeWire quantum remains 32 frames and the MAME sound-update cadence remains
+16 samples.
 
-- task time: +0.005 percent
-- cycles: -0.417 percent
-- instructions: -1.043 percent
+## Functional and timing validation
 
-Artifact: `results/diagnostics/mpc-v53-direct-brc-abba-E13Vvr`.
+The accurate fallback still produces the canonical Logic-project PCM:
 
-This was deliberately not landed: it adds machinery but leaves the dominant
-2 MHz scheduling cadence intact.
+```text
+22f76ffaaedc4364b8279a79672a07a35f93997f180b8665e9ef3a576ae176a9
+```
 
-## Rejected event-bus prototypes
+Two complete event-mode renders were byte-identical to each other, with SHA:
 
-All of these were deterministic unless noted, but none matched the reference
-PCM or its event spacing, so none should be committed:
+```text
+4673f386a97c26d716b4818ad5de0085b03c932e005c400591fa46ff116f6d98
+```
 
-- Decode and inject a character immediately at the stop bit.
-- Decode with a 31.25 kHz driver heartbeat.
-- Schedule receipt 304 us after the start bit. This version was not
-  deterministic because the main CPU could reach the event before the panel
-  CPU had decoded all bits.
-- Schedule receipt 16 us after the decoded stop bit. Deterministic, but changed
-  musical event spacing.
-- Batch the real i8251 receive clocks at panel transitions and schedule receive
-  completion from the remaining i8251 clock count. Deterministic, but changed
-  event spacing.
-- Combine that batched receiver with a driver-level 31.25 kHz heartbeat. Its
-  phase began at machine time zero rather than V53 BRC enable and correspondence
-  became worse.
+The complete panel receive trace contained the same 1,426 bytes in the same
+order. Relative to a periodic control using the same causal CPU order, event
+mode's RX-ready timestamps had 0.281 us median offset, 0.5 us p95 absolute
+offset and a 0.5 us worst absolute offset: one original BRC edge.
 
-Relevant artifacts:
+The Logic image's active `LT-BEAT2` sequence is 86.0 BPM at 96 PPQN, not the
+file's overridden 120.0 master tempo. At 48 kHz this is 348.837209 samples per
+sequencer tick. A DSP key-on trace matched 86 events across 53 tick positions:
 
-- `results/diagnostics/mpc-panel-character-bridge-pcm-7XGyA1`
-- `results/diagnostics/mpc-panel-event-304us-pcm-K4kyAw`
-- `results/diagnostics/mpc-panel-event-stop16us-pcm-e9oYsE`
-- `results/diagnostics/mpc-panel-batched-brc-pcm-79Sypg`
-- `results/diagnostics/mpc-panel-bit-quantum-batched-brc-pcm-2FBFH4`
+- event identity, order, voice channel, sample address and simultaneous-event
+  grouping were identical in accurate and event modes;
+- after one constant start offset was removed, accurate mode's theoretical
+  grid error was 15.43 samples median absolute, 36.82 samples p95 and 49.05
+  samples / 1.022 ms worst;
+- event mode measured 15.98 samples median absolute, 33.10 samples p95 and
+  41.92 samples / 0.873 ms worst;
+- event versus accurate mode differed by at most 40.75 samples / 0.849 ms
+  after each mode's constant offset was removed.
 
-The measured accurate path showed panel TX write-to-V53 receive varying with
-transmitter occupancy, while actual start-bit-to-receive timing clustered
-around 299.47, 302.47 and 304.47 us. The variation comes from cross-CPU
-scheduling/local-time phase, so a guessed fixed delay is not acceptable.
+The speed path therefore preserves sequence content and stays inside the
+existing firmware/emulation timing envelope; it did not worsen p95 or
+worst-case theoretical event timing in this trace. This metric concerns sample
+trigger instants. Once triggered, sample playback remains on the continuous DSP
+audio clock and does not inherit panel or sequencer event jitter.
 
-## Next candidate, not yet built or tested
+The repeatable comparator is
+`scripts/diagnostics/compare-mpc-keyon-timing.py`. Its expected-event input is
+produced by `scripts/diagnostics/dump-mpc2000xl-all.cpp`; traces are temporary
+diagnostic builds that log `control_w()` DSP key-ons at a 48 MHz timestamp.
 
-Temporary source tree: `/tmp/mpc-mame-patch-stack-2hIyCX`.
+Key artifacts:
 
-The last edit, made immediately before parking, moves the reduced cadence into
-the V53 BRC itself so it starts at the original BRC-enable time and preserves
-the exact 0.5 us phase. It schedules one callback every 32 BRC ticks (16 us),
-and each callback advances all 32 real i8251 clocks. Panel TX transitions also
-advance the same phase-tracked receiver before changing RXD. This should reduce
-global scheduler cadence 32x while keeping the real i8251 framing and status
-logic.
+- `results/diagnostics/mpc-panel-optional-accurate-pcm-j4k3rq`
+- `results/diagnostics/mpc-panel-optional-event-final-pcm-cRUvVC`
+- `results/diagnostics/mpc-panel-causal-logic-rx-oslog-U5tr2F`
+- `results/diagnostics/mpc-panel-causal-periodic-logic-rx-gWGQF4`
+- `results/diagnostics/mpc-keyon-theoretical-tsrzqZ`
 
-This candidate has **not been built or run**. Resume with:
+A final interactive A/B used the Logic project with the PipeWire graph forced
+to 32 frames, MAME scheduled on performance cores 1-4, the full OpenGL panel
+layout, and an MPD18 connected to MAME's MIDI input. Event mode played
+correctly, panel and pad interaction remained responsive, and produced fewer
+audible xruns than the accurate-mode control. Earlier apparent slow panel
+response was not reproducible after removing the confounding 1024-frame
+PipeWire graph and slow-core pinning.
 
-1. Build `/tmp/mpc-mame-patch-stack-2hIyCX/mpcd` with the same make arguments
-   used in this session.
-2. Run two deterministic Logic-project renders.
-3. Require both renders to match each other and the reference SHA above.
-4. If exact, run release ABBA and a cycle profile before turning it into patch
-   0019.
-5. If not exact, test phase-correct BRC batch sizes 16, 8, 4 and 2 ticks to find
-   the lowest scheduler cadence that remains bit-exact. Do not relax the PCM,
-   audio-jitter, MIDI-timing or panel-input latency gates.
+## Performance
 
-The eventual speed path should remain explicitly MPC2000XL-opt-in, with the
-original bit-clock implementation available as the accuracy fallback.
+A matched release-binary comparison on CPU 20, with the same complete
+42.9-second Logic workload and no buffer/cadence changes, measured:
+
+| Metric | Accurate | Event | Change |
+| --- | ---: | ---: | ---: |
+| Task clock | 38,626.43 ms | 30,480.71 ms | -21.09% |
+| CPU cycles | 92.60 billion | 72.49 billion | -21.71% |
+| Instructions | 262.10 billion | 208.11 billion | -20.60% |
+| Average emulation speed | 116.36% | 149.65% | +28.61% |
+
+Artifact: `results/diagnostics/mpc-panel-final-matched-perf-IjrZj4`.
+
+These measurements were taken while the workstation could have unrelated
+interactive load. Retired instructions are the most workload-stable comparison;
+task time, cycles and throughput nevertheless agree closely.
+
+## Remaining work
+
+- Profile event mode again to select the next MPC-specific hotspot.
+- Keep the timing comparator when changing scheduler or device interleaving;
+  WAV hashes alone cannot distinguish a constant phase change from jitter.

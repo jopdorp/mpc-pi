@@ -10,8 +10,8 @@ result_dir=$(mktemp -d "$repo_root/results/diagnostics/timing-regression-XXXXXX"
 
 for run in a b; do
     runtime_dir=$(mktemp -d "$repo_root/results/runtime/timing-regression-${run}-XXXXXX")
-    MAME_RUNTIME_DIR="$runtime_dir" MAME_NICE=0 \
-        "$repo_root/scripts/run-mpc.sh" mpc2000xl 48 \
+    MAME_RUNTIME_DIR="$runtime_dir" MAME_NICE=0 MPC_PANEL_MODE=accurate \
+        "$repo_root/scripts/run-mpc.sh" mpc2000xl 32 \
         -flop "$project" \
         -skip_gameinfo \
         -video none \
@@ -34,8 +34,8 @@ fi
 printf 'PASS: intrinsic PCM is byte-identical (integer and fractional jitter 0.00 samples)\n'
 
 runtime_dir=$(mktemp -d "$repo_root/results/runtime/pipewire-regression-XXXXXX")
-MAME_RUNTIME_DIR="$runtime_dir" MAME_PIPEWIRE_STATS=1 \
-    "$repo_root/scripts/run-mpc.sh" mpc2000xl 48 \
+MAME_RUNTIME_DIR="$runtime_dir" MAME_PIPEWIRE_STATS=1 MPC_PANEL_MODE=event \
+    "$repo_root/scripts/run-mpc.sh" mpc2000xl 32 \
     -flop "$project" \
     -skip_gameinfo \
     -video none \

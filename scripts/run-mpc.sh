@@ -21,6 +21,7 @@ async_present=${MPC_ASYNC_PRESENT:-1}
 maximize_window=${MPC_MAXIMIZE:-1}
 external_event_loop=${MPC_SDL_EXTERNAL_EVENT_LOOP:-1}
 bios_name=${MAME_BIOS:-}
+panel_mode=${MPC_PANEL_MODE:-}
 
 if (( $# > 0 )); then shift; fi
 if (( $# > 0 )); then shift; fi
@@ -28,18 +29,39 @@ if (( $# > 0 )); then shift; fi
 case "$system_name" in
     mpc2000xl)
         bios_name=${bios_name:-default}
+        panel_mode=${panel_mode:-event}
         ;;
     mpc3000)
         bios_name=${bios_name:-vailixi}
+        panel_mode=${panel_mode:-accurate}
         ;;
     mpc60)
         bios_name=${bios_name:-v212}
+        panel_mode=${panel_mode:-accurate}
         ;;
     mpc60scsi)
         bios_name=${bios_name:-v214}
+        panel_mode=${panel_mode:-accurate}
         ;;
     *)
         printf 'error: unsupported system %s\n' "$system_name" >&2
+        exit 2
+        ;;
+esac
+
+case "$panel_mode" in
+    accurate)
+        panel_environment=(MAME_MPC_PANEL_EVENT_DRIVEN=0)
+        ;;
+    event)
+        if [[ "$system_name" != mpc2000xl ]]; then
+            printf 'error: MPC_PANEL_MODE=event is only supported by mpc2000xl\n' >&2
+            exit 2
+        fi
+        panel_environment=(MAME_MPC_PANEL_EVENT_DRIVEN=1)
+        ;;
+    *)
+        printf 'error: MPC_PANEL_MODE must be accurate or event, got %s\n' "$panel_mode" >&2
         exit 2
         ;;
 esac
@@ -125,11 +147,14 @@ printf 'Starting %s BIOS %s with native PipeWire; quantum=%s, latency=%s (~%s ms
 printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s (PipeWire runs above it at RR 90)\n' \
     "$mame_cpuset" "$mame_nice" "$mame_rt_priority"
 printf 'Timing master: %s\n' "$timing_master"
+if [[ "$system_name" == mpc2000xl ]]; then
+    printf 'Panel UART: %s mode\n' "$panel_mode"
+fi
 printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, resolution=%s, bilinear=%s\n' \
     "$video_mode" "$async_present" "$external_event_loop" "$view_name" "$window_resolution" "$filter_mode"
 
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
-    env "${clock_environment[@]}" MAME_ASYNC_PRESENT="$async_present" \
+    env "${clock_environment[@]}" "${panel_environment[@]}" MAME_ASYNC_PRESENT="$async_present" \
     MAME_SDL_EXTERNAL_EVENT_LOOP="$external_event_loop" \
     PIPEWIRE_QUANTUM="$pipewire_quantum" PIPEWIRE_LATENCY="$pipewire_latency" \
     "$mame_bin" "$system_name" \
