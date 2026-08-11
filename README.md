@@ -140,11 +140,10 @@ needed.
 The launcher enables the patched PipeWire audio clock and disables MAME's
 independent video throttle. Fast loading remains unpaced, but at normal speed
 the main speaker output is paced from PipeWire with one negotiated graph
-quantum of prebuffer. At 48 kHz MAME exports 16-sample blocks at 3 kHz; with a
-32-frame PipeWire quantum this keeps the intended host window to 48 samples
-(1 ms). This is the low-latency profiling baseline: occasional missed producer
-deadlines remain under investigation and must be eliminated before treating
-the one-quantum mode as xrun-proof.
+quantum plus one producer update of margin. At 48 kHz MAME exports 16-sample
+blocks at 3 kHz; with a 32-frame PipeWire quantum this keeps the intended host
+window to 48 samples (1 ms). The extra producer update lets one late 16-sample
+tick recover without immediately starving the next PipeWire callback.
 
 The default desktop video path is the complete MPC panel, rendered with
 bilinear OpenGL in a maximized window. The OpenGL path hands completed

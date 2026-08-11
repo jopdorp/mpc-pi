@@ -1,0 +1,43 @@
+diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pipewire_sound.cpp
+index 882fdd4f..8a265b33 100644
+--- a/src/osd/modules/sound/pipewire_sound.cpp
++++ b/src/osd/modules/sound/pipewire_sound.cpp
+@@ -113,6 +113,7 @@ private:
+ 		uint32_t m_observed_overruns;
+ 		uint32_t m_updates_since_report;
+ 		uint32_t m_prebuffer_frames;
++		uint32_t m_producer_frames;
+ 		uint32_t m_last_underrun_requested;
+ 		uint32_t m_last_underrun_available;
+ 		int64_t m_last_underrun_callback_gap_us;
+@@ -121,7 +122,7 @@ private:
+ 		std::chrono::steady_clock::time_point m_last_callback;
+ 		std::vector<int16_t> m_capture;
+ 
+-		stream_info(sound_pipewire *wire, bool is_output, uint32_t osdid, uint32_t channels, uint32_t rate, std::string name = {}) : m_wire(wire), m_is_output(is_output), m_wait_stream(true), m_osdid(osdid), m_channels(channels), m_rate(rate), m_name(std::move(name)), m_stream(nullptr), m_buffer(channels, rate), m_last_underruns(0), m_last_overruns(0), m_observed_underruns(0), m_observed_overruns(0), m_updates_since_report(0), m_prebuffer_frames(0), m_last_underrun_requested(0), m_last_underrun_available(0), m_last_underrun_callback_gap_us(0), m_prebuffering(true), m_buffer_stats_ready(false) {}
++		stream_info(sound_pipewire *wire, bool is_output, uint32_t osdid, uint32_t channels, uint32_t rate, std::string name = {}) : m_wire(wire), m_is_output(is_output), m_wait_stream(true), m_osdid(osdid), m_channels(channels), m_rate(rate), m_name(std::move(name)), m_stream(nullptr), m_buffer(channels, rate), m_last_underruns(0), m_last_overruns(0), m_observed_underruns(0), m_observed_overruns(0), m_updates_since_report(0), m_prebuffer_frames(0), m_producer_frames(0), m_last_underrun_requested(0), m_last_underrun_available(0), m_last_underrun_callback_gap_us(0), m_prebuffering(true), m_buffer_stats_ready(false) {}
+ 	};
+ 
+ 	static const pw_core_events     core_events;
+@@ -681,8 +682,11 @@ void sound_pipewire::stream_sink_event_process(stream_info *stream)
+ 
+ 	spa_buffer *sbuf = buffer->buffer;
+ 	int16_t *const output = (int16_t *)(sbuf->datas[0].data);
+-	// Keep one graph quantum ready for the next realtime callback.
+-	stream->m_prebuffer_frames = std::max(stream->m_prebuffer_frames, uint32_t(buffer->requested));
++	// Keep one graph quantum plus one producer update ready.  The extra update
++	// prevents a single late producer tick from immediately starving PipeWire.
++	stream->m_prebuffer_frames = std::max(
++			stream->m_prebuffer_frames,
++			uint32_t(buffer->requested) + stream->m_producer_frames);
+ 	const auto callback_now = std::chrono::steady_clock::now();
+ 	const auto callback_gap_us = stream->m_last_callback.time_since_epoch().count()
+ 		? std::chrono::duration_cast<std::chrono::microseconds>(callback_now - stream->m_last_callback).count()
+@@ -926,6 +930,7 @@ void sound_pipewire::stream_sink_update(uint32_t id, const int16_t *buffer, int
+ 		return;
+ 	}
+ 	stream_info &stream = si->second;
++	stream.m_producer_frames = std::max(stream.m_producer_frames, uint32_t(samples_this_frame));
+ 	if (m_realtime_pacing && (id == m_primary_output_id))
+ 		m_realtime_generated_frames += samples_this_frame;
+ 	stream.m_buffer.push(buffer, samples_this_frame);
