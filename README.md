@@ -219,6 +219,16 @@ whole-emulator retired instructions by another 1.60 percent and cycles by 0.57
 percent. The intrinsic PCM is still byte-identical, and the live eight-note
 ALSA MIDI capture is unchanged.
 
+Patch 0017 keeps every baud-timer deadline but skips asynchronous i8251
+transmit work when the shift register and buffer are empty and all exposed
+status levels are already stable. It tracks break release so the transition
+back to the marking state still occurs on the original transmit boundary.
+Three interleaved E-core runs reduced whole-emulator retired instructions by
+0.39 percent, cycles by 2.64 percent, and task time by 4.16 percent over patch
+0016. Two deterministic Logic-project renders retained the exact reference PCM,
+and MIDI injected through a live ALSA sequencer connection produced audible
+output at -34.9 dB mean and -3.2 dB peak.
+
 For a compact LCD-only view (for example on a Raspberry Pi display or for
 diagnostics), use:
 
