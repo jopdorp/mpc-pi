@@ -212,6 +212,13 @@ percent over patch 0014. The Logic-project PCM remains byte-identical, and a
 live eight-note ALSA MIDI test produced the same -42.6 dB mean and -4.1 dB peak
 capture.
 
+Patch 0016 skips i8251 receive-register updates only when the asynchronous
+receiver is idle high and its complete shift register is already `0xffff`,
+making the skipped shift a literal no-op. Three interleaved E-core runs reduced
+whole-emulator retired instructions by another 1.60 percent and cycles by 0.57
+percent. The intrinsic PCM is still byte-identical, and the live eight-note
+ALSA MIDI capture is unchanged.
+
 For a compact LCD-only view (for example on a Raspberry Pi display or for
 diagnostics), use:
 

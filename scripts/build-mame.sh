@@ -21,6 +21,7 @@ mame_patches=(
     "$repo_root/patches/mame/0013-sdl-synchronize-async-render-shutdown.patch"
     "$repo_root/patches/mame/0014-mb89371-batch-complete-brg-cycles.patch"
     "$repo_root/patches/mame/0015-i8251-complete-clock-cycle.patch"
+    "$repo_root/patches/mame/0016-i8251-skip-stable-idle-high-rx-shifts.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then

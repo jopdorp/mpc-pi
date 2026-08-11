@@ -1,0 +1,25 @@
+diff --git a/src/devices/machine/i8251.cpp b/src/devices/machine/i8251.cpp
+index f215b687..0aad1bd6 100644
+--- a/src/devices/machine/i8251.cpp
++++ b/src/devices/machine/i8251.cpp
+@@ -174,6 +174,8 @@ void i8251_device::receive_clock()
+ 	if (BIT(m_command, 2))
+ 	{
+ 		const bool sync = is_receive_register_synchronized();
++		if (m_rxd && is_receive_register_idle_high())
++			return;
+ 		if (sync)
+ 		{
+ 			--m_rxc_count;
+diff --git a/src/emu/diserial.h b/src/emu/diserial.h
+index 21b9afeb..68e24128 100644
+--- a/src/emu/diserial.h
++++ b/src/emu/diserial.h
+@@ -106,6 +106,7 @@ protected:
+ 	bool is_receive_register_full() const { return m_rcv_flags & RECEIVE_REGISTER_FULL; }
+ 	bool is_transmit_register_empty() const { return m_tra_flags & TRANSMIT_REGISTER_EMPTY; }
+ 	bool is_receive_register_synchronized() const { return m_rcv_flags & RECEIVE_REGISTER_SYNCHRONISED; }
++	bool is_receive_register_idle_high() const { return !is_receive_register_synchronized() && (m_rcv_register_data == 0xffff); }
+ 	bool is_receive_register_shifting() const { return m_rcv_bit_count_received > 0; }
+ 	bool is_receive_framing_error() const { return m_rcv_framing_error; }
+ 	bool is_receive_parity_error() const { return m_rcv_parity_error; }
