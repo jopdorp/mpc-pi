@@ -1,0 +1,65 @@
+diff --git a/src/devices/machine/mb89371.cpp b/src/devices/machine/mb89371.cpp
+index 7066487a..0329a738 100644
+--- a/src/devices/machine/mb89371.cpp
++++ b/src/devices/machine/mb89371.cpp
+@@ -47,7 +47,6 @@ mb89371_device::mb89371_device(const machine_config &mconfig, const char *tag, d
+ 	: device_t(mconfig, MB89371, tag, owner, clock)
+ 	, m_sio(*this, "i8251_%u", 0)
+ 	, m_brg_timer { nullptr, nullptr }
+-	, m_brg_state { 0, 0 }
+ 	, m_txd_w { *this, *this }
+ 	, m_rxready_w { *this, *this }
+ 	, m_txready_w { *this, *this }
+@@ -62,7 +61,6 @@ void mb89371_device::device_start()
+ 
+ 	save_item(NAME(m_mode));
+ 	save_item(NAME(m_baud));
+-	save_item(NAME(m_brg_state));
+ }
+ 
+ void mb89371_device::device_post_load()
+@@ -132,9 +130,13 @@ template uint8_t mb89371_device::read<1>(offs_t offset);
+ TIMER_CALLBACK_MEMBER(mb89371_device::brg_tick)
+ {
+ 	const unsigned channel = param;
+-	m_brg_state[channel] ^= 1;
+-	m_sio[channel]->write_txc(m_brg_state[channel]);
+-	m_sio[channel]->write_rxc(m_brg_state[channel]);
++	// The USART samples RX on the rising edge and advances TX on the falling
++	// edge.  Deliver one complete BRG cycle per scheduler event; preserving the
++	// edge order avoids scheduling a second event that performs no other work.
++	m_sio[channel]->write_txc(1);
++	m_sio[channel]->write_rxc(1);
++	m_sio[channel]->write_txc(0);
++	m_sio[channel]->write_rxc(0);
+ }
+ 
+ template<int ch> uint8_t mb89371_device::baud_r()
+@@ -186,11 +188,11 @@ void mb89371_device::recalc_brg(int channel)
+ 	{
+ 		uint32_t rate = clock() / (2 << m_baud[channel]);
+ 		LOGMASKED(LOG_BAUD_RATE_GENERATOR, "BRG %d enabled at %d Hz\n", channel, rate);
+-		const attotime half_period = attotime::from_hz(rate * 2);
++		const attotime period = attotime::from_hz(rate);
+ 		attotime first = m_brg_timer[channel]->remaining();
+-		if (half_period < first)
+-			first = half_period;
+-		m_brg_timer[channel]->adjust(first, channel, half_period);
++		if (period < first)
++			first = period;
++		m_brg_timer[channel]->adjust(first, channel, period);
+ 	}
+ 	else
+ 	{
+diff --git a/src/devices/machine/mb89371.h b/src/devices/machine/mb89371.h
+index c6dfb799..e1a2d88b 100644
+--- a/src/devices/machine/mb89371.h
++++ b/src/devices/machine/mb89371.h
+@@ -62,7 +62,6 @@ private:
+ 
+ 	required_device_array<i8251_device, 2> m_sio;
+ 	emu_timer *m_brg_timer[2];
+-	uint8_t m_brg_state[2];
+ 
+ 	devcb_write_line m_txd_w[2], m_rxready_w[2], m_txready_w[2], m_txempty_w[2], m_syndet_w[2];
+ 

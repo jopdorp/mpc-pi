@@ -198,6 +198,13 @@ asynchronously. A clean build completed 30 synchronous and 30 asynchronous
 window lifecycle runs without a crash; the previous code produced both stale
 SDL-backend calls and divide-by-zero faults while reading devices concurrently.
 
+Patch 0014 batches each MB89371 baud generator's rising and falling USART edges
+into one periodic scheduler callback while preserving their logical order. This
+halves baud-clock scheduler events; three interleaved busy-system runs reduced
+retired instructions by 6.76 percent and cycles by 4.74 percent over patch 0012.
+The Logic-project PCM remains byte-identical, and live ALSA MIDI input still
+drives the MPC program correctly.
+
 For a compact LCD-only view (for example on a Raspberry Pi display or for
 diagnostics), use:
 
