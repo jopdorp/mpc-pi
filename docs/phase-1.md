@@ -15,7 +15,9 @@ On Debian or Ubuntu, install MAME's documented build prerequisites first. Qt 6 i
 ./scripts/build-mame.sh
 ```
 
-The build defaults to 16 parallel jobs. Override it when appropriate:
+The build defaults to four parallel jobs. MAME's C++ translation units can use
+several gigabytes each; a 16-way rebuild exhausted memory on the 64 GiB test
+host. Raise the job count only when memory headroom has been verified:
 
 ```bash
 MAME_JOBS=8 ./scripts/build-mame.sh

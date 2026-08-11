@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 mame_source_dir=${MAME_SOURCE_DIR:-"$repo_root/.cache/mame"}
-mame_jobs=${MAME_JOBS:-16}
+mame_jobs=${MAME_JOBS:-4}
 mame_sources=src/mame/akai/mpc60.cpp,src/mame/akai/mpc2000.cpp,src/mame/akai/mpc3000.cpp
 mame_patches=(
     "$repo_root/patches/mame/0001-hd61830-guard-unconfigured-text-pitch.patch"
@@ -25,6 +25,7 @@ mame_patches=(
     "$repo_root/patches/mame/0017-i8251-skip-stable-idle-transmit-callbacks.patch"
     "$repo_root/patches/mame/0018-scheduler-cache-exact-cycle-divisors.patch"
     "$repo_root/patches/mame/0019-mpc2000xl-event-driven-panel-uart.patch"
+    "$repo_root/patches/mame/0020-mpc2000xl-low-latency-midi-pad-input.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then

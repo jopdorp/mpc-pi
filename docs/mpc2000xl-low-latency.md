@@ -24,7 +24,7 @@ SDL runtime.
 Launch the Logic tutorial project with the MPD18 as MIDI input:
 
 ```bash
-scripts/run-mpc.sh mpc2000xl 32 \
+MPC_MIDI_INPUT_MODE=internal-pads scripts/run-mpc.sh mpc2000xl 32 \
   -flop results/projects/mpc-tutor-logic-mpc2000xl.img \
   -skip_gameinfo \
   -midiin1 'Akai MPD18 MIDI 1' \
@@ -60,6 +60,37 @@ host-level commands and must remain documented whenever they change.
 | `MPC_MAXIMIZE` | `1` | Start maximized |
 | `MPC_WINDOW_RESOLUTION` | `auto` | Let MAME size the render target |
 | `MPC_PANEL_MODE` | `event` | Event-driven MPC2000XL panel UART |
+| `MPC_MIDI_INPUT_MODE` | `accurate` | Choose accurate wire timing, fast external MIDI, or direct internal-pad events |
+
+## MPD18 input modes
+
+The default `accurate` mode keeps the original emulation path: host MIDI is
+serialized at 31.25 kbaud into the MPC's emulated external MIDI UART. `fast`
+skips that redundant wire serialization but still enters through the
+MB89371 UART and the MPC firmware's external-MIDI parser.
+
+`internal-pads` is the lowest-latency MPD18 mode. It translates MIDI notes
+36-51 to MPC pads 1-16, preserves Note On velocity, translates Note Off (and
+zero-velocity Note On) to pad release, and injects the panel's native two-byte
+pad message into the V53 SCU. This bypasses the panel CPU's analog scan and
+debounce, while retaining the MPC main firmware and L6028 DSP paths. Other
+notes and non-note MIDI messages are ignored in this mode, so use `fast` for a
+general MIDI controller.
+
+A controlled 20-hit test through the host's virtual MIDI port measured:
+
+| Mode | Host poll to complete message, median | Host poll to DSP key-on, median | DSP key-on p95 |
+|---|---:|---:|---:|
+| `fast` external MIDI | 0.137 ms | 0.895 ms | 1.434 ms |
+| `internal-pads` | 0.104 ms | 0.868 ms | 1.305 ms |
+
+The direct internal-pad route is only about 0.03 ms faster than `fast`, because
+both optimized modes already bypass the physical MIDI wire. Its larger gain is
+relative to `accurate`: an earlier physical-MPD trace measured 1.144 ms from
+host polling through reception of the three serialized MIDI bytes, before the
+firmware/DSP response. The injection boundary itself stayed below 0.122 ms in
+all 20 direct-pad events. These figures stop at DSP key-on and do not include
+the separate host audio-buffer delay.
 
 The client request alone does not guarantee a 32-frame graph when other
 PipeWire clients request a larger quantum. The validated host explicitly

@@ -23,6 +23,7 @@ maximize_window=${MPC_MAXIMIZE:-1}
 external_event_loop=${MPC_SDL_EXTERNAL_EVENT_LOOP:-1}
 bios_name=${MAME_BIOS:-}
 panel_mode=${MPC_PANEL_MODE:-}
+midi_input_mode=${MPC_MIDI_INPUT_MODE:-accurate}
 
 if (( $# > 0 )); then shift; fi
 if (( $# > 0 )); then shift; fi
@@ -63,6 +64,33 @@ case "$panel_mode" in
         ;;
     *)
         printf 'error: MPC_PANEL_MODE must be accurate or event, got %s\n' "$panel_mode" >&2
+        exit 2
+        ;;
+esac
+
+case "$midi_input_mode" in
+    accurate)
+        midi_unset_environment=(-u MAME_MPC_MIDI_FAST_INPUT -u MAME_MPC_MIDI_INTERNAL_PADS)
+        midi_environment=()
+        ;;
+    fast)
+        if [[ "$system_name" != mpc2000xl ]]; then
+            printf 'error: MPC_MIDI_INPUT_MODE=fast is only supported by mpc2000xl\n' >&2
+            exit 2
+        fi
+        midi_unset_environment=(-u MAME_MPC_MIDI_INTERNAL_PADS)
+        midi_environment=(MAME_MPC_MIDI_FAST_INPUT=1)
+        ;;
+    internal-pads)
+        if [[ "$system_name" != mpc2000xl ]]; then
+            printf 'error: MPC_MIDI_INPUT_MODE=internal-pads is only supported by mpc2000xl\n' >&2
+            exit 2
+        fi
+        midi_unset_environment=()
+        midi_environment=(MAME_MPC_MIDI_FAST_INPUT=1 MAME_MPC_MIDI_INTERNAL_PADS=1)
+        ;;
+    *)
+        printf 'error: MPC_MIDI_INPUT_MODE must be accurate, fast, or internal-pads, got %s\n' "$midi_input_mode" >&2
         exit 2
         ;;
 esac
@@ -173,12 +201,14 @@ printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s (PipeWire 
 printf 'Timing master: %s\n' "$timing_master"
 if [[ "$system_name" == mpc2000xl ]]; then
     printf 'Panel UART: %s mode\n' "$panel_mode"
+    printf 'MIDI input: %s mode\n' "$midi_input_mode"
 fi
 printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, resolution=%s, bilinear=%s\n' \
     "$video_mode" "$async_present" "$external_event_loop" "$view_name" "$window_resolution" "$filter_mode"
 
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
-    env "${clock_environment[@]}" "${panel_environment[@]}" MAME_ASYNC_PRESENT="$async_present" \
+    env "${midi_unset_environment[@]}" "${clock_environment[@]}" "${panel_environment[@]}" "${midi_environment[@]}" \
+    MAME_ASYNC_PRESENT="$async_present" \
     MAME_SDL_EXTERNAL_EVENT_LOOP="$external_event_loop" \
     PIPEWIRE_QUANTUM="$pipewire_quantum" PIPEWIRE_LATENCY="$pipewire_latency" \
     "$mame_bin" "$system_name" \
