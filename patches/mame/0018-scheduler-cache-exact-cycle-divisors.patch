@@ -1,0 +1,120 @@
+diff --git a/src/emu/diexec.cpp b/src/emu/diexec.cpp
+--- a/src/emu/diexec.cpp
++++ b/src/emu/diexec.cpp
+@@ -68,6 +68,7 @@ device_execute_interface::device_execute_interface(const machine_config &mconfig
+ 	, m_totalcycles(0)
+ 	, m_divisor(0)
+ 	, m_divshift(0)
++	, m_divmagic(0)
+ 	, m_cycles_per_second(0)
+ 	, m_attoseconds_per_cycle(0)
+ 	, m_spin_end_timer(nullptr)
+@@ -491,6 +492,7 @@ void device_execute_interface::interface_clock_changed(bool sync_on_new_clock_do
+ 		attos >>= 1;
+ 	}
+ 	m_divisor = attos;
++	m_divmagic = compute_divu_64x32_reciprocal(m_divisor);
+ 
+ 	// re-compute the perfect interleave factor
+ 	m_scheduler->compute_perfect_interleave();
+diff --git a/src/emu/diexec.h b/src/emu/diexec.h
+--- a/src/emu/diexec.h
++++ b/src/emu/diexec.h
+@@ -325,6 +325,7 @@ private:
+ 	attotime                m_localtime;                // local time, relative to the timer system's global time
+ 	s32                     m_divisor;                  // 32-bit attoseconds_per_cycle divisor
+ 	u8                      m_divshift;                 // right shift amount to fit the divisor into 32 bits
++	u64                     m_divmagic;                 // reciprocal multiplier for exact cycle division
+ 	u32                     m_cycles_per_second;        // cycles per second, adjusted for multipliers
+ 	attoseconds_t           m_attoseconds_per_cycle;    // attoseconds per adjusted clock cycle
+ 
+diff --git a/src/emu/schedule.cpp b/src/emu/schedule.cpp
+--- a/src/emu/schedule.cpp
++++ b/src/emu/schedule.cpp
+@@ -440,7 +440,8 @@ void device_scheduler::timeslice()
+ 				else if (delta >= exec->m_attoseconds_per_cycle)
+ 				{
+ 					// compute how many cycles we want to execute
+-					int ran = exec->m_cycles_running = divu_64x32(u64(delta) >> exec->m_divshift, exec->m_divisor);
++					const u64 dividend = u64(delta) >> exec->m_divshift;
++					int ran = exec->m_cycles_running = divu_64x32_reciprocal(dividend, exec->m_divisor, exec->m_divmagic);
+ 					LOG("  cpu '%s': %d (%d cycles)\n", exec->device().tag(), delta, exec->m_cycles_running);
+ 
+ 					// if we're not suspended, actually execute
+diff --git a/src/emu/validity.cpp b/src/emu/validity.cpp
+--- a/src/emu/validity.cpp
++++ b/src/emu/validity.cpp
+@@ -252,6 +252,32 @@ void validate_inlines()
+ 	if (resultu32 != expectedu32)
+ 		osd_printf_error("Error testing divu_64x32 (%16X / %08X) = %08X (expected %08X)\n", u64(testu64a), u32(testu32a), resultu32, expectedu32);
+ 
++	resultu32 = divu_64x32_reciprocal(testu64a, testu32a, compute_divu_64x32_reciprocal(testu32a));
++	if (resultu32 != expectedu32)
++		osd_printf_error("Error testing divu_64x32_reciprocal (%16X / %08X) = %08X (expected %08X)\n", u64(testu64a), u32(testu32a), resultu32, expectedu32);
++
++	constexpr u32 reciprocal_divisors[] = { 1, 2, 3, 7, 10, 0x7fffffffU, 0xffffffffU };
++	for (u32 const divisor : reciprocal_divisors)
++	{
++		u64 const reciprocal = compute_divu_64x32_reciprocal(divisor);
++		u64 const dividends[] =
++		{
++			0,
++			1,
++			u64(divisor - 1),
++			u64(divisor),
++			u64(divisor) + 1,
++			u64(0xffffffffU) * divisor + (divisor - 1)
++		};
++		for (u64 const dividend : dividends)
++		{
++			resultu32 = divu_64x32_reciprocal(dividend, divisor, reciprocal);
++			expectedu32 = dividend / divisor;
++			if (resultu32 != expectedu32)
++				osd_printf_error("Error testing divu_64x32_reciprocal (%16X / %08X) = %08X (expected %08X)\n", dividend, divisor, resultu32, expectedu32);
++		}
++	}
++
+ 	resulti32 = div_64x32_rem(testi64a, testi32a, remainder);
+ 	expectedi32 = testi64a / s64(testi32a);
+ 	expremainder = testi64a % s64(testi32a);
+diff --git a/src/osd/eminline.h b/src/osd/eminline.h
+--- a/src/osd/eminline.h
++++ b/src/osd/eminline.h
+@@ -319,6 +319,37 @@ inline uint64_t mulu_64x64(uint64_t a, uint64_t b, uint64_t &hi)
+ 
+ 
+ /*-------------------------------------------------
++    compute_divu_64x32_reciprocal - precompute a
++    reciprocal for repeated unsigned 64 bit x 32
++    bit division
++-------------------------------------------------*/
++
++constexpr uint64_t compute_divu_64x32_reciprocal(uint32_t divisor)
++{
++	return (divisor > 1) ? ((~uint64_t(0) / divisor) + 1) : 0;
++}
++
++
++/*-------------------------------------------------
++    divu_64x32_reciprocal - perform an unsigned
++    64 bit x 32 bit divide using a precomputed
++    reciprocal and return the 32 bit quotient
++-------------------------------------------------*/
++
++inline uint32_t divu_64x32_reciprocal(uint64_t dividend, uint32_t divisor, uint64_t reciprocal)
++{
++	if (!reciprocal)
++		return uint32_t(dividend);
++
++	uint64_t quotient;
++	mulu_64x64(dividend, reciprocal, quotient);
++	if ((quotient >> 32) || (quotient * divisor > dividend))
++		--quotient;
++	return uint32_t(quotient);
++}
++
++
++/*-------------------------------------------------
+     addu_32x32_co - perform an unsigned 32 bit + 32
+     bit addition and return the result with carry
+     out

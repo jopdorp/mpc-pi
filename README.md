@@ -229,6 +229,17 @@ Three interleaved E-core runs reduced whole-emulator retired instructions by
 and MIDI injected through a live ALSA sequencer connection produced audible
 output at -34.9 dB mean and -3.2 dB peak.
 
+Patch 0018 removes the scheduler's runtime 64-by-32 division from every CPU
+timeslice. Device clocks change rarely, so the execute interface caches an
+exact reciprocal when its clock changes; the hot path uses multiply-high plus
+an exact one-count correction. MAME's inline-arithmetic validity suite covers
+random and boundary inputs. Two release-build Logic renders remain
+byte-identical to the reference PCM. In an interleaved release A/B test on an
+E-core, the change reduced whole-emulator task time by 3.17 percent and cycles
+by 1.80 percent, despite retiring 1.61 percent more low-cost instructions. The
+benefit is expected to be larger on the Raspberry Pi 3's Cortex-A53, where the
+replaced runtime 64-bit division is substantially more expensive.
+
 For a compact LCD-only view (for example on a Raspberry Pi display or for
 diagnostics), use:
 

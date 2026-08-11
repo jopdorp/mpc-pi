@@ -23,6 +23,7 @@ mame_patches=(
     "$repo_root/patches/mame/0015-i8251-complete-clock-cycle.patch"
     "$repo_root/patches/mame/0016-i8251-skip-stable-idle-high-rx-shifts.patch"
     "$repo_root/patches/mame/0017-i8251-skip-stable-idle-transmit-callbacks.patch"
+    "$repo_root/patches/mame/0018-scheduler-cache-exact-cycle-divisors.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then
