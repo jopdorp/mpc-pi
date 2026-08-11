@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-expected_sha256=${MPC_TIMING_REFERENCE_SHA256:-d85ba20372c3b709acaff0e765ea388ceb0d858e506a9978df7d9792da5d86fd}
+expected_sha256=${MPC_TIMING_REFERENCE_SHA256:-22f76ffaaedc4364b8279a79672a07a35f93997f180b8665e9ef3a576ae176a9}
 project="$repo_root/results/projects/mpc-tutor-logic-mpc2000xl.img"
 capture_script="$repo_root/scripts/diagnostics/capture-logic-mpc2000xl.lua"
 clock_script="$repo_root/scripts/diagnostics/exercise-pipewire-clock-mpc2000xl.lua"

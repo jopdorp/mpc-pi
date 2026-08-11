@@ -181,6 +181,23 @@ queue remove/reinsert on every transition. In the matched playback profile,
 CPU time fell by about 7.5 percent without changing the reference PCM or live
 timing result.
 
+Patch 0012 removes the remaining generic `clock_device` and `devcb` dispatch
+from the MB89371's two internal baud-rate generators. The replacement still
+uses periodic emulation timers, emits every rising and falling edge, and saves
+the clock phase for save states. Across three interleaved full-project runs on
+a busy powersave workstation, the patched path reduced total MAME task-clock by
+6.0 percent, P-core cycles by 5.9 percent, and retired instructions by 7.7
+percent. Its deterministic Logic-project PCM is byte-identical to the periodic
+clock-device baseline.
+
+Patch 0013 fixes two lifecycle races in the isolated SDL event loop and async
+OpenGL presenter. The main thread now stops pumping SDL before window/backend
+teardown, and layout evaluation remains on the emulation thread because it
+reads live device state. The presenter still performs OpenGL drawing and swap
+asynchronously. A clean build completed 30 synchronous and 30 asynchronous
+window lifecycle runs without a crash; the previous code produced both stale
+SDL-backend calls and divide-by-zero faults while reading devices concurrently.
+
 For a compact LCD-only view (for example on a Raspberry Pi display or for
 diagnostics), use:
 

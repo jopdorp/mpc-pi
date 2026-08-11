@@ -1,0 +1,108 @@
+diff --git a/src/devices/machine/mb89371.cpp b/src/devices/machine/mb89371.cpp
+index b3561ffe..7066487a 100644
+--- a/src/devices/machine/mb89371.cpp
++++ b/src/devices/machine/mb89371.cpp
+@@ -38,18 +38,13 @@ void mb89371_device::device_add_mconfig(machine_config &config)
+ 	m_sio[1]->txrdy_handler().set(FUNC(mb89371_device::tx_ready_w<1>));
+ 	m_sio[1]->txempty_handler().set(FUNC(mb89371_device::tx_empty_w<1>));
+ 	m_sio[1]->syndet_handler().set(FUNC(mb89371_device::syndet_w<1>));
+-
+-	CLOCK(config, m_brg[0]);
+-	m_brg[0]->signal_handler().set(FUNC(mb89371_device::brg_tick<0>));
+-
+-	CLOCK(config, m_brg[1]);
+-	m_brg[1]->signal_handler().set(FUNC(mb89371_device::brg_tick<1>));
+ }
+ 
+ mb89371_device::mb89371_device(const machine_config &mconfig, const char *tag, device_t *owner, uint32_t clock)
+ 	: device_t(mconfig, MB89371, tag, owner, clock)
+ 	, m_sio(*this, "i8251_%u", 0)
+-	, m_brg(*this, "brg_%u", 0)
++	, m_brg_timer { nullptr, nullptr }
++	, m_brg_state { 0, 0 }
+ 	, m_txd_w { *this, *this }
+ 	, m_rxready_w { *this, *this }
+ 	, m_txready_w { *this, *this }
+@@ -62,8 +57,12 @@ mb89371_device::mb89371_device(const machine_config &mconfig, const char *tag, d
+ 
+ void mb89371_device::device_start()
+ {
++	for (int channel = 0; channel != 2; channel++)
++		m_brg_timer[channel] = timer_alloc(FUNC(mb89371_device::brg_tick), this);
++
+ 	save_item(NAME(m_mode));
+ 	save_item(NAME(m_baud));
++	save_item(NAME(m_brg_state));
+ }
+ 
+ void mb89371_device::device_post_load()
+@@ -130,15 +129,14 @@ template<int ch> uint8_t mb89371_device::read(offs_t offset)
+ template uint8_t mb89371_device::read<0>(offs_t offset);
+ template uint8_t mb89371_device::read<1>(offs_t offset);
+ 
+-template<int ch> void mb89371_device::brg_tick(int state)
++TIMER_CALLBACK_MEMBER(mb89371_device::brg_tick)
+ {
+-	m_sio[ch]->write_txc(state);
+-	m_sio[ch]->write_rxc(state);
++	const unsigned channel = param;
++	m_brg_state[channel] ^= 1;
++	m_sio[channel]->write_txc(m_brg_state[channel]);
++	m_sio[channel]->write_rxc(m_brg_state[channel]);
+ }
+ 
+-template void mb89371_device::brg_tick<0>(int state);
+-template void mb89371_device::brg_tick<1>(int state);
+-
+ template<int ch> uint8_t mb89371_device::baud_r()
+ {
+ 	return m_baud[ch];
+@@ -188,12 +186,16 @@ void mb89371_device::recalc_brg(int channel)
+ 	{
+ 		uint32_t rate = clock() / (2 << m_baud[channel]);
+ 		LOGMASKED(LOG_BAUD_RATE_GENERATOR, "BRG %d enabled at %d Hz\n", channel, rate);
+-		m_brg[channel]->set_period(attotime::from_hz(rate));
++		const attotime half_period = attotime::from_hz(rate * 2);
++		attotime first = m_brg_timer[channel]->remaining();
++		if (half_period < first)
++			first = half_period;
++		m_brg_timer[channel]->adjust(first, channel, half_period);
+ 	}
+ 	else
+ 	{
+ 		LOGMASKED(LOG_BAUD_RATE_GENERATOR, "BRG %d off\n", channel);
+-		m_brg[channel]->set_period(attotime::never);
++		m_brg_timer[channel]->adjust(attotime::never, channel);
+ 	}
+ }
+ 
+diff --git a/src/devices/machine/mb89371.h b/src/devices/machine/mb89371.h
+index 2f19386d..c6dfb799 100644
+--- a/src/devices/machine/mb89371.h
++++ b/src/devices/machine/mb89371.h
+@@ -11,8 +11,6 @@
+ 
+ #include "i8251.h"
+ 
+-#include "machine/clock.h"
+-
+ class mb89371_device : public device_t
+ {
+ public:
+@@ -62,13 +60,14 @@ private:
+ 	};
+ 
+ 	required_device_array<i8251_device, 2> m_sio;
+-	required_device_array<clock_device, 2> m_brg;
++	emu_timer *m_brg_timer[2];
++	uint8_t m_brg_state[2];
+ 
+ 	devcb_write_line m_txd_w[2], m_rxready_w[2], m_txready_w[2], m_txempty_w[2], m_syndet_w[2];
+ 
+ 	uint8_t m_mode[2], m_baud[2];
+ 
+-	template<int ch> void brg_tick(int state);
++	TIMER_CALLBACK_MEMBER(brg_tick);
+ 	void recalc_brg(int channel);
+ 	template<int ch> uint8_t baud_r();
+ 	template<int ch> void baud_w(uint8_t data);

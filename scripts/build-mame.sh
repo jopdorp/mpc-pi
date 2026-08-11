@@ -17,6 +17,8 @@ mame_patches=(
     "$repo_root/patches/mame/0009-pipewire-use-primary-output-as-audio-clock.patch"
     "$repo_root/patches/mame/0010-sound-use-16-sample-host-updates.patch"
     "$repo_root/patches/mame/0011-pipewire-keep-one-producer-update-of-margin.patch"
+    "$repo_root/patches/mame/0012-mb89371-use-direct-periodic-brg-timers.patch"
+    "$repo_root/patches/mame/0013-sdl-synchronize-async-render-shutdown.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then
