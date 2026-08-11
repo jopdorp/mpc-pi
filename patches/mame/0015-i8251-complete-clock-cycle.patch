@@ -1,0 +1,60 @@
+diff --git a/src/devices/machine/i8251.cpp b/src/devices/machine/i8251.cpp
+index f9871a5a..f215b687 100644
+--- a/src/devices/machine/i8251.cpp
++++ b/src/devices/machine/i8251.cpp
+@@ -918,6 +918,27 @@ void i8251_device::write_txc(int state)
+ 	}
+ }
+ 
++void i8251_device::clock_cycle()
++{
++	// A complete low-high-low clock cycle.  This is equivalent to calling
++	// write_txc(1), write_rxc(1), write_txc(0), write_rxc(0), without four
++	// separate state-normalising call boundaries.
++	m_txc = 1;
++	if (!m_rxc)
++	{
++		if (m_sync_byte_count == 1)
++			sync1_rxc();
++		else if (m_sync_byte_count == 2)
++			sync2_rxc();
++		else
++			receive_clock();
++	}
++	m_rxc = 1;
++	m_txc = 0;
++	transmit_clock();
++	m_rxc = 0;
++}
++
+ // forcibly kill hunt mode
+ void i8251_device::write_syn(int state)
+ {
+diff --git a/src/devices/machine/i8251.h b/src/devices/machine/i8251.h
+index f0da62ed..d223cc06 100644
+--- a/src/devices/machine/i8251.h
++++ b/src/devices/machine/i8251.h
+@@ -43,6 +43,7 @@ public:
+ 	void write_dsr(int state);
+ 	void write_txc(int state);
+ 	void write_rxc(int state);
++	void clock_cycle();
+ 	void write_syn(int state);
+ 
+ 	int txrdy_r();
+diff --git a/src/devices/machine/mb89371.cpp b/src/devices/machine/mb89371.cpp
+index 0329a738..95afdc89 100644
+--- a/src/devices/machine/mb89371.cpp
++++ b/src/devices/machine/mb89371.cpp
+@@ -133,10 +133,7 @@ TIMER_CALLBACK_MEMBER(mb89371_device::brg_tick)
+ 	// The USART samples RX on the rising edge and advances TX on the falling
+ 	// edge.  Deliver one complete BRG cycle per scheduler event; preserving the
+ 	// edge order avoids scheduling a second event that performs no other work.
+-	m_sio[channel]->write_txc(1);
+-	m_sio[channel]->write_rxc(1);
+-	m_sio[channel]->write_txc(0);
+-	m_sio[channel]->write_rxc(0);
++	m_sio[channel]->clock_cycle();
+ }
+ 
+ template<int ch> uint8_t mb89371_device::baud_r()

@@ -205,6 +205,13 @@ retired instructions by 6.76 percent and cycles by 4.74 percent over patch 0012.
 The Logic-project PCM remains byte-identical, and live ALSA MIDI input still
 drives the MPC program correctly.
 
+Patch 0015 adds an exact full-cycle operation to the i8251 and uses it from the
+MB89371 baud timer, avoiding four state-normalizing calls per baud cycle. Three
+interleaved MPC2000XL runs reduced whole-emulator retired instructions by 1.41
+percent over patch 0014. The Logic-project PCM remains byte-identical, and a
+live eight-note ALSA MIDI test produced the same -42.6 dB mean and -4.1 dB peak
+capture.
+
 For a compact LCD-only view (for example on a Raspberry Pi display or for
 diagnostics), use:
 

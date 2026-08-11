@@ -20,6 +20,7 @@ mame_patches=(
     "$repo_root/patches/mame/0012-mb89371-use-direct-periodic-brg-timers.patch"
     "$repo_root/patches/mame/0013-sdl-synchronize-async-render-shutdown.patch"
     "$repo_root/patches/mame/0014-mb89371-batch-complete-brg-cycles.patch"
+    "$repo_root/patches/mame/0015-i8251-complete-clock-cycle.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then
