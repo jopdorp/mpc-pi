@@ -15,7 +15,9 @@ The known-good full-panel desktop path is:
 - asynchronous low-priority primitive generation, drawing, and presentation;
 - SDL event pumping isolated on the low-priority process main thread;
 - emulation on CPUs 0-11 at nice -10 and SCHED_RR priority 20; and
-- MPC2000XL event-driven panel UART mode.
+- MPC2000XL event-driven panel UART mode; and
+- event-driven MB89371 MIDI baud clocks with the periodic compatibility mode
+  retained for canonical regression renders.
 
 The SDL library is not patched or replaced. These video changes are confined
 to MAME's SDL OSD/backend source (`src/osd/sdl`), which uses the stock system
@@ -61,6 +63,7 @@ host-level commands and must remain documented whenever they change.
 | `MPC_WINDOW_RESOLUTION` | `auto` | Let MAME size the render target |
 | `MPC_PANEL_MODE` | `event` | Event-driven MPC2000XL panel UART |
 | `MPC_MIDI_INPUT_MODE` | `accurate` | Choose accurate wire timing, fast external MIDI, or direct internal-pad events |
+| `MPC_MIDI_CLOCK_MODE` | `event` | Event-driven external MIDI baud clocks; use `accurate` for periodic-clock compatibility |
 
 ## MPD18 input modes
 
@@ -91,6 +94,44 @@ host polling through reception of the three serialized MIDI bytes, before the
 firmware/DSP response. The injection boundary itself stayed below 0.122 ms in
 all 20 direct-pad events. These figures stop at DSP key-on and do not include
 the separate host audio-buffer delay.
+
+## MIDI baud-clock scheduling
+
+`MPC_MIDI_CLOCK_MODE` is independent of `MPC_MIDI_INPUT_MODE`. The input mode
+chooses how host MIDI enters the emulated machine. The clock mode chooses how
+the MPC2000XL's two MB89371 UART baud generators are scheduled.
+
+The compatibility `accurate` mode schedules both 2 MHz oversampling clocks
+periodically, including while both UARTs are idle. The default `event` mode
+fast-forwards idle clock phase analytically and schedules only the next UART
+sample or transmit boundary that can change state. Incoming RX transitions
+and firmware writes first advance to their exact emulated time, so active MIDI
+still uses the UART and its 31.25 kbaud wire timing. Use this canonical control
+when comparing byte-identical legacy renders:
+
+```bash
+MPC_PANEL_MODE=accurate MPC_MIDI_CLOCK_MODE=accurate \
+  scripts/run-mpc.sh mpc2000xl 32 [MAME options]
+```
+
+On the 84.9-second loaded Logic benchmark, scheduler instrumentation measured
+337,462,371 MB89371 callbacks in periodic mode and 54 in event mode. A matched
+uninstrumented, single-CPU, video-disabled A/B measured:
+
+| Metric | Periodic | Event | Change |
+|---|---:|---:|---:|
+| Task clock | 58,170.18 ms | 30,628.32 ms | -47.34% |
+| CPU cycles | 139.46 billion | 73.21 billion | -47.50% |
+| Instructions | 405.79 billion | 192.53 billion | -52.56% |
+| Average emulation speed | 148.99% | 289.38% | +94.23% |
+
+Event mode produced the same 86 DSP key-ons in the same order, channels,
+sample addresses, and simultaneous-event groups. Against the theoretical
+86 BPM / 96 PPQN sequence grid, the current event-panel control had an
+873.2 us worst residual and event-driven MIDI clocks had an 885.9 us worst
+residual. Their median residuals were 16.0 and 15.1 samples respectively. The
+PCM phase changes, so canonical hash checks explicitly select `accurate` MIDI
+clocks; sample playback remains continuously clocked after each key-on.
 
 The client request alone does not guarantee a 32-frame graph when other
 PipeWire clients request a larger quantum. The validated host explicitly

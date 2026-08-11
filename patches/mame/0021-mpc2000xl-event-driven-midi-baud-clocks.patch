@@ -1,0 +1,239 @@
+diff --git a/src/devices/machine/mb89371.cpp b/src/devices/machine/mb89371.cpp
+index 40e89722..ff52cdea 100644
+--- a/src/devices/machine/mb89371.cpp
++++ b/src/devices/machine/mb89371.cpp
+@@ -44,6 +44,10 @@ mb89371_device::mb89371_device(const machine_config &mconfig, const char *tag, d
+ 	: device_t(mconfig, MB89371, tag, owner, clock)
+ 	, m_sio(*this, "i8251_%u", 0)
+ 	, m_brg_timer { nullptr, nullptr }
++	, m_brg_interval { attotime::never, attotime::never }
++	, m_brg_next { attotime::never, attotime::never }
++	, m_brg_frequency { 0, 0 }
++	, m_event_driven_brg(false)
+ 	, m_txd_w { *this, *this }
+ 	, m_rxready_w { *this, *this }
+ 	, m_txready_w { *this, *this }
+@@ -65,6 +69,9 @@ void mb89371_device::device_start()
+ 
+ 	save_item(NAME(m_mode));
+ 	save_item(NAME(m_baud));
++	save_item(NAME(m_brg_interval));
++	save_item(NAME(m_brg_next));
++	save_item(NAME(m_brg_frequency));
+ 	save_item(NAME(m_fast_rx_queue));
+ 	save_item(NAME(m_fast_rx_read));
+ 	save_item(NAME(m_fast_rx_write));
+@@ -86,10 +93,7 @@ void mb89371_device::device_post_load()
+ 
+ template<int ch> void mb89371_device::map(address_map &map)
+ {
+-	map(0x0, 0x0).rw(FUNC(mb89371_device::data_r<ch>), FUNC(mb89371_device::write<ch>));
+-	map(0x1, 0x1).rw(m_sio[ch], FUNC(i8251_device::status_r), FUNC(i8251_device::control_w));
+-	map(0x2, 0x2).rw(FUNC(mb89371_device::baud_r<ch>), FUNC(mb89371_device::baud_w<ch>));
+-	map(0x3, 0x3).rw(FUNC(mb89371_device::mode_r<ch>), FUNC(mb89371_device::mode_w<ch>));
++	map(0x0, 0x3).rw(FUNC(mb89371_device::read<ch>), FUNC(mb89371_device::write<ch>));
+ }
+ 
+ template void mb89371_device::map<0>(address_map &map);
+@@ -131,6 +135,10 @@ template uint8_t mb89371_device::data_r<1>();
+ 
+ template<int ch> void mb89371_device::write(offs_t offset, uint8_t data)
+ {
++	const attotime now = machine().time();
++	if (m_event_driven_brg && BIT(m_mode[ch], MODE_USE_BRG))
++		direct_brg_prepare_write(ch, now);
++
+ 	switch (offset)
+ 	{
+ 	case 0:
+@@ -149,6 +157,9 @@ template<int ch> void mb89371_device::write(offs_t offset, uint8_t data)
+ 		mode_w<ch>(data);
+ 		break;
+ 	}
++
++	if (m_event_driven_brg && BIT(m_mode[ch], MODE_USE_BRG))
++		direct_brg_reschedule(ch, now);
+ }
+ 
+ template void mb89371_device::write<0>(offs_t offset, uint8_t data);
+@@ -179,12 +190,73 @@ template uint8_t mb89371_device::read<1>(offs_t offset);
+ TIMER_CALLBACK_MEMBER(mb89371_device::brg_tick)
+ {
+ 	const unsigned channel = param;
++	if (m_event_driven_brg)
++	{
++		const attotime now = machine().time();
++		direct_brg_advance(channel, now);
++		direct_brg_reschedule(channel, now);
++		return;
++	}
++
+ 	// The USART samples RX on the rising edge and advances TX on the falling
+ 	// edge.  Deliver one complete BRG cycle per scheduler event; preserving the
+ 	// edge order avoids scheduling a second event that performs no other work.
+ 	m_sio[channel]->clock_cycle();
+ }
+ 
++void mb89371_device::direct_brg_advance(int channel, const attotime &now)
++{
++	while (m_brg_next[channel] <= now)
++	{
++		m_sio[channel]->clock_cycle();
++		m_brg_next[channel] += m_brg_interval[channel];
++	}
++}
++
++void mb89371_device::direct_brg_fast_forward(int channel, const attotime &now)
++{
++	if (m_brg_next[channel] <= now)
++	{
++		const u64 clocks = (now - m_brg_next[channel]).as_ticks(m_brg_frequency[channel]) + 1;
++		m_brg_next[channel] += m_brg_interval[channel] * clocks;
++	}
++}
++
++void mb89371_device::direct_brg_reschedule(int channel, const attotime &now)
++{
++	m_brg_timer[channel]->adjust(attotime::never, channel);
++	const int clocks = m_sio[channel]->clocks_until_event();
++	if (!BIT(m_mode[channel], MODE_USE_BRG) || !clocks)
++		return;
++
++	const attotime target = m_brg_next[channel] + (m_brg_interval[channel] * (clocks - 1));
++	m_brg_timer[channel]->adjust(target > now ? target - now : attotime::zero, channel);
++}
++
++void mb89371_device::direct_brg_prepare_write(int channel, const attotime &now)
++{
++	if (m_sio[channel]->clock_idle())
++		direct_brg_fast_forward(channel, now);
++	else
++		direct_brg_advance(channel, now);
++}
++
++template<int ch> void mb89371_device::write_rxd(int state)
++{
++	if (BIT(m_mode[ch], MODE_LOOPBACK))
++		return;
++
++	const attotime now = machine().time();
++	if (m_event_driven_brg && BIT(m_mode[ch], MODE_USE_BRG))
++		direct_brg_prepare_write(ch, now);
++	m_sio[ch]->write_rxd(state);
++	if (m_event_driven_brg && BIT(m_mode[ch], MODE_USE_BRG))
++		direct_brg_reschedule(ch, now);
++}
++
++template void mb89371_device::write_rxd<0>(int state);
++template void mb89371_device::write_rxd<1>(int state);
++
+ template<int ch> uint8_t mb89371_device::baud_r()
+ {
+ 	return m_baud[ch];
+@@ -234,16 +306,40 @@ void mb89371_device::recalc_brg(int channel)
+ 	{
+ 		uint32_t rate = clock() / (2 << m_baud[channel]);
+ 		LOGMASKED(LOG_BAUD_RATE_GENERATOR, "BRG %d enabled at %d Hz\n", channel, rate);
++		const attotime now = machine().time();
+ 		const attotime period = attotime::from_hz(rate);
+-		attotime first = m_brg_timer[channel]->remaining();
++		attotime first;
++		if (m_event_driven_brg && m_brg_frequency[channel])
++		{
++			direct_brg_prepare_write(channel, now);
++			first = m_brg_next[channel] - now;
++		}
++		else
++		{
++			first = m_brg_timer[channel]->remaining();
++		}
+ 		if (period < first)
+ 			first = period;
+-		m_brg_timer[channel]->adjust(first, channel, period);
++		if (m_event_driven_brg)
++		{
++			m_brg_timer[channel]->adjust(attotime::never, channel);
++			m_brg_interval[channel] = period;
++			m_brg_frequency[channel] = rate;
++			m_brg_next[channel] = now + first;
++			direct_brg_reschedule(channel, now);
++		}
++		else
++		{
++			m_brg_timer[channel]->adjust(first, channel, period);
++		}
+ 	}
+ 	else
+ 	{
+ 		LOGMASKED(LOG_BAUD_RATE_GENERATOR, "BRG %d off\n", channel);
+ 		m_brg_timer[channel]->adjust(attotime::never, channel);
++		m_brg_interval[channel] = attotime::never;
++		m_brg_next[channel] = attotime::never;
++		m_brg_frequency[channel] = 0;
+ 	}
+ }
+ 
+diff --git a/src/devices/machine/mb89371.h b/src/devices/machine/mb89371.h
+index 0aafe4fa..b85ea498 100644
+--- a/src/devices/machine/mb89371.h
++++ b/src/devices/machine/mb89371.h
+@@ -16,6 +16,7 @@ class mb89371_device : public device_t
+ public:
+ 	// construction/destruction
+ 	mb89371_device(const machine_config &mconfig, const char *tag, device_t *owner, uint32_t clock);
++	void set_event_driven_brg(bool enabled) { m_event_driven_brg = enabled; }
+ 
+ 	template<int ch> void map(address_map &map) ATTR_COLD;
+ 
+@@ -27,7 +28,7 @@ public:
+ 	template<int ch> auto txempty_handler() { return m_txempty_w[ch].bind(); }
+ 	template<int ch> auto syndet_handler() { return m_syndet_w[ch].bind(); }
+ 
+-	template<int ch> void write_rxd(int state) { if (!BIT(m_mode[ch], MODE_LOOPBACK)) m_sio[ch]->write_rxd(state); }
++	template<int ch> void write_rxd(int state);
+ 	template<int ch> void receive_byte(u8 data);
+ 	template<int ch> void write_cts(int state) { m_sio[ch]->write_cts(state); }
+ 	template<int ch> void write_dsr(int state) { m_sio[ch]->write_dsr(state); }
+@@ -63,6 +64,10 @@ private:
+ 
+ 	required_device_array<i8251_device, 2> m_sio;
+ 	emu_timer *m_brg_timer[2];
++	attotime m_brg_interval[2];
++	attotime m_brg_next[2];
++	uint32_t m_brg_frequency[2];
++	bool m_event_driven_brg;
+ 
+ 	devcb_write_line m_txd_w[2], m_rxready_w[2], m_txready_w[2], m_txempty_w[2], m_syndet_w[2];
+ 
+@@ -73,6 +78,10 @@ private:
+ 
+ 	TIMER_CALLBACK_MEMBER(brg_tick);
+ 	void recalc_brg(int channel);
++	void direct_brg_advance(int channel, const attotime &now);
++	void direct_brg_fast_forward(int channel, const attotime &now);
++	void direct_brg_reschedule(int channel, const attotime &now);
++	void direct_brg_prepare_write(int channel, const attotime &now);
+ 	template<int ch> uint8_t baud_r();
+ 	template<int ch> uint8_t data_r();
+ 	template<int ch> void baud_w(uint8_t data);
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+index 3d751c82..143bbc98 100644
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -750,6 +750,8 @@ void mpc2000_state::mpc2000(machine_config &config)
+ {
+ 	const char *const panel_mode = osd_getenv("MAME_MPC_PANEL_EVENT_DRIVEN");
+ 	const bool event_driven_panel = panel_mode && std::strcmp(panel_mode, "0");
++	const char *const midi_brg_mode = osd_getenv("MAME_MPC_MIDI_EVENT_DRIVEN");
++	const bool event_driven_midi_brg = midi_brg_mode && std::strcmp(midi_brg_mode, "0");
+ 	if (event_driven_panel)
+ 		add_panel(config, true);
+ 
+@@ -831,6 +833,7 @@ void mpc2000_state::mpc2000(machine_config &config)
+ 
+ 	// IC100: MIDI A & B
+ 	MB89371(config, m_sio, V53_PCLKOUT);
++	m_sio->set_event_driven_brg(event_driven_midi_brg);
+ 	m_sio->rxrdy_handler<0>().set("intp4", FUNC(input_merger_device::in_w<1>));
+ 	m_sio->rxrdy_handler<1>().set("intp4", FUNC(input_merger_device::in_w<2>));
+ 	m_sio->txrdy_handler<0>().set_inputline(m_maincpu, INPUT_LINE_IRQ7);

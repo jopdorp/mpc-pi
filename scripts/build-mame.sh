@@ -26,6 +26,7 @@ mame_patches=(
     "$repo_root/patches/mame/0018-scheduler-cache-exact-cycle-divisors.patch"
     "$repo_root/patches/mame/0019-mpc2000xl-event-driven-panel-uart.patch"
     "$repo_root/patches/mame/0020-mpc2000xl-low-latency-midi-pad-input.patch"
+    "$repo_root/patches/mame/0021-mpc2000xl-event-driven-midi-baud-clocks.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then

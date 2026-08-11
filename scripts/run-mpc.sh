@@ -24,6 +24,7 @@ external_event_loop=${MPC_SDL_EXTERNAL_EVENT_LOOP:-1}
 bios_name=${MAME_BIOS:-}
 panel_mode=${MPC_PANEL_MODE:-}
 midi_input_mode=${MPC_MIDI_INPUT_MODE:-accurate}
+midi_clock_mode=${MPC_MIDI_CLOCK_MODE:-}
 
 if (( $# > 0 )); then shift; fi
 if (( $# > 0 )); then shift; fi
@@ -32,18 +33,22 @@ case "$system_name" in
     mpc2000xl)
         bios_name=${bios_name:-default}
         panel_mode=${panel_mode:-event}
+        midi_clock_mode=${midi_clock_mode:-event}
         ;;
     mpc3000)
         bios_name=${bios_name:-vailixi}
         panel_mode=${panel_mode:-accurate}
+        midi_clock_mode=${midi_clock_mode:-accurate}
         ;;
     mpc60)
         bios_name=${bios_name:-v212}
         panel_mode=${panel_mode:-accurate}
+        midi_clock_mode=${midi_clock_mode:-accurate}
         ;;
     mpc60scsi)
         bios_name=${bios_name:-v214}
         panel_mode=${panel_mode:-accurate}
+        midi_clock_mode=${midi_clock_mode:-accurate}
         ;;
     *)
         printf 'error: unsupported system %s\n' "$system_name" >&2
@@ -64,6 +69,23 @@ case "$panel_mode" in
         ;;
     *)
         printf 'error: MPC_PANEL_MODE must be accurate or event, got %s\n' "$panel_mode" >&2
+        exit 2
+        ;;
+esac
+
+case "$midi_clock_mode" in
+    accurate)
+        midi_clock_environment=(MAME_MPC_MIDI_EVENT_DRIVEN=0)
+        ;;
+    event)
+        if [[ "$system_name" != mpc2000xl ]]; then
+            printf 'error: MPC_MIDI_CLOCK_MODE=event is only supported by mpc2000xl\n' >&2
+            exit 2
+        fi
+        midi_clock_environment=(MAME_MPC_MIDI_EVENT_DRIVEN=1)
+        ;;
+    *)
+        printf 'error: MPC_MIDI_CLOCK_MODE must be accurate or event, got %s\n' "$midi_clock_mode" >&2
         exit 2
         ;;
 esac
@@ -202,12 +224,14 @@ printf 'Timing master: %s\n' "$timing_master"
 if [[ "$system_name" == mpc2000xl ]]; then
     printf 'Panel UART: %s mode\n' "$panel_mode"
     printf 'MIDI input: %s mode\n' "$midi_input_mode"
+    printf 'MIDI baud clocks: %s mode\n' "$midi_clock_mode"
 fi
 printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, resolution=%s, bilinear=%s\n' \
     "$video_mode" "$async_present" "$external_event_loop" "$view_name" "$window_resolution" "$filter_mode"
 
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
-    env "${midi_unset_environment[@]}" "${clock_environment[@]}" "${panel_environment[@]}" "${midi_environment[@]}" \
+    env "${midi_unset_environment[@]}" "${clock_environment[@]}" "${panel_environment[@]}" \
+    "${midi_clock_environment[@]}" "${midi_environment[@]}" \
     MAME_ASYNC_PRESENT="$async_present" \
     MAME_SDL_EXTERNAL_EVENT_LOOP="$external_event_loop" \
     PIPEWIRE_QUANTUM="$pipewire_quantum" PIPEWIRE_LATENCY="$pipewire_latency" \
