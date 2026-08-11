@@ -9,6 +9,7 @@ runtime_dir=${MAME_RUNTIME_DIR:-"$repo_root/results/runtime"}
 system_name=${1:-mpc2000xl}
 pipewire_frames=${2:-32}
 pipewire_rate=${PIPEWIRE_RATE_HZ:-48000}
+alsa_headroom=${MPC_ALSA_HEADROOM:-keep}
 mame_nice=${MAME_NICE:--10}
 mame_rt_priority=${MAME_RT_PRIORITY:-20}
 mame_cpuset=${MAME_CPUSET:-0-11}
@@ -76,6 +77,11 @@ if [[ ! "$pipewire_rate" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
+if [[ "$alsa_headroom" != keep && ! "$alsa_headroom" =~ ^[0-9]+$ ]]; then
+    printf 'error: MPC_ALSA_HEADROOM must be a non-negative frame count or keep, got %s\n' "$alsa_headroom" >&2
+    exit 2
+fi
+
 if [[ ! "$mame_nice" =~ ^-?([0-9]|1[0-9]|20)$ ]]; then
     printf 'error: MAME_NICE must be an integer from -20 through 20, got %s\n' "$mame_nice" >&2
     exit 2
@@ -135,6 +141,24 @@ esac
 if [[ ! -x "$mame_bin" ]]; then
     printf 'error: release MAME binary not found at %s; run scripts/build-mame.sh first\n' "$mame_bin" >&2
     exit 1
+fi
+
+if [[ "$alsa_headroom" != keep ]]; then
+    if command -v wpctl >/dev/null && command -v pw-cli >/dev/null; then
+        default_sink_info=$(wpctl inspect @DEFAULT_AUDIO_SINK@ 2>/dev/null || true)
+        default_sink_id=$(sed -n '1s/^id \([0-9][0-9]*\),.*/\1/p' <<<"$default_sink_info")
+        if [[ -n "$default_sink_id" ]] && grep -q '^[[:space:]]*alsa\.card = ' <<<"$default_sink_info"; then
+            pw-cli set-param "$default_sink_id" Props \
+                "{ params = [ \"api.alsa.headroom\" $alsa_headroom ] }" >/dev/null
+            printf 'Default ALSA sink %s headroom: %s frames\n' "$default_sink_id" "$alsa_headroom"
+        else
+            printf 'warning: default PipeWire sink is not an ALSA node; headroom was not changed\n' >&2
+        fi
+    else
+        printf 'warning: wpctl/pw-cli unavailable; ALSA headroom was not changed\n' >&2
+    fi
+else
+    printf 'Default ALSA sink headroom: unchanged\n'
 fi
 
 mkdir -p -- "$rom_dir" "$runtime_dir/cfg" "$runtime_dir/diff" "$runtime_dir/nvram" "$runtime_dir/snap" "$runtime_dir/sta"

@@ -132,6 +132,13 @@ to 32 frames and sets both the native PipeWire quantum and latency request.
 `pw-jack` is for JACK clients running on PipeWire and is not
 needed for MAME's native PipeWire backend.
 
+For an ALSA-backed default sink, `MPC_ALSA_HEADROOM=<frames>` changes
+PipeWire's device headroom before launch. The default is `keep`, which leaves
+the sink untouched. Zero headroom passed the interactive resize test, but a
+matched 60-second run produced eight main-output underruns versus three with
+48 frames, so zero is not the stable default. This setting is separate from
+MAME's 16-sample producer cadence and its 48-frame internal deadline margin.
+
 The launcher also uses `nice -10` and round-robin real-time scheduling at
 priority 20. PipeWire runs at RR 90 on this host, so its processing remains
 higher priority. Override these with `MAME_NICE` and `MAME_RT_PRIORITY` when
@@ -190,13 +197,14 @@ a busy powersave workstation, the patched path reduced total MAME task-clock by
 percent. Its deterministic Logic-project PCM is byte-identical to the periodic
 clock-device baseline.
 
-Patch 0013 fixes two lifecycle races in the isolated SDL event loop and async
-OpenGL presenter. The main thread now stops pumping SDL before window/backend
-teardown, and layout evaluation remains on the emulation thread because it
-reads live device state. The presenter still performs OpenGL drawing and swap
-asynchronously. A clean build completed 30 synchronous and 30 asynchronous
-window lifecycle runs without a crash; the previous code produced both stale
-SDL-backend calls and divide-by-zero faults while reading devices concurrently.
+Patch 0013 fixes the teardown lifecycle race in the isolated SDL event loop.
+The main thread stops pumping SDL before window/backend teardown. Primitive
+generation, layout scaling, OpenGL drawing, and swap remain on the low-priority
+presenter: moving primitive generation back to the emulation thread caused
+resize spikes up to 192.6 ms and matching audio underruns. The event-driven
+frame handoff drops visual work when the presenter is busy, keeping interactive
+resize outside the audio-producing timeline. These patches modify MAME's SDL
+OSD/backend code, not the SDL library; the system SDL runtime remains stock.
 
 Patch 0014 batches each MB89371 baud generator's rising and falling USART edges
 into one periodic scheduler callback while preserving their logical order. This
@@ -248,7 +256,8 @@ MPC_VIEW_NAME='Screen 0' MPC_WINDOW_RESOLUTION=1240x300 scripts/run-mpc.sh
 ```
 
 Override `MPC_VIEW_NAME`, `MPC_WINDOW_RESOLUTION`, `MPC_FILTER_MODE`,
-`MPC_VIDEO_MODE`, `MPC_ASYNC_PRESENT`, or `MPC_MAXIMIZE` as needed. Set
+`MPC_VIDEO_MODE`, `MPC_ASYNC_PRESENT`, `MPC_MAXIMIZE`, or
+`MPC_ALSA_HEADROOM` as needed. Set
 `MPC_MAXIMIZE=0 MPC_WINDOW_RESOLUTION=1240x894` for a fixed-size desktop
 window.
 
@@ -259,6 +268,10 @@ Run the deterministic offline and full live MPC2000XL timing regressions with:
 MPC_ASYNC_PRESENT=1 MPC_VIDEO_MODE=opengl MPC_VIEW_NAME='Screen 0' \
   ./scripts/diagnostics/test-mpc2000xl-live-timing.sh
 ```
+
+The exact desktop listening configuration and the resize-regression evidence
+are recorded in
+[MPC2000XL low-latency desktop settings](docs/mpc2000xl-low-latency.md).
 
 The live test captures exactly what the PipeWire callback delivered, requires
 zero buffer corrections during playback, rejects inserted or removed whole

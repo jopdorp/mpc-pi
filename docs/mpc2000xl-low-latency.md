@@ -1,0 +1,149 @@
+# MPC2000XL low-latency desktop settings
+
+## Validated configuration
+
+The known-good full-panel desktop path is:
+
+- native PipeWire audio at 48 kHz;
+- 32-frame PipeWire graph quantum and client latency request;
+- unchanged ALSA device headroom by default, with an explicit zero-headroom
+  experimental option;
+- 16-sample MAME sound-update cadence;
+- one quantum plus one producer update of internal margin (48 samples);
+- audio-master pacing with MAME video throttling disabled;
+- OpenGL full-panel rendering, bilinear filtering, and a maximized window;
+- asynchronous low-priority primitive generation, drawing, and presentation;
+- SDL event pumping isolated on the low-priority process main thread;
+- emulation on CPUs 0-11 at nice -10 and SCHED_RR priority 20; and
+- MPC2000XL event-driven panel UART mode.
+
+The SDL library is not patched or replaced. These video changes are confined
+to MAME's SDL OSD/backend source (`src/osd/sdl`), which uses the stock system
+SDL runtime.
+
+Launch the Logic tutorial project with the MPD18 as MIDI input:
+
+```bash
+scripts/run-mpc.sh mpc2000xl 32 \
+  -flop results/projects/mpc-tutor-logic-mpc2000xl.img \
+  -skip_gameinfo \
+  -midiin1 'Akai MPD18 MIDI 1' \
+  -autoboot_script scripts/lua/listen-loaded-mpc2000xl.lua
+```
+
+The launcher leaves the default ALSA PipeWire sink unchanged. Set
+`MPC_ALSA_HEADROOM=0` for the lower-latency experiment or, for example,
+`MPC_ALSA_HEADROOM=48` for an A/B comparison. The setting remains on that
+PipeWire node after MAME exits.
+
+## Launch-time configuration
+
+These settings are not compiled into MAME. They are launcher defaults or
+host-level commands and must remain documented whenever they change.
+
+| Setting | Default | Effect |
+|---|---|---|
+| Second launcher argument | `32` | PipeWire client latency and quantum request in frames |
+| `PIPEWIRE_RATE_HZ` | `48000` | Host sample rate |
+| `PIPEWIRE_QUANTUM` | `32/48000` | Override the client quantum request |
+| `PIPEWIRE_LATENCY` | `32/48000` | Override the client latency request |
+| `MPC_ALSA_HEADROOM` | `keep` | Leave device-side ALSA headroom unchanged, or set a frame count |
+| `MAME_TIMING_MASTER` | `audio` | PipeWire output paces emulation and MAME runs `-nothrottle` |
+| `MAME_CPUSET` | `0-11` | CPU affinity for the MAME process and its workers |
+| `MAME_NICE` | `-10` | Emulation process nice level |
+| `MAME_RT_PRIORITY` | `20` | Emulation SCHED_RR priority; PipeWire is RR 90 on the test host |
+| `MPC_VIDEO_MODE` | `opengl` | Desktop renderer |
+| `MPC_ASYNC_PRESENT` | `1` | Enable asynchronous presentation |
+| `MPC_SDL_EXTERNAL_EVENT_LOOP` | `1` | Isolate SDL event pumping from emulation |
+| `MPC_VIEW_NAME` | `Default Layout` | Render the complete MPC panel |
+| `MPC_FILTER_MODE` | `1` | Enable bilinear filtering |
+| `MPC_MAXIMIZE` | `1` | Start maximized |
+| `MPC_WINDOW_RESOLUTION` | `auto` | Let MAME size the render target |
+| `MPC_PANEL_MODE` | `event` | Event-driven MPC2000XL panel UART |
+
+The client request alone does not guarantee a 32-frame graph when other
+PipeWire clients request a larger quantum. The validated host explicitly
+forces it:
+
+```bash
+pw-metadata -n settings 0 clock.force-quantum 32
+```
+
+Verify both the forced setting and the running graph:
+
+```bash
+pw-metadata -n settings 0 | grep clock.force-quantum
+pw-top
+```
+
+Release the host-wide override after testing with:
+
+```bash
+pw-metadata -n settings 0 clock.force-quantum 0
+```
+
+The launcher needs permission for negative nice values and SCHED_RR. On this
+workstation those permissions were configured outside the repository. A launch
+that fails at `nice` or `chrt` is not equivalent to the validated run; either
+restore the host permissions or explicitly choose documented fallback values,
+for example `MAME_NICE=0 MAME_RT_PRIORITY=1`.
+
+## Resize regression
+
+Primitive-list generation includes resize-dependent layout and artwork
+scaling. It must run on the asynchronous presenter, not on the
+emulation/audio-producing thread. A regressed build put `get_primitives()` on
+the emulation thread. Profiling an active resize measured:
+
+| Stage | Normal | Active-resize worst case |
+|---|---:|---:|
+| Cursor update | about 18 us | 64.5 us |
+| Layout setup | about 9 us | 94.2 us |
+| Primitive generation | about 150 us | 192.6 ms |
+
+The primitive spike coincided with 80-190 ms gaps in the main audio producer
+and immediate MAME buffer underruns. Restoring primitive generation to the
+low-priority presenter eliminated audible resize xruns in the interactive
+full-panel test. With that fixed, the PCM2900C default sink also passed the
+same short interactive resize test at zero device headroom. PipeWire's sink
+error counter stayed unchanged during that run. At the time of that test,
+`powerprofilesctl get` reported `power-saver`, and CPUs 0 and 10 both reported
+the `powersave` governor with `energy_performance_preference=power`.
+
+Zero headroom did not pass the longer stability gate. Matched 60-second
+audio-master runs with the same clean binary, 32-frame graph, 16-sample
+cadence, event-driven panel, and video disabled measured:
+
+| ALSA headroom | Main-output underruns |
+|---:|---:|
+| 48 frames | 3 |
+| 0 frames | 8 |
+
+The comparison shows that device headroom influences tolerance but does not
+fix the producer tail: even 48 frames was not clean. Zero therefore remains an
+explicit latency experiment, not the launcher default.
+
+Patch `0013-sdl-synchronize-async-render-shutdown.patch` therefore retains the
+safe SDL teardown ordering without moving primitive generation back to the
+emulation thread.
+
+## Verification
+
+Run the deterministic and live timing checks after rebuilding:
+
+```bash
+scripts/diagnostics/test-mpc2000xl-timing.sh
+MPC_ASYNC_PRESENT=1 MPC_VIDEO_MODE=opengl \
+  scripts/diagnostics/test-mpc2000xl-live-timing.sh
+```
+
+During an interactive test, confirm the active graph and error counters with:
+
+```bash
+pw-top
+pw-cli enum-params "$(wpctl inspect @DEFAULT_AUDIO_SINK@ | sed -n '1s/^id \([0-9][0-9]*\),.*/\1/p')" Props
+```
+
+Do not increase the PipeWire quantum or MAME sound cadence to mask a resize
+failure. A resize xrun is evidence that desktop video work has leaked back into
+the emulation timeline.
