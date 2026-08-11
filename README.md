@@ -128,7 +128,8 @@ PIPEWIRE_LATENCY=128/48000 .cache/mame/mpc mpc2000xl \
 ```
 
 The launcher wraps this as `scripts/run-mpc.sh <machine> <frames>`. It defaults
-to 64 frames. `pw-jack` is for JACK clients running on PipeWire and is not
+to 32 frames and sets both the native PipeWire quantum and latency request.
+`pw-jack` is for JACK clients running on PipeWire and is not
 needed for MAME's native PipeWire backend.
 
 The launcher also uses `nice -10` and round-robin real-time scheduling at
@@ -138,9 +139,12 @@ needed.
 
 The launcher enables the patched PipeWire audio clock and disables MAME's
 independent video throttle. Fast loading remains unpaced, but at normal speed
-the complete group of MAME output streams is paced from PipeWire with a
-four-quantum prebuffer (5.33 ms at 64/48 kHz). This avoids independently
-dropping or repeating samples to reconcile the host and emulator clocks.
+the main speaker output is paced from PipeWire with one negotiated graph
+quantum of prebuffer. At 48 kHz MAME exports 16-sample blocks at 3 kHz; with a
+32-frame PipeWire quantum this keeps the intended host window to 48 samples
+(1 ms). This is the low-latency profiling baseline: occasional missed producer
+deadlines remain under investigation and must be eliminated before treating
+the one-quantum mode as xrun-proof.
 
 The default desktop video path is the complete MPC panel, rendered with
 bilinear OpenGL in a maximized window. The OpenGL path hands completed

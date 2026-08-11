@@ -7,7 +7,7 @@ mame_bin=${MAME_BIN:-"$mame_source_dir/mpc"}
 rom_dir=${MAME_ROM_DIR:-"$repo_root/roms"}
 runtime_dir=${MAME_RUNTIME_DIR:-"$repo_root/results/runtime"}
 system_name=${1:-mpc2000xl}
-pipewire_frames=${2:-64}
+pipewire_frames=${2:-32}
 pipewire_rate=${PIPEWIRE_RATE_HZ:-48000}
 mame_nice=${MAME_NICE:--10}
 mame_rt_priority=${MAME_RT_PRIORITY:-20}
@@ -117,10 +117,11 @@ fi
 
 mkdir -p -- "$rom_dir" "$runtime_dir/cfg" "$runtime_dir/diff" "$runtime_dir/nvram" "$runtime_dir/snap" "$runtime_dir/sta"
 pipewire_latency=${PIPEWIRE_LATENCY:-"$pipewire_frames/$pipewire_rate"}
+pipewire_quantum=${PIPEWIRE_QUANTUM:-"$pipewire_frames/$pipewire_rate"}
 latency_ms=$(LC_NUMERIC=C awk -v frames="$pipewire_frames" -v rate="$pipewire_rate" \
     'BEGIN { printf "%.2f", frames * 1000 / rate }')
-printf 'Starting %s BIOS %s with native PipeWire; PIPEWIRE_LATENCY=%s (~%s ms per period)\n' \
-    "$system_name" "$bios_name" "$pipewire_latency" "$latency_ms"
+printf 'Starting %s BIOS %s with native PipeWire; quantum=%s, latency=%s (~%s ms requested)\n' \
+    "$system_name" "$bios_name" "$pipewire_quantum" "$pipewire_latency" "$latency_ms"
 printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s (PipeWire runs above it at RR 90)\n' \
     "$mame_cpuset" "$mame_nice" "$mame_rt_priority"
 printf 'Timing master: %s\n' "$timing_master"
@@ -130,7 +131,8 @@ printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, resolution=%s, bi
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
     env "${clock_environment[@]}" MAME_ASYNC_PRESENT="$async_present" \
     MAME_SDL_EXTERNAL_EVENT_LOOP="$external_event_loop" \
-    PIPEWIRE_LATENCY="$pipewire_latency" "$mame_bin" "$system_name" \
+    PIPEWIRE_QUANTUM="$pipewire_quantum" PIPEWIRE_LATENCY="$pipewire_latency" \
+    "$mame_bin" "$system_name" \
     -rompath "$rom_dir" \
     -bios "$bios_name" \
     -sound pipewire \

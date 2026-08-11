@@ -15,6 +15,7 @@ mame_patches=(
     "$repo_root/patches/mame/0007-clock-use-periodic-timer-for-50-percent-duty.patch"
     "$repo_root/patches/mame/0008-sdl-isolate-event-loop-from-emulation.patch"
     "$repo_root/patches/mame/0009-pipewire-use-primary-output-as-audio-clock.patch"
+    "$repo_root/patches/mame/0010-sound-use-16-sample-host-updates.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then
