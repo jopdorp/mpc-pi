@@ -168,6 +168,25 @@ OpenGL captures confirmed that full visual rendering was unaffected. This gain
 applies only to `-video none`, not the full-body desktop view or an LCD view
 that still uses a visible renderer.
 
+Patch 0028 caches the configured device sound interfaces once in
+`sound_manager` instead of rebuilding the same RTTI-based device enumeration
+on every sound update. It preserves configuration order and continues to read
+each interface's Lua hook flag on every update. On the fork's 3 kHz
+low-latency sound cadence, a matched loaded-Logic ABBA of the independently
+measured C++-local cache prototype reduced task clock by 6.92%, cycles by
+6.01%, and retired instructions by 5.65%; average emulation speed increased
+from 321.13% to 346.20%. Patch 0028 moves the same ordered cache into its
+owning `sound_manager`, removing the prototype's process-global map lookup.
+The final implementation kept the frozen PCM byte-identical and passed
+off/on/off Lua hook tests across five interfaces, save/load, and machine
+recreation. This is a semantics-preserving topology cache rather than an
+alternate emulation mode, so it has no runtime flag. Its benefit is specific
+to the high update cadence in this patch stack; at stock MAME's lower cadence
+it is unlikely to justify a standalone upstream core change without broader
+measurements. Prototype counters are under
+`/dev/shm/mpc-nec-lto-gY0QN7/perf-sound-cache-cpu15`; the final regression is
+under `results/diagnostics/sound-interface-cache-qsROeR`.
+
 The earlier profile's largest single symbol, at 12.99%, was the V53 opcode-byte
 fetch lambda configured by `nec_common_device::device_start()`. Each byte goes
 through a `std::function`, V33 address translation, and MAME's cached
@@ -294,6 +313,16 @@ instruction work. It measures this optimization campaign rather than pristine
 upstream MAME: shared earlier fork patches are present on both sides. It is
 also headless x86-64 evidence, not yet proof that the full-render audio path
 fits one Cortex-A53 core.
+
+Applying the independently measured patch-0026, patch-0027, and patch-0028
+ratios multiplicatively gives a provisional through-0028 headless estimate of
+about 3.45x by task clock and 3.56x by host cycles relative to that same
+campaign control. This is not a new end-to-end measurement: the component
+benchmarks used different pinned CPUs and may interact. Excluding the
+headless-only patch 0027 gives an estimated 3.2x throughput, or roughly 69%
+less underlying emulation and sound work, but does not estimate a visible
+renderer. A new matched end-to-end run and native Cortex-A53 measurement are
+required before using either estimate as Raspberry Pi readiness evidence.
 
 ### Rejected post-accessor cuts
 

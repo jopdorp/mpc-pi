@@ -1,0 +1,70 @@
+diff --git a/src/emu/sound.cpp b/src/emu/sound.cpp
+--- a/src/emu/sound.cpp
++++ b/src/emu/sound.cpp
+@@ -119,8 +119,12 @@ sound_stream *sound_manager::stream_alloc(device_t &device, u32 inputs, u32 outp
+ void sound_manager::before_devices_init()
+ {
+ 	// Inform the targets of the existence of the routes
++	m_sound_interfaces.clear();
+ 	for(device_sound_interface &sound : sound_interface_enumerator(machine().root_device()))
++	{
++		m_sound_interfaces.emplace_back(&sound);
+ 		sound.sound_before_devices_init();
++	}
+ 
+ 	m_machine.save().register_postload(save_prepost_delegate(FUNC(sound_manager::postload), this));
+ }
+@@ -139,8 +143,8 @@ void sound_manager::postload()
+ void sound_manager::after_devices_init()
+ {
+ 	// Link all the streams together
+-	for(device_sound_interface &sound : sound_interface_enumerator(machine().root_device()))
+-		sound.sound_after_devices_init();
++	for(device_sound_interface *sound : m_sound_interfaces)
++		sound->sound_after_devices_init();
+ 
+ 	// Resolve the frequencies
+ 	int need_to_solve = 0;
+@@ -2026,23 +2030,23 @@ void sound_manager::streams_update()
+ 	// Send the hooked samples to lua
+ 	{
+ 		std::map<std::string, std::vector<std::pair<const float *, int>>> sound_data;
+-		for(device_sound_interface &sound : sound_interface_enumerator(machine().root_device()))
+-			if(sound.get_sound_hook()) {
++		for(device_sound_interface *sound : m_sound_interfaces)
++			if(sound->get_sound_hook()) {
+ 				std::vector<std::pair<const float *, int>> buffers;
+-				if(sound.device().type() == SPEAKER) {
+-					const emu::detail::output_buffer_flat<sample_t> &buffer = m_speakers[static_cast<speaker_device &>(sound.device()).get_id()].m_buffer;
++				if(sound->device().type() == SPEAKER) {
++					const emu::detail::output_buffer_flat<sample_t> &buffer = m_speakers[static_cast<speaker_device &>(sound->device()).get_id()].m_buffer;
+ 					int samples = buffer.available_samples();
+-					for(int channel = 0; channel != sound.inputs(); channel++)
++					for(int channel = 0; channel != sound->inputs(); channel++)
+ 						buffers.emplace_back(buffer.ptrs(channel, 0), samples);
+ 
+ 				} else {
+-					for(int channel = 0; channel != sound.outputs(); channel++) {
+-						std::pair<sound_stream *, int> info = sound.output_to_stream_output(channel);
++					for(int channel = 0; channel != sound->outputs(); channel++) {
++						std::pair<sound_stream *, int> info = sound->output_to_stream_output(channel);
+ 						const emu::detail::output_buffer_flat<sample_t> &buffer = info.first->m_output_buffer;
+ 						buffers.emplace_back(buffer.ptrs(info.second, 0), buffer.available_samples());
+ 					}
+ 				}
+-				sound_data.emplace(sound.device().tag(), std::move(buffers));
++				sound_data.emplace(sound->device().tag(), std::move(buffers));
+ 			}
+ 
+ 		emulator_info::sound_hook(sound_data);
+diff --git a/src/emu/sound.h b/src/emu/sound.h
+--- a/src/emu/sound.h
++++ b/src/emu/sound.h
+@@ -388,6 +388,7 @@ private:
+ 	util::wav_file_ptr m_wavfile;          // WAV file for streaming
+ 
+ 	// streams data
++	std::vector<device_sound_interface *> m_sound_interfaces; // sound interfaces in device iteration order
+ 	std::vector<std::unique_ptr<sound_stream>> m_stream_list; // list of streams
+ 	std::vector<sound_stream *> m_ordered_streams;  // Streams in update order
+ 	u32 m_outputs_count;
