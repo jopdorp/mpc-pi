@@ -12,7 +12,8 @@ The known-good full-panel desktop path is:
 - one quantum plus one producer update of internal margin (48 samples);
 - audio-master pacing with MAME video throttling disabled;
 - OpenGL full-panel rendering, bilinear filtering, and a maximized window;
-- asynchronous low-priority primitive generation, drawing, and presentation;
+- machine-state primitive generation on the emulation thread, with OpenGL
+  drawing and presentation on a low-priority asynchronous worker;
 - SDL event pumping isolated on the low-priority process main thread;
 - emulation on CPUs 0-11 at nice -10 and SCHED_RR priority 20; and
 - MPC2000XL event-driven panel UART mode; and
@@ -333,12 +334,34 @@ that fails at `nice` or `chrt` is not equivalent to the validated run; either
 restore the host permissions or explicitly choose documented fallback values,
 for example `MAME_NICE=0 MAME_RT_PRIORITY=1`.
 
-## Resize regression
+## Async rendering and resize regression
 
-Primitive-list generation includes resize-dependent layout and artwork
-scaling. It must run on the asynchronous presenter, not on the
-emulation/audio-producing thread. A regressed build put `get_primitives()` on
-the emulation thread. Profiling an active resize measured:
+Primitive-list generation reads live layout inputs, outputs, screen
+containers, textures, and scheduler time. It must therefore run on the
+emulation thread. An earlier isolation patch moved `get_primitives()` to the
+presenter along with OpenGL drawing. The full MPC layout's raw `DATAENTRY`
+dial then made the presenter call `machine().time()` concurrently with the
+V53 scheduler. Stress testing reproduced a `SIGFPE` in
+`device_t::clocks_to_attotime()` from that race.
+
+Patch `0029-sdl-generate-primitives-on-emulation-thread.patch` restores the
+smallest safe ownership boundary: the emulation thread produces and publishes
+a locked primitive list, and the low-priority presenter only draws and swaps
+that completed list. Three consecutive 30-second loaded-Logic full-layout
+runs completed cleanly after the change; the broken path had failed
+intermittently within the same interval. OpenGL drawing and presentation
+remain asynchronous. A full OpenGL Logic capture also retained the frozen
+event/HLE PCM SHA-256
+`a65077eb074df2671731ea0e3f315f627044b4ece480c75de2871b8fd81b4014`.
+Two independent 1600x900 captures were pixel-identical to the preserved
+renderer reference, SHA-256
+`5e8f7e6f7cf5323e13f4f417ae80a20637e29d4fb2bc54246f288ee57e88859d`.
+The validation artifacts are under `/dev/shm/mpc-async-fixed-pcm-HcusqQ` and
+`/dev/shm/mpc-async-fixed-visual2-c7gsdQ`.
+
+Primitive construction is normally small but includes resize-dependent layout
+and artwork scaling. Earlier profiling while it ran on the emulation thread
+measured:
 
 | Stage | Normal | Active-resize worst case |
 |---|---:|---:|
@@ -346,14 +369,22 @@ the emulation thread. Profiling an active resize measured:
 | Layout setup | about 9 us | 94.2 us |
 | Primitive generation | about 150 us | 192.6 ms |
 
-The primitive spike coincided with 80-190 ms gaps in the main audio producer
-and immediate MAME buffer underruns. Restoring primitive generation to the
-low-priority presenter eliminated audible resize xruns in the interactive
-full-panel test. With that fixed, the PCM2900C default sink also passed the
-same short interactive resize test at zero device headroom. PipeWire's sink
-error counter stayed unchanged during that run. At the time of that test,
-`powerprofilesctl get` reported `power-saver`, and CPUs 0 and 10 both reported
-the `powersave` governor with `energy_performance_preference=power`.
+The old primitive spike coincided with 80-190 ms gaps in the main audio
+producer and immediate buffer underruns. Moving the work to the presenter hid
+that symptom but violated MAME's machine-state ownership and caused the crash
+above. The correct fix must therefore retain emulation-thread primitive
+generation. Continuous-resize PipeWire testing is the remaining gate; if it
+still exposes the resize tail, the scaling/cache work must be reduced or
+bounded without reading live machine state from the presenter.
+
+The first post-fix live test used the balanced host policy, a forced 32-frame
+PipeWire quantum, the full 1600x900 layout, and aggressive manual resizing. It
+reported one underrun on each of the three MAME output streams at 16.65 seconds
+into the marked playback interval, with callback gaps of 624-630 us. The crash
+repair is therefore accepted independently, but resize stability is not yet
+accepted. The failed run is
+`results/diagnostics/live-timing-CsdHch`; the next renderer patch must remove
+this resize cost without changing the validated 32-frame audio settings.
 
 Zero headroom did not pass the longer stability gate. Matched 60-second
 audio-master runs with the same clean binary, 32-frame graph, 16-sample
@@ -368,9 +399,9 @@ The comparison shows that device headroom influences tolerance but does not
 fix the producer tail: even 48 frames was not clean. Zero therefore remains an
 explicit latency experiment, not the launcher default.
 
-Patch `0013-sdl-synchronize-async-render-shutdown.patch` therefore retains the
-safe SDL teardown ordering without moving primitive generation back to the
-emulation thread.
+Patch `0013-sdl-synchronize-async-render-shutdown.patch` retains the safe SDL
+teardown ordering. Patch 0029 changes only frame-production ownership and
+keeps that shutdown handshake intact.
 
 ## Verification
 
@@ -378,6 +409,7 @@ Run the deterministic and live timing checks after rebuilding:
 
 ```bash
 scripts/diagnostics/test-mpc2000xl-timing.sh
+scripts/diagnostics/test-mpc2000xl-async-present.sh
 MPC_ASYNC_PRESENT=1 MPC_VIDEO_MODE=opengl \
   scripts/diagnostics/test-mpc2000xl-live-timing.sh
 ```

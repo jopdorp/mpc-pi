@@ -12,7 +12,7 @@ validated low-latency audio configuration unchanged:
 - 16-sample MAME sound-update cadence;
 - event-driven panel UART and MIDI baud clocks;
 - coalesced panel timer output where explicitly selected; and
-- the existing asynchronous full-panel renderer.
+- the full-panel renderer with asynchronous OpenGL drawing and presentation.
 
 The former scheduler hotspot is already gone. After the event-driven UART and
 MIDI-clock work, `device_scheduler::timeslice()` was 1.24% and the combined
@@ -187,6 +187,20 @@ measurements. Prototype counters are under
 `/dev/shm/mpc-nec-lto-gY0QN7/perf-sound-cache-cpu15`; the final regression is
 under `results/diagnostics/sound-interface-cache-qsROeR`.
 
+Patch 0029 corrects the asynchronous renderer's ownership boundary. Primitive
+generation had been moved to the presenter, where the full layout's raw analog
+input read raced the scheduler and intermittently trapped in clock conversion.
+The emulation thread now publishes a completed primitive list while OpenGL
+drawing and presentation remain asynchronous. This is a correctness repair,
+not a performance claim. Three consecutive 30-second loaded-Logic full-layout
+runs completed cleanly. The full OpenGL PCM retained the frozen event/HLE hash,
+and two independent 1600x900 captures were pixel-identical to the preserved
+renderer reference. The live resize/xrun check remains the acceptance gate
+before handoff. Its first balanced-policy 32-frame run reported one underrun
+per MAME output stream during aggressive resizing, so resize scaling remains a
+separate measured optimization target rather than being hidden by moving live
+machine reads back to the presenter.
+
 The earlier profile's largest single symbol, at 12.99%, was the V53 opcode-byte
 fetch lambda configured by `nec_common_device::device_start()`. Each byte goes
 through a `std::function`, V33 address translation, and MAME's cached
@@ -240,7 +254,7 @@ The remaining steady-state hotspots are:
 
 The scheduler is no longer a useful target in this workload. Opcode
 fetch/access is the clear next headless target; panel and DSP work follow it.
-LCD-only and full asynchronous-render profiles with host audio still remain
+LCD-only and full-render profiles with host audio still remain
 before making an end-to-end Pi deployment claim.
 
 ### Phase 3: generic NEC-core work only when justified — in progress

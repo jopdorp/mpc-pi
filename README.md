@@ -198,13 +198,15 @@ percent. Its deterministic Logic-project PCM is byte-identical to the periodic
 clock-device baseline.
 
 Patch 0013 fixes the teardown lifecycle race in the isolated SDL event loop.
-The main thread stops pumping SDL before window/backend teardown. Primitive
-generation, layout scaling, OpenGL drawing, and swap remain on the low-priority
-presenter: moving primitive generation back to the emulation thread caused
-resize spikes up to 192.6 ms and matching audio underruns. The event-driven
-frame handoff drops visual work when the presenter is busy, keeping interactive
-resize outside the audio-producing timeline. These patches modify MAME's SDL
-OSD/backend code, not the SDL library; the system SDL runtime remains stock.
+The main thread stops pumping SDL before window/backend teardown. Patch 0029
+later restores machine-state primitive generation to the emulation thread
+after the full layout's analog-input read exposed an intermittent scheduler
+race and `SIGFPE` on the presenter. OpenGL drawing and swap remain on the
+low-priority presenter, and the event-driven handoff still drops frames when
+it is busy. The earlier resize profile measured primitive-generation spikes up
+to 192.6 ms, so continuous-resize audio stability remains a separate gate.
+These patches modify MAME's SDL OSD/backend code, not the SDL library; the
+system SDL runtime remains stock.
 
 Patch 0014 batches each MB89371 baud generator's rising and falling USART edges
 into one periodic scheduler callback while preserving their logical order. This

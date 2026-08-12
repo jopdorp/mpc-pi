@@ -1,0 +1,45 @@
+diff --git a/src/osd/sdl/window.cpp b/src/osd/sdl/window.cpp
+index 92717355..02eae27f 100644
+--- a/src/osd/sdl/window.cpp
++++ b/src/osd/sdl/window.cpp
+@@ -814,6 +814,24 @@ void sdl_window_info::update()
+ 					m_rendered_event.set();
+ 					return;
+ 				}
++				if (!renderer().ready_for_frame())
++				{
++					m_rendered_event.set();
++					return;
++				}
++
++				// Snapshot machine-visible render state on the emulation thread.  The
++				// presenter owns the OpenGL context, but must not read devices or
++				// input ports while the scheduler is running.
++				m_primlist = renderer().get_primitives();
++				profile_stage(2);
++				const device_video_output_interface *screen =
++					video_output_interface_enumerator(machine().root_device()).byindex(index());
++				if ((screen != nullptr) && screen->is_vector())
++					renderer().set_flags(osd_renderer::FLAG_HAS_VECTOR_SCREEN);
++				else
++					renderer().clear_flags(osd_renderer::FLAG_HAS_VECTOR_SCREEN);
++
+ 				m_present_pending = true;
+ 				present_lock.unlock();
+ 				m_present_condition.notify_one();
+@@ -1132,15 +1150,6 @@ void sdl_window_info::async_present_loop()
+ 		m_present_busy = true;
+ 		lock.unlock();
+ 
+-		// Primitive generation includes layout artwork scaling and must stay on
+-		// this non-real-time worker along with OpenGL drawing/presentation.
+-		render_primitive_list *const primlist = renderer().get_primitives();
+-		const device_video_output_interface *screen = video_output_interface_enumerator(machine().root_device()).byindex(index());
+-		if ((screen != nullptr) && screen->is_vector())
+-			renderer().set_flags(osd_renderer::FLAG_HAS_VECTOR_SCREEN);
+-		else
+-			renderer().clear_flags(osd_renderer::FLAG_HAS_VECTOR_SCREEN);
+-		m_primlist = primlist;
+ 		if (m_primlist != nullptr)
+ 			renderer().draw(1);
+ 		if (first_present)
