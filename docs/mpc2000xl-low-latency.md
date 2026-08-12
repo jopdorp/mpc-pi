@@ -69,6 +69,7 @@ host-level commands and must remain documented whenever they change.
 | `MPC_MAXIMIZE` | `1` | Start maximized |
 | `MPC_WINDOW_RESOLUTION` | `auto` | Let MAME size the render target |
 | `MPC_ARTWORK_RESOLUTION` | `1280x720` | Fix MPC2000XL CPU-side panel-art raster dimensions; use `auto` for stock target-sized artwork |
+| `MPC_GL_VBO` | `1` | Keep MAME's stock per-texture VBO path; set `0` for the faster experimental client-memory path |
 | `MPC_PANEL_MODE` | `event` | Event-driven MPC2000XL panel UART |
 | `MPC_PANEL_TIMER_MODE` | `accurate` | Choose per-transition or cycle-equivalent coalesced panel timer output |
 | `MPC_MIDI_INPUT_MODE` | `accurate` | Choose accurate wire timing, fast external MIDI, or direct internal-pad events |
@@ -424,6 +425,29 @@ are `results/diagnostics/live-timing-lr6CRf` and
 resize-compute results above are accepted for patch 0030; they are not being
 presented as a completed live 32-frame/xrun result.
 
+The OpenGL backend's default VBO path allocates one 32-byte texture-coordinate
+buffer per texture and updates it for every textured quad. The MPC2000XL full
+layout has hundreds of such quads, while its vertex array already uses client
+memory. In a current-stack, marker-scoped steady-playback 1600x900 ABBA test,
+selecting `MPC_GL_VBO=0` reduced task CPU by 23.20%, host cycles by 23.44%,
+retired instructions by 10.83%, branches by 11.19%, branch misses by 15.17%,
+and cache misses by 9.22%. An independent whole-process boot/load/play ABBA
+also measured 19.31% less task CPU and 18.06% fewer cycles. The two paths
+produced pixel-identical captures (AE=0), and the client-memory full-render
+capture retained the frozen PCM byte for byte. Disabling this VBO path also
+disables PBO use in MAME's legacy OpenGL backend, so no separate PBO setting
+is exposed. This remains opt-in because strict live 32-frame runs of both the
+client-memory candidate and its stock-VBO control lost whole samples in the
+delivered PipeWire capture despite unchanged in-emulator underrun/overrun
+counters. The candidate therefore has not passed the live audio/resize gate.
+The artifacts are
+`/dev/shm/mpc-ogl-vbo-fullstack-steady-abba-7ebX0M`,
+`/dev/shm/mpc-ogl-vbo-fullstack-boot-abba-lZgbvf`,
+`/dev/shm/mpc-ogl-vbo-fullstack-visual-ZB7ZzD`, and
+`/dev/shm/mpc-ogl-vbo-fullstack-pcm-lV0l4T`; the live candidate and control are
+`results/diagnostics/live-timing-nSyTv6` and
+`results/diagnostics/live-timing-izb7YV`.
+
 Zero headroom did not pass the longer stability gate. Matched 60-second
 audio-master runs with the same clean binary, 32-frame graph, 16-sample
 cadence, event-driven panel, and video disabled measured:
@@ -451,7 +475,7 @@ scripts/diagnostics/test-mpc2000xl-async-present.sh
 MPC_PIPEWIRE_FRAMES=32 MAME_TIMING_MASTER=audio \
   MPC_ASYNC_PRESENT=1 MPC_VIDEO_MODE=opengl \
   MPC_VIEW_NAME='Default Layout' MPC_WINDOW_RESOLUTION=1600x900 \
-  MPC_ARTWORK_RESOLUTION=1280x720 \
+  MPC_ARTWORK_RESOLUTION=1280x720 MPC_GL_VBO=0 \
   scripts/diagnostics/test-mpc2000xl-live-timing.sh
 ```
 

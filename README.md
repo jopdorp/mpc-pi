@@ -157,11 +157,15 @@ OpenGL in a maximized window. MPC2000XL panel artwork is rasterized at stable
 1280x720-derived dimensions and linearly scaled by OpenGL, while the LCD, UI,
 window geometry and input mapping retain the actual output resolution. This
 avoids rerasterizing hundreds of SVG and text elements at every intermediate
-window size. Set `MPC_ARTWORK_RESOLUTION=auto` for stock target-sized artwork.
-The OpenGL path hands completed primitive lists to a low-priority presenter
-thread without waiting and drops a visual frame if the presenter is busy. The SDL
-software path keeps SDL texture upload and presentation on the main thread, as
-required by SDL, while a low-priority worker rasterizes primitives into
+window size. The optional `MPC_GL_VBO=0` path uses client-memory OpenGL texture
+coordinates instead of issuing a 32-byte VBO update for every panel quad. Set
+`MPC_ARTWORK_RESOLUTION=auto` for stock target-sized artwork; the stock VBO
+path remains the default while the client-memory path awaits a clean live
+32-frame audio gate. The OpenGL path hands completed primitive lists to a
+low-priority presenter thread without waiting and drops a visual frame if the
+presenter is busy. The SDL software path keeps SDL texture upload and
+presentation on the main thread, as required by SDL, while a low-priority
+worker rasterizes primitives into
 double-buffered pixel storage.
 It also drops a visual frame before primitive-list generation if the worker is
 busy. Both `-scalemode none` and `-scalemode hwbest` pass the live timing test
@@ -266,9 +270,9 @@ MPC_VIEW_NAME='Screen 0' MPC_WINDOW_RESOLUTION=1240x300 scripts/run-mpc.sh
 
 Override `MPC_VIEW_NAME`, `MPC_WINDOW_RESOLUTION`,
 `MPC_ARTWORK_RESOLUTION`, `MPC_FILTER_MODE`, `MPC_VIDEO_MODE`,
-`MPC_ASYNC_PRESENT`, `MPC_MAXIMIZE`, or `MPC_ALSA_HEADROOM` as needed. Set
-`MPC_MAXIMIZE=0 MPC_WINDOW_RESOLUTION=1240x894` for a fixed-size desktop
-window.
+`MPC_GL_VBO`, `MPC_ASYNC_PRESENT`, `MPC_MAXIMIZE`, or `MPC_ALSA_HEADROOM` as
+needed. Set `MPC_MAXIMIZE=0 MPC_WINDOW_RESOLUTION=1240x894` for a fixed-size
+desktop window.
 
 Run the deterministic offline and full live MPC2000XL timing regressions with:
 

@@ -19,6 +19,7 @@ view_name=${MPC_VIEW_NAME:-Default Layout}
 filter_mode=${MPC_FILTER_MODE:-1}
 window_resolution=${MPC_WINDOW_RESOLUTION:-auto}
 artwork_resolution=${MPC_ARTWORK_RESOLUTION:-}
+gl_vbo=${MPC_GL_VBO:-1}
 async_present=${MPC_ASYNC_PRESENT:-1}
 maximize_window=${MPC_MAXIMIZE:-1}
 external_event_loop=${MPC_SDL_EXTERNAL_EVENT_LOOP:-1}
@@ -256,6 +257,15 @@ case "$filter_mode" in
         ;;
 esac
 
+case "$gl_vbo" in
+    0) gl_vbo_option=-nogl_vbo ;;
+    1) gl_vbo_option=-gl_vbo ;;
+    *)
+        printf 'error: MPC_GL_VBO must be 0 or 1\n' >&2
+        exit 2
+        ;;
+esac
+
 case "$maximize_window" in
     0) maximize_option=-nomaximize ;;
     1) maximize_option=-maximize ;;
@@ -330,9 +340,9 @@ if [[ "$system_name" == mpc2000xl ]]; then
     printf 'V53 event service: %s mode\n' "$v53_event_service_mode"
     printf 'V53 opcode dispatch: %s mode\n' "$v53_dispatch_mode"
 fi
-printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, window-resolution=%s, artwork-resolution=%s, screen-filter=%s\n' \
+printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, window-resolution=%s, artwork-resolution=%s, screen-filter=%s, ogl-vbo=%s\n' \
     "$video_mode" "$async_present" "$external_event_loop" "$view_name" \
-    "$window_resolution" "$artwork_resolution" "$filter_mode"
+    "$window_resolution" "$artwork_resolution" "$filter_mode" "$gl_vbo"
 
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
     env "${midi_unset_environment[@]}" "${clock_environment[@]}" "${panel_environment[@]}" \
@@ -359,5 +369,6 @@ exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_
 	"$maximize_option" \
 	-resolution "$window_resolution" \
 	-artwork_resolution "$artwork_resolution" \
+	"$gl_vbo_option" \
     "$throttle_option" \
     "$@"

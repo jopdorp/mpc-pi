@@ -25,7 +25,7 @@ for run in $(seq 1 "$repetitions"); do
 	MPC_VIDEO_MODE=opengl MPC_ASYNC_PRESENT=1 \
 	MPC_SDL_EXTERNAL_EVENT_LOOP=1 MPC_VIEW_NAME='Default Layout' \
 	MPC_WINDOW_RESOLUTION=1600x900 MPC_ARTWORK_RESOLUTION=1280x720 \
-	MPC_MAXIMIZE=0 MPC_FILTER_MODE=1 \
+	MPC_MAXIMIZE=0 MPC_FILTER_MODE=1 MPC_GL_VBO=0 \
 	MPC_PANEL_MODE=event MPC_PANEL_TIMER_MODE=coalesced \
 	MPC_MIDI_CLOCK_MODE=event MPC_V53_STATUS_MODE=hle \
 	MPC_V53_EVENT_SERVICE_MODE=hle MPC_V53_DISPATCH_MODE=direct \
@@ -49,6 +49,11 @@ for run in $(seq 1 "$repetitions"); do
 	fi
 	if ! grep -Fq 'artwork-resolution=1280x720' "$log"; then
 		printf 'FAIL: fixed artwork resolution was not selected in run %s\n' "$run" >&2
+		tail -100 "$log" >&2
+		exit 1
+	fi
+	if ! grep -Fq 'ogl-vbo=0' "$log"; then
+		printf 'FAIL: client-memory OpenGL texture coordinates were not selected in run %s\n' "$run" >&2
 		tail -100 "$log" >&2
 		exit 1
 	fi

@@ -217,6 +217,21 @@ no-resize control independently underrun after a 6.483 ms producer update.
 Patch 0030 is therefore accepted on its deterministic PCM, visual and
 resize-compute evidence, not as a completed live xrun result.
 
+The next independent cut uses MAME's existing `-nogl_vbo` option rather than
+adding renderer code. The legacy OpenGL path otherwise uploads 32 bytes of
+texture coordinates for every textured quad, although its vertex array already
+uses client memory. A current-stack, marker-scoped steady-playback full-layout
+ABBA test measured 23.20% less task CPU and 23.44% fewer host cycles; an
+independent whole-process boot/load/play ABBA measured 19.31% and 18.06%.
+The two paths were pixel-identical; the client-memory full-render capture
+retained the frozen PCM byte for byte.
+`MPC_GL_VBO=0` selects this path, while the launcher retains stock MAME VBOs by
+default. MAME makes PBO unavailable when this VBO path is disabled, so the
+project does not add another PBO setting. The candidate remains experimental:
+strict live 32-frame candidate and stock-VBO control runs both lost whole
+samples in the delivered PipeWire capture despite stable emulator buffer
+counters, so the required live audio/resize acceptance remains open.
+
 The earlier profile's largest single symbol, at 12.99%, was the V53 opcode-byte
 fetch lambda configured by `nec_common_device::device_start()`. Each byte goes
 through a `std::function`, V33 address translation, and MAME's cached
