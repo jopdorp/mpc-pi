@@ -133,6 +133,14 @@ services or polling loops. Each candidate must be evaluated independently.
 Fast-forwarding is allowed only when the exact next causal event is known;
 otherwise the interpreter must run normally.
 
+The next bounded candidate, the hot `3f76` far-callback wrapper, was prototyped
+and rejected. A split implementation preserved the stock scheduler boundary,
+matched the frozen event/HLE PCM byte-for-byte, and handled 99.51% of wrapper
+entries. One non-instrumented pair measured -0.09% cycles, +0.05% retired
+instructions, and a noisy -0.92% task clock. That return does not justify its
+271-line prototype diff, so it is not part of the patch
+stack.
+
 ### Opcode and data-access machinery
 
 The earlier profile's largest single symbol, at 12.99%, was the V53 opcode-byte
@@ -147,7 +155,7 @@ fetch/fetchop -> m_dr8 -> m_cache16.read_byte(v33_translate(address))
 This is abstraction and emulated-bus cost, not evidence that host DRAM
 bandwidth is exhausted. Possible later experiments are:
 
-1. A concrete, inlinable V33/V53 opcode accessor selected once at startup.
+1. A concrete, inlinable NEC opcode accessor selected by CPU/bus type.
 2. A translation-state fast path that preserves both XA modes exactly.
 3. Typed/specific data access where all mapped handlers, mirrors, DMA
    visibility and save-state behavior remain intact.
@@ -168,26 +176,99 @@ after validation, and the production change remains behind a separate
 default-off flag. The three clean serialized pairs were sufficient to show a
 consistent material effect after contaminated measurements were discarded.
 
-### Phase 2: rank the next measured bottleneck
+### Phase 2: rank the next measured bottleneck — headless capture completed
 
-Capture fresh profiles using the same loaded Logic workload and
-fixed affinity/governor:
+A clean post-BRK88-plus-BRKFD playback profile is stored at
+`results/diagnostics/post-v53-combined-steady-final-91KVZ1`. It used the
+loaded Logic workload, CPU 20, the balanced host policy, no video or host
+sound, unthrottled emulation, event-driven panel and MIDI clocks, and both V53
+service HLEs. The five-second playback-only capture collected 10,058 samples
+with none lost and averaged 334.49% emulation speed.
 
-- video none with the normal audio path;
-- LCD-only rendering with normal audio; and
-- full asynchronous panel rendering with normal audio.
+The remaining steady-state hotspots are:
 
-Use at least five serialized repetitions. Record core frequency, task clock,
-cycles, instructions, IPC, branches, branch misses and cache misses. Choose the
-next target from the post-BRK88 profile rather than carrying forward stale
-percentages.
+- opcode-fetch callback: 15.58%;
+- V53 `execute_run()`: 14.90%;
+- program-memory reads: 4.55%;
+- panel timers: 3.20%;
+- DSP audio processing: 3.08%; and
+- scheduler: 0.95%.
 
-### Phase 3: generic V53 work only when justified
+The scheduler is no longer a useful target in this workload. Opcode
+fetch/access is the clear next headless target; panel and DSP work follow it.
+LCD-only and full asynchronous-render profiles with host audio still remain
+before making an end-to-end Pi deployment claim.
+
+### Phase 3: generic NEC-core work only when justified — in progress
 
 Try fetch, translation and typed-access changes as isolated MAME-core patches.
 Each patch must independently demonstrate enough broad impact to justify core
 review. Do not combine these with driver HLE, launcher flags, audio changes or
 rendering changes.
+
+The first concrete opcode-access candidate removes the type-erased
+`std::function` from `fetch()` and `fetchop()` while retaining the same MAME
+cache reads and V33 address translation. Two serialized balanced-mode pairs on
+the loaded Logic workload, stored at
+`/dev/shm/mpc-v53-fetch-QCcHhS/perf`, measured:
+
+| Counter | Baseline median | Concrete accessor median | Change |
+|---|---:|---:|---:|
+| Task clock | 27,091.10 ms | 25,876.38 ms | -4.48% |
+| Host cycles | 38.401 billion | 36.699 billion | -4.43% |
+| Retired instructions | 86.388 billion | 83.286 billion | -3.59% |
+| Retired branches | 14.620 billion | 15.222 billion | +4.12% |
+
+The candidate produced byte-identical MPC2000XL PCM in both accurate mode
+(`22f76ffaaedc4364b8279a79672a07a35f93997f180b8665e9ef3a576ae176a9`)
+and the combined event/HLE mode
+(`a65077eb074df2671731ea0e3f315f627044b4ece480c75de2871b8fd81b4014`)
+against the existing frozen references. Its NEC object was smaller in `.text`.
+The increased branch count makes AArch64 measurement important; do not claim
+the x86-64 result as a Pi gain until it is measured on Cortex-A53. A
+smaller-looking V33-only conditional that retained `std::function` was
+rejected because it lost the retired-instruction gain and increased branch
+work further.
+
+This is a semantics-preserving core implementation simplification, not an
+alternate emulation or timing mode, so there is no runtime speed flag or
+accurate fallback: both forms perform the same cache access. It remains an
+independent patch and branch so it can be accepted or removed separately.
+
+Cross-driver artifacts are under `/dev/shm/mpc-nec-fetch-cross-YB9Xyz`.
+MAME validation passed, and MPC2000XL 1.20, MPC3000 Vailixi 3.50, and MPC60
+SCSI 2.14 all booted. Tiny deterministic fixtures covering the V20 8-bit and
+V30 16-bit cache branches returned identical registers and test RAM. At an
+exact five-second MPC3000 boundary, exposed CPU state, NVRAM, and the final
+screen matched, but 12 volatile RAM bytes and the boot capture's silent-frame
+count differed. Those differences are consistent with an idle/exit-boundary
+phase shift, but this evidence does not justify claiming whole-machine
+bit-identical MPC3000 state.
+
+### Cumulative headless result
+
+A direct alternating end-to-end comparison is stored at
+`results/diagnostics/cumulative-performance-q828JV`. The control selected
+accurate periodic panel and MIDI clocks, the transition-by-transition panel
+timer, and interpreted V53 services. The current mode selected event-driven
+panel and MIDI clocks, coalesced panel timer output, both service HLEs, and the
+concrete opcode accessor. Both used the same short loaded-Logic workload,
+video/sound disabled, CPU 20, balanced host policy, and unthrottled video-master
+execution.
+
+| Counter | Accurate control mean | Current mean | Change |
+|---|---:|---:|---:|
+| Task clock | 43,161.66 ms | 15,207.90 ms | -64.77% |
+| Host cycles | 99.249 billion | 34.896 billion | -64.84% |
+| Retired instructions | 277.772 billion | 84.734 billion | -69.50% |
+| Retired branches | 64.481 billion | 15.268 billion | -76.32% |
+| Average emulation speed | 104.93–110.56% | 324.86–330.18% | about 3x reported speed |
+
+This is 2.84x throughput from task clock and cycles, or 3.28x less retired
+instruction work. It measures this optimization campaign rather than pristine
+upstream MAME: shared earlier fork patches are present on both sides. It is
+also headless x86-64 evidence, not yet proof that the full-render audio path
+fits one Cortex-A53 core.
 
 ### Phase 4: compiler and deployment-specific builds
 
@@ -235,7 +316,8 @@ cross-driver impact justifies the maintenance cost.
 
 ## Immediate next action
 
-Commit the validated BRK FD service separately, then re-profile before choosing
-between the bounded `3f76` callback wrapper and the broader V53 fetch/access
-path. Do not resume the panel decoder or generic scheduler work unless new
-evidence redirects the work.
+Finish the clean focused build gate for the concrete opcode accessor, then
+measure the broader V53 memory/dispatch path and the remaining panel execution
+cost as separate candidates. The independently flagged `3f76` callback-wrapper
+prototype has been rejected for negligible gain. Do not resume the panel
+decoder or generic scheduler work unless new evidence redirects the work.

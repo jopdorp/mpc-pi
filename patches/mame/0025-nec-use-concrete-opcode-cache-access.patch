@@ -1,0 +1,71 @@
+diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
+--- a/src/devices/cpu/nec/nec.cpp
++++ b/src/devices/cpu/nec/nec.cpp
+@@ -256,10 +256,19 @@ void nec_common_device::do_prefetch()
+ 	}
+ }
+ 
++u8 nec_common_device::read_opcode_byte(offs_t address)
++{
++	if (m_chip_type == V33_TYPE)
++		return m_cache16.read_byte(v33_translate(address));
++	if (m_program_config.data_width() == 8)
++		return m_cache8.read_byte(address);
++	return m_cache16.read_byte(address);
++}
++
+ uint8_t nec_common_device::fetch()
+ {
+ 	prefetch();
+-	return m_dr8((Sreg(PS)<<4) + m_ip++);
++	return read_opcode_byte((Sreg(PS)<<4) + m_ip++);
+ }
+ 
+ uint16_t nec_common_device::fetchword()
+@@ -279,7 +288,7 @@ uint8_t nec_common_device::fetchop()
+ {
+ 	prefetch();
+-	return m_dr8((Sreg(PS)<<4) + m_ip++);
++	return read_opcode_byte((Sreg(PS)<<4) + m_ip++);
+ }
+ 
+ 
+ 
+@@ -775,18 +784,15 @@ void nec_common_device::device_start()
+ 	if (m_program->data_width() == 8)
+ 	{
+ 		m_program->cache(m_cache8);
+-		m_dr8 = [this](offs_t address) -> u8 { return m_cache8.read_byte(address); };
+ 	}
+ 	else if (m_chip_type == V33_TYPE)
+ 	{
+ 		save_item(NAME(m_xa));
+ 		m_program->cache(m_cache16);
+-		m_dr8 = [this](offs_t address) -> u8 { return m_cache16.read_byte(v33_translate(address)); };
+ 	}
+ 	else
+ 	{
+ 		m_program->cache(m_cache16);
+-		m_dr8 = [this](offs_t address) -> u8 { return m_cache16.read_byte(address); };
+ 	}
+ 
+ 	m_io = &space(AS_IO);
+diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
+--- a/src/devices/cpu/nec/nec.h
++++ b/src/devices/cpu/nec/nec.h
+@@ -124,7 +124,6 @@ private:
+ 	memory_access<24, 0, 0, ENDIANNESS_LITTLE>::cache m_cache8;
+ 	memory_access<24, 1, 0, ENDIANNESS_LITTLE>::cache m_cache16;
+ 
+-	std::function<u8 (offs_t address)> m_dr8;
+ 	address_space *m_io;
+ 	int     m_icount;
+ 
+@@ -161,6 +160,7 @@ protected:
+ 	offs_t v33_translate(offs_t addr);
+ 
+ private:
++	inline u8 read_opcode_byte(offs_t address);
+ 	inline void prefetch();
+ 	void do_prefetch();
+ 	inline uint8_t fetch();
