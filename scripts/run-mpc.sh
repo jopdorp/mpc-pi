@@ -18,6 +18,7 @@ video_mode=${MPC_VIDEO_MODE:-opengl}
 view_name=${MPC_VIEW_NAME:-Default Layout}
 filter_mode=${MPC_FILTER_MODE:-1}
 window_resolution=${MPC_WINDOW_RESOLUTION:-auto}
+artwork_resolution=${MPC_ARTWORK_RESOLUTION:-}
 async_present=${MPC_ASYNC_PRESENT:-1}
 maximize_window=${MPC_MAXIMIZE:-1}
 external_event_loop=${MPC_SDL_EXTERNAL_EVENT_LOOP:-1}
@@ -59,6 +60,14 @@ case "$system_name" in
         exit 2
         ;;
 esac
+
+if [[ -z "$artwork_resolution" ]]; then
+    if [[ "$system_name" == mpc2000xl ]]; then
+        artwork_resolution=1280x720
+    else
+        artwork_resolution=auto
+    fi
+fi
 
 case "$panel_mode" in
     accurate)
@@ -199,6 +208,25 @@ if [[ ! "$pipewire_rate" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
+case "$artwork_resolution" in
+    auto)
+        ;;
+    *)
+        if [[ ! "$artwork_resolution" =~ ^([1-9][0-9]{0,5})x([1-9][0-9]{0,5})$ ]]; then
+            printf 'error: MPC_ARTWORK_RESOLUTION must be auto or WIDTHxHEIGHT, got %s\n' \
+                "$artwork_resolution" >&2
+            exit 2
+        fi
+        artwork_width=${BASH_REMATCH[1]}
+        artwork_height=${BASH_REMATCH[2]}
+        if (( artwork_width > 65536 || artwork_height > 65536 )); then
+            printf 'error: MPC_ARTWORK_RESOLUTION dimensions must be from 1 through 65536, got %s\n' \
+                "$artwork_resolution" >&2
+            exit 2
+        fi
+        ;;
+esac
+
 if [[ "$alsa_headroom" != keep && ! "$alsa_headroom" =~ ^[0-9]+$ ]]; then
     printf 'error: MPC_ALSA_HEADROOM must be a non-negative frame count or keep, got %s\n' "$alsa_headroom" >&2
     exit 2
@@ -302,8 +330,9 @@ if [[ "$system_name" == mpc2000xl ]]; then
     printf 'V53 event service: %s mode\n' "$v53_event_service_mode"
     printf 'V53 opcode dispatch: %s mode\n' "$v53_dispatch_mode"
 fi
-printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, resolution=%s, bilinear=%s\n' \
-    "$video_mode" "$async_present" "$external_event_loop" "$view_name" "$window_resolution" "$filter_mode"
+printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, window-resolution=%s, artwork-resolution=%s, screen-filter=%s\n' \
+    "$video_mode" "$async_present" "$external_event_loop" "$view_name" \
+    "$window_resolution" "$artwork_resolution" "$filter_mode"
 
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
     env "${midi_unset_environment[@]}" "${clock_environment[@]}" "${panel_environment[@]}" \
@@ -329,5 +358,6 @@ exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_
 	"$filter_option" \
 	"$maximize_option" \
 	-resolution "$window_resolution" \
+	-artwork_resolution "$artwork_resolution" \
     "$throttle_option" \
     "$@"

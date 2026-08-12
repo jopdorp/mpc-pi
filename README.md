@@ -153,11 +153,16 @@ window to 48 samples (1 ms). The extra producer update lets one late 16-sample
 tick recover without immediately starving the next PipeWire callback.
 
 The default desktop video path is the complete MPC panel, rendered with
-bilinear OpenGL in a maximized window. The OpenGL path hands completed
-primitive lists to a low-priority presenter thread without waiting and drops a
-visual frame if the presenter is busy. The SDL software path keeps SDL texture
-upload and presentation on the main thread, as required by SDL, while a
-low-priority worker rasterizes primitives into double-buffered pixel storage.
+OpenGL in a maximized window. MPC2000XL panel artwork is rasterized at stable
+1280x720-derived dimensions and linearly scaled by OpenGL, while the LCD, UI,
+window geometry and input mapping retain the actual output resolution. This
+avoids rerasterizing hundreds of SVG and text elements at every intermediate
+window size. Set `MPC_ARTWORK_RESOLUTION=auto` for stock target-sized artwork.
+The OpenGL path hands completed primitive lists to a low-priority presenter
+thread without waiting and drops a visual frame if the presenter is busy. The SDL
+software path keeps SDL texture upload and presentation on the main thread, as
+required by SDL, while a low-priority worker rasterizes primitives into
+double-buffered pixel storage.
 It also drops a visual frame before primitive-list generation if the worker is
 busy. Both `-scalemode none` and `-scalemode hwbest` pass the live timing test
 on the accelerated desktop display.
@@ -203,8 +208,10 @@ later restores machine-state primitive generation to the emulation thread
 after the full layout's analog-input read exposed an intermittent scheduler
 race and `SIGFPE` on the presenter. OpenGL drawing and swap remain on the
 low-priority presenter, and the event-driven handoff still drops frames when
-it is busy. The earlier resize profile measured primitive-generation spikes up
-to 192.6 ms, so continuous-resize audio stability remains a separate gate.
+it is busy. Patch 0030 bounds CPU-side layout rasterization independently of
+the physical window; a matched resize storm reduced the measured primitive
+generation maximum from 115.7 ms to 2.43 ms. Continuous-resize audio stability
+at the 32-frame PipeWire setting remains the live acceptance gate.
 These patches modify MAME's SDL OSD/backend code, not the SDL library; the
 system SDL runtime remains stock.
 
@@ -257,9 +264,9 @@ diagnostics), use:
 MPC_VIEW_NAME='Screen 0' MPC_WINDOW_RESOLUTION=1240x300 scripts/run-mpc.sh
 ```
 
-Override `MPC_VIEW_NAME`, `MPC_WINDOW_RESOLUTION`, `MPC_FILTER_MODE`,
-`MPC_VIDEO_MODE`, `MPC_ASYNC_PRESENT`, `MPC_MAXIMIZE`, or
-`MPC_ALSA_HEADROOM` as needed. Set
+Override `MPC_VIEW_NAME`, `MPC_WINDOW_RESOLUTION`,
+`MPC_ARTWORK_RESOLUTION`, `MPC_FILTER_MODE`, `MPC_VIDEO_MODE`,
+`MPC_ASYNC_PRESENT`, `MPC_MAXIMIZE`, or `MPC_ALSA_HEADROOM` as needed. Set
 `MPC_MAXIMIZE=0 MPC_WINDOW_RESOLUTION=1240x894` for a fixed-size desktop
 window.
 

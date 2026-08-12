@@ -1,0 +1,320 @@
+diff --git a/src/emu/emuopts.cpp b/src/emu/emuopts.cpp
+index 89aeec26..5f530403 100644
+--- a/src/emu/emuopts.cpp
++++ b/src/emu/emuopts.cpp
+@@ -120,6 +120,7 @@ const options_entry emu_options::s_option_entries[] =
+ 	// artwork options
+ 	{ nullptr,                                           nullptr,     core_options::option_type::HEADER,     "CORE ARTWORK OPTIONS" },
+ 	{ OPTION_ARTWORK_CROP ";artcrop",                    "0",         core_options::option_type::BOOLEAN,    "crop artwork so emulated screen image fills output screen/window in one axis" },
++	{ OPTION_ARTWORK_RESOLUTION,                          "auto",      core_options::option_type::STRING,     "render layout artwork at a fixed resolution (<width>x<height>) or 'auto' to follow the output size" },
+ 	{ OPTION_FALLBACK_ARTWORK,                           nullptr,     core_options::option_type::STRING,     "fallback artwork if no external artwork or internal driver layout defined" },
+ 	{ OPTION_OVERRIDE_ARTWORK,                           nullptr,     core_options::option_type::STRING,     "override artwork for external artwork and internal driver layout" },
+ 	{ OPTION_ARTWORK_FONT ";artfont",                    "default",   core_options::option_type::STRING,     "specify a font to use for artwork text elements" },
+diff --git a/src/emu/emuopts.h b/src/emu/emuopts.h
+index 8a49544f..1cfc2b23 100644
+--- a/src/emu/emuopts.h
++++ b/src/emu/emuopts.h
+@@ -103,6 +103,7 @@
+ 
+ // core artwork options
+ #define OPTION_ARTWORK_CROP         "artwork_crop"
++#define OPTION_ARTWORK_RESOLUTION   "artwork_resolution"
+ #define OPTION_FALLBACK_ARTWORK     "fallback_artwork"
+ #define OPTION_OVERRIDE_ARTWORK     "override_artwork"
+ #define OPTION_ARTWORK_FONT         "artwork_font"
+@@ -389,6 +390,7 @@ public:
+ 
+ 	// core artwork options
+ 	bool artwork_crop() const { return bool_value(OPTION_ARTWORK_CROP); }
++	const char *artwork_resolution() const { return value(OPTION_ARTWORK_RESOLUTION); }
+ 	const char *fallback_artwork() const { return value(OPTION_FALLBACK_ARTWORK); }
+ 	const char *override_artwork() const { return value(OPTION_OVERRIDE_ARTWORK); }
+ 	const char *artwork_font() const { return value(OPTION_ARTWORK_FONT); }
+diff --git a/src/emu/render.cpp b/src/emu/render.cpp
+index b2a55665..45d03f16 100644
+--- a/src/emu/render.cpp
++++ b/src/emu/render.cpp
+@@ -59,7 +59,9 @@
+ #include "corestr.h"
+ 
+ #include <algorithm>
++#include <charconv>
+ #include <limits>
++#include <string_view>
+ 
+ 
+ 
+@@ -953,6 +955,8 @@ render_target::render_target(render_manager &manager, render_container *ui, T &&
+ 	, m_base_orientation(ROT0)
+ 	, m_maxtexwidth(65536)
+ 	, m_maxtexheight(65536)
++	, m_artwork_width(0)
++	, m_artwork_height(0)
+ 	, m_transform_container(true)
+ 	, m_external_artwork(false)
+ {
+@@ -962,6 +966,31 @@ render_target::render_target(render_manager &manager, render_container *ui, T &&
+ 	// aspect and scale options
+ 	if (!(flags & RENDER_CREATE_HIDDEN))
+ 	{
++		std::string_view const artwork_resolution(manager.machine().options().artwork_resolution());
++		if (artwork_resolution != "auto")
++		{
++			auto const parse_dimension = [] (std::string_view text, s32 &result)
++			{
++				unsigned value;
++				auto const [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
++				if ((error != std::errc()) || (end != (text.data() + text.size())) || !value || (value > 65'536U))
++				{
++					return false;
++				}
++
++				result = s32(value);
++				return true;
++			};
++
++			std::size_t const separator(artwork_resolution.find('x'));
++			if ((separator == std::string_view::npos) ||
++					!parse_dimension(artwork_resolution.substr(0, separator), m_artwork_width) ||
++					!parse_dimension(artwork_resolution.substr(separator + 1), m_artwork_height))
++			{
++				throw emu_fatalerror("Invalid artwork resolution '%s' (expected <width>x<height> or 'auto')", artwork_resolution.data());
++			}
++		}
++
+ 		m_keepaspect = manager.machine().options().keep_aspect();
+ 		m_int_overscan = manager.machine().options().int_overscan();
+ 		m_int_scale_x = manager.machine().options().int_scale_x();
+@@ -1679,6 +1708,17 @@ render_primitive_list &render_target::get_primitives()
+ 	root_xform.orientation = m_orientation;
+ 	root_xform.no_center = false;
+ 
++	object_transform artwork_root_xform(root_xform);
++	if (m_artwork_width && m_artwork_height)
++	{
++		s32 artwork_viswidth, artwork_visheight;
++		compute_visible_area(m_artwork_width, m_artwork_height, m_pixel_aspect, m_orientation, artwork_viswidth, artwork_visheight);
++		artwork_root_xform.xoffs = float(m_artwork_width - artwork_viswidth) / 2;
++		artwork_root_xform.yoffs = float(m_artwork_height - artwork_visheight) / 2;
++		artwork_root_xform.xscale = float(artwork_viswidth);
++		artwork_root_xform.yscale = float(artwork_visheight);
++	}
++
+ 	if (m_manager.machine().phase() >= machine_phase::RESET)
+ 	{
+ 		// we're running - iterate over items in the view
+@@ -1700,11 +1740,20 @@ render_primitive_list &render_target::get_primitives()
+ 			item_xform.orientation = orientation_add(curitem.orientation(), root_xform.orientation);
+ 			item_xform.no_center = false;
+ 
++			object_transform artwork_item_xform(item_xform);
++			if (m_artwork_width && m_artwork_height)
++			{
++				artwork_item_xform.xoffs = artwork_root_xform.xoffs + bounds.x0 * artwork_root_xform.xscale;
++				artwork_item_xform.yoffs = artwork_root_xform.yoffs + bounds.y0 * artwork_root_xform.yscale;
++				artwork_item_xform.xscale = (bounds.x1 - bounds.x0) * artwork_root_xform.xscale;
++				artwork_item_xform.yscale = (bounds.y1 - bounds.y0) * artwork_root_xform.yscale;
++			}
++
+ 			// if there is no associated element, it must be a screen element
+ 			if (curitem.screen())
+ 				add_container_primitives(list, root_xform, item_xform, curitem.screen()->container(), curitem.blend_mode());
+ 			else
+-				add_element_primitives(list, item_xform, curitem);
++				add_element_primitives(list, item_xform, artwork_item_xform, curitem);
+ 		}
+ 	}
+ 	else
+@@ -2756,7 +2805,7 @@ void render_target::add_container_primitives(render_primitive_list &list, const
+ //  for an element in the current state
+ //-------------------------------------------------
+ 
+-void render_target::add_element_primitives(render_primitive_list &list, const object_transform &xform, layout_view_item &item)
++void render_target::add_element_primitives(render_primitive_list &list, const object_transform &xform, const object_transform &raster_xform, layout_view_item &item)
+ {
+ 	layout_element &element(*item.element());
+ 	int const blendmode(item.blend_mode());
+@@ -2769,6 +2818,15 @@ void render_target::add_element_primitives(render_primitive_list &list, const ob
+ 	if (texture)
+ 	{
+ 		render_primitive *prim = list.alloc(render_primitive::QUAD);
++		bool const fixed_artwork(m_artwork_width && m_artwork_height);
++
++		// compute the bounds
++		float const primwidth(render_round_nearest(xform.xscale));
++		float const primheight(render_round_nearest(xform.yscale));
++		float const rasterwidth(fixed_artwork ? (std::max)(render_round_nearest(raster_xform.xscale), 1.0f) : primwidth);
++		float const rasterheight(fixed_artwork ? (std::max)(render_round_nearest(raster_xform.yscale), 1.0f) : primheight);
++		prim->bounds.set_wh(render_round_nearest(xform.xoffs), render_round_nearest(xform.yoffs), primwidth, primheight);
++		prim->full_bounds = prim->bounds;
+ 
+ 		// configure the basics
+ 		prim->color = xform.color;
+@@ -2776,35 +2834,44 @@ void render_target::add_element_primitives(render_primitive_list &list, const ob
+ 				PRIMFLAG_TEXORIENT(xform.orientation) |
+ 				PRIMFLAG_TEXFORMAT(texture->format()) |
+ 				PRIMFLAG_BLENDMODE(blendmode) |
+-				PRIMFLAG_TEXWRAP((item.scroll_wrap_x() || item.scroll_wrap_y()) ? 1 : 0);
+-
+-		// compute the bounds
+-		float const primwidth(render_round_nearest(xform.xscale));
+-		float const primheight(render_round_nearest(xform.yscale));
+-		prim->bounds.set_wh(render_round_nearest(xform.xoffs), render_round_nearest(xform.yoffs), primwidth, primheight);
+-		prim->full_bounds = prim->bounds;
++				PRIMFLAG_TEXWRAP((item.scroll_wrap_x() || item.scroll_wrap_y()) ? 1 : 0) |
++				PRIMFLAG_TEXFILTER(fixed_artwork ? 1 : 0);
+ 
+ 		// get the scaled texture and append it
+ 		float const xsize(item.scroll_size_x());
+ 		float const ysize(item.scroll_size_y());
+-		s32 texwidth = render_round_nearest(((xform.orientation & ORIENTATION_SWAP_XY) ? primheight : primwidth) / xsize);
+-		s32 texheight = render_round_nearest(((xform.orientation & ORIENTATION_SWAP_XY) ? primwidth : primheight) / ysize);
+-		texwidth = (std::min)(texwidth, m_maxtexwidth);
+-		texheight = (std::min)(texheight, m_maxtexheight);
+-		texture->get_scaled(texwidth, texheight, prim->texture, list, prim->flags);
++		float const xwindow((xform.orientation & ORIENTATION_SWAP_XY) ? rasterheight : rasterwidth);
++		float const ywindow((xform.orientation & ORIENTATION_SWAP_XY) ? rasterwidth : rasterheight);
++		float const logical_texwidth(fixed_artwork ? (std::max)(render_round_nearest(xwindow / xsize), 1.0f) : 0.0f);
++		float const logical_texheight(fixed_artwork ? (std::max)(render_round_nearest(ywindow / ysize), 1.0f) : 0.0f);
++		s32 raster_texwidth;
++		s32 raster_texheight;
++		if (fixed_artwork)
++		{
++			raster_texwidth = (logical_texwidth < float(m_maxtexwidth)) ? s32(logical_texwidth) : m_maxtexwidth;
++			raster_texheight = (logical_texheight < float(m_maxtexheight)) ? s32(logical_texheight) : m_maxtexheight;
++		}
++		else
++		{
++			raster_texwidth = render_round_nearest(((xform.orientation & ORIENTATION_SWAP_XY) ? primheight : primwidth) / xsize);
++			raster_texheight = render_round_nearest(((xform.orientation & ORIENTATION_SWAP_XY) ? primwidth : primheight) / ysize);
++			raster_texwidth = (std::min)(raster_texwidth, m_maxtexwidth);
++			raster_texheight = (std::min)(raster_texheight, m_maxtexheight);
++		}
++		texture->get_scaled(raster_texwidth, raster_texheight, prim->texture, list, prim->flags);
+ 
+ 		// compute the clip rect
+ 		render_bounds cliprect = prim->bounds & m_bounds;
+ 
+ 		// determine UV coordinates and apply clipping
+-		float const xwindow((xform.orientation & ORIENTATION_SWAP_XY) ? primheight : primwidth);
+-		float const ywindow((xform.orientation & ORIENTATION_SWAP_XY) ? primwidth : primheight);
+-		float const xrange(float(texwidth) - (item.scroll_wrap_x() ? 0.0f : xwindow));
+-		float const yrange(float(texheight) - (item.scroll_wrap_y() ? 0.0f : ywindow));
+-		float const xoffset(render_round_nearest(item.scroll_pos_x() * xrange) / float(texwidth));
+-		float const yoffset(render_round_nearest(item.scroll_pos_y() * yrange) / float(texheight));
+-		float const xend(xoffset + (xwindow / float(texwidth)));
+-		float const yend(yoffset + (ywindow / float(texheight)));
++		float const uvwidth(fixed_artwork ? logical_texwidth : raster_texwidth);
++		float const uvheight(fixed_artwork ? logical_texheight : raster_texheight);
++		float const xrange(uvwidth - (item.scroll_wrap_x() ? 0.0f : xwindow));
++		float const yrange(uvheight - (item.scroll_wrap_y() ? 0.0f : ywindow));
++		float const xoffset(render_round_nearest(item.scroll_pos_x() * xrange) / uvwidth);
++		float const yoffset(render_round_nearest(item.scroll_pos_y() * yrange) / uvheight);
++		float const xend(xoffset + (xwindow / uvwidth));
++		float const yend(yoffset + (ywindow / uvheight));
+ 		switch (xform.orientation)
+ 		{
+ 		default:
+diff --git a/src/emu/render.h b/src/emu/render.h
+index f8f84324..0ee4604c 100644
+--- a/src/emu/render.h
++++ b/src/emu/render.h
+@@ -113,6 +113,9 @@ constexpr u32 PRIMFLAG_TYPE_QUAD = 1 << PRIMFLAG_TYPE_SHIFT;
+ constexpr int PRIMFLAG_PACKABLE_SHIFT = 21;
+ constexpr u32 PRIMFLAG_PACKABLE = 1 << PRIMFLAG_PACKABLE_SHIFT;
+ 
++constexpr int PRIMFLAG_TEXFILTER_SHIFT = 22;
++constexpr u32 PRIMFLAG_TEXFILTER_MASK = 1 << PRIMFLAG_TEXFILTER_SHIFT;
++
+ //**************************************************************************
+ //  MACROS
+ //**************************************************************************
+@@ -144,6 +147,8 @@ constexpr u32 PRIMFLAG_GET_VECTOR(u32 x)    { return (x & PRIMFLAG_VECTOR_MASK)
+ constexpr u32 PRIMFLAG_VECTORBUF(u32 x)     { return x << PRIMFLAG_VECTORBUF_SHIFT; }
+ constexpr u32 PRIMFLAG_GET_VECTORBUF(u32 x) { return (x & PRIMFLAG_VECTORBUF_MASK) >> PRIMFLAG_VECTORBUF_SHIFT; }
+ 
++constexpr u32 PRIMFLAG_TEXFILTER(u32 x)     { return x << PRIMFLAG_TEXFILTER_SHIFT; }
++constexpr u32 PRIMFLAG_GET_TEXFILTER(u32 x) { return (x & PRIMFLAG_TEXFILTER_MASK) >> PRIMFLAG_TEXFILTER_SHIFT; }
+ 
+ //**************************************************************************
+ //  TYPE DEFINITIONS
+@@ -603,7 +608,7 @@ private:
+ 	bool load_layout_file(const char *dirname, const internal_layout &layout_data, device_t *device = nullptr);
+ 	bool load_layout_file(device_t &device, util::xml::data_node const &rootnode, const char *searchpath, const char *dirname);
+ 	void add_container_primitives(render_primitive_list &list, const object_transform &root_xform, const object_transform &xform, render_container &container, int blendmode);
+-	void add_element_primitives(render_primitive_list &list, const object_transform &xform, layout_view_item &item);
++	void add_element_primitives(render_primitive_list &list, const object_transform &xform, const object_transform &raster_xform, layout_view_item &item);
+ 	std::pair<float, float> map_point_internal(s32 target_x, s32 target_y);
+ 	std::pair<float, float> map_point_layout(s32 target_x, s32 target_y);
+ 
+@@ -651,6 +656,8 @@ private:
+ 	render_layer_config     m_base_layerconfig;         // the layer configuration at the time of first frame
+ 	int                     m_maxtexwidth;              // maximum width of a texture
+ 	int                     m_maxtexheight;             // maximum height of a texture
++	s32                     m_artwork_width;             // fixed artwork raster width, or zero to follow target
++	s32                     m_artwork_height;            // fixed artwork raster height, or zero to follow target
+ 	s32                     m_clear_extent_count;       // number of clear extents
+ 	s32                     m_clear_extents[MAX_CLEAR_EXTENTS]; // array of clear extents
+ 	bool                    m_transform_container;      // determines whether the screen container is transformed by the core renderer,
+diff --git a/src/osd/modules/render/drawogl.cpp b/src/osd/modules/render/drawogl.cpp
+index f2cdd5e0..a84e4447 100644
+--- a/src/osd/modules/render/drawogl.cpp
++++ b/src/osd/modules/render/drawogl.cpp
+@@ -517,7 +517,7 @@ static const line_aa_step line_aa_4step[] =
+ 
+ HashT renderer_ogl::texture_compute_hash(const render_texinfo *texture, uint32_t flags)
+ {
+-	HashT h = (HashT)texture->base ^ (flags & (PRIMFLAG_BLENDMODE_MASK | PRIMFLAG_TEXFORMAT_MASK));
++	HashT h = (HashT)texture->base ^ (flags & (PRIMFLAG_BLENDMODE_MASK | PRIMFLAG_TEXFORMAT_MASK | PRIMFLAG_TEXFILTER_MASK));
+ 	//printf("hash %d\n", (int) h % HASH_SIZE);
+ 	return (h >> 8) % HASH_SIZE;
+ }
+@@ -1975,17 +1975,17 @@ int renderer_ogl::texture_shader_create(const render_texinfo *texsource, ogl_tex
+ 			glFinish(); // should not be necessary, .. but make sure we won't access the memory after free
+ 	free(dummy);
+ 
+-	if ((PRIMFLAG_GET_SCREENTEX(flags)) && video_config.filter)
++	if (((PRIMFLAG_GET_SCREENTEX(flags)) && video_config.filter) || PRIMFLAG_GET_TEXFILTER(flags))
+ 	{
+ 		assert( glsl_shader_feature == glsl_shader_info::FEAT_PLAIN );
+ 
+-		// screen textures get the user's choice of filtering
++		// use linear sampling for screen textures when requested and for explicitly filtered textures
+ 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+ 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+ 	}
+ 	else
+ 	{
+-		// non-screen textures will never be filtered
++		// leave other textures unfiltered
+ 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+ 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+ 	}
+@@ -2107,15 +2107,15 @@ ogl_texture_info *renderer_ogl::texture_create(const render_texinfo *texsource,
+ 				texture->borderpix ? 1 : 0,
+ 				GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, nullptr);
+ 
+-		if ((PRIMFLAG_GET_SCREENTEX(flags)) && video_config.filter)
++		if (((PRIMFLAG_GET_SCREENTEX(flags)) && video_config.filter) || PRIMFLAG_GET_TEXFILTER(flags))
+ 		{
+-			// screen textures get the user's choice of filtering
++			// use linear sampling for screen textures when requested and for explicitly filtered textures
+ 			glTexParameteri(texture->texTarget, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+ 			glTexParameteri(texture->texTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+ 		}
+ 		else
+ 		{
+-			// non-screen textures will never be filtered
++			// leave other textures unfiltered
+ 			glTexParameteri(texture->texTarget, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+ 			glTexParameteri(texture->texTarget, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+ 		}
+@@ -2570,7 +2570,7 @@ static int compare_texture_primitive(const ogl_texture_info *texture, const rend
+ 		texture->texinfo.height == prim->texture.height &&
+ 		texture->texinfo.rowpixels == prim->texture.rowpixels &&
+ 		texture->texinfo.palette == prim->texture.palette &&
+-		((texture->flags ^ prim->flags) & (PRIMFLAG_BLENDMODE_MASK | PRIMFLAG_TEXFORMAT_MASK)) == 0)
++		((texture->flags ^ prim->flags) & (PRIMFLAG_BLENDMODE_MASK | PRIMFLAG_TEXFORMAT_MASK | PRIMFLAG_TEXFILTER_MASK)) == 0)
+ 		return 1;
+ 	else
+ 		return 0;

@@ -12,6 +12,8 @@ The known-good full-panel desktop path is:
 - one quantum plus one producer update of internal margin (48 samples);
 - audio-master pacing with MAME video throttling disabled;
 - OpenGL full-panel rendering, bilinear filtering, and a maximized window;
+- a fixed 1280x720 CPU artwork raster, with actual-resolution LCD, UI, window
+  geometry and input mapping;
 - machine-state primitive generation on the emulation thread, with OpenGL
   drawing and presentation on a low-priority asynchronous worker;
 - SDL event pumping isolated on the low-priority process main thread;
@@ -25,7 +27,7 @@ The known-good full-panel desktop path is:
   interpreter.
 
 The SDL library is not patched or replaced. These video changes are confined
-to MAME's SDL OSD/backend source (`src/osd/sdl`), which uses the stock system
+to MAME's render core and SDL OSD/backend source, which use the stock system
 SDL runtime.
 
 Launch the Logic tutorial project with the MPD18 as MIDI input:
@@ -66,6 +68,7 @@ host-level commands and must remain documented whenever they change.
 | `MPC_FILTER_MODE` | `1` | Enable bilinear filtering |
 | `MPC_MAXIMIZE` | `1` | Start maximized |
 | `MPC_WINDOW_RESOLUTION` | `auto` | Let MAME size the render target |
+| `MPC_ARTWORK_RESOLUTION` | `1280x720` | Fix MPC2000XL CPU-side panel-art raster dimensions; use `auto` for stock target-sized artwork |
 | `MPC_PANEL_MODE` | `event` | Event-driven MPC2000XL panel UART |
 | `MPC_PANEL_TIMER_MODE` | `accurate` | Choose per-transition or cycle-equivalent coalesced panel timer output |
 | `MPC_MIDI_INPUT_MODE` | `accurate` | Choose accurate wire timing, fast external MIDI, or direct internal-pad events |
@@ -386,6 +389,41 @@ accepted. The failed run is
 `results/diagnostics/live-timing-CsdHch`; the next renderer patch must remove
 this resize cost without changing the validated 32-frame audio settings.
 
+Patch `0030-render-fixed-artwork-resolution.patch` separates physical output
+geometry from CPU-side layout-element rasterization. With the launcher default
+of `1280x720`, panel SVGs, labels and static artwork use one stable cache key
+through a resize; OpenGL linearly samples those textures at the actual window
+size. Primitive bounds, mouse/pad hit mapping, the emulated LCD, MAME UI and
+hidden snapshot targets retain their actual resolution. `auto` is MAME's core
+default and restores the original target-sized artwork path. Other machines
+also remain on `auto` unless explicitly overridden.
+
+In the same 440-request 680-to-1920-pixel resize sweep, the fixed path reduced
+the emulation-thread primitive-generation maximum from 115.667 ms to 2.433 ms
+(about 47.5x), after a single 93.18 ms startup warm-up. The four primitive
+passes accepted while the presenter coalesced resize frames were all between
+1.96 and 2.43 ms. An exact 1280x720 fixed-versus-auto capture had zero changed
+pixels. At larger windows the intended result is linearly scaled 720p body
+artwork, while the LCD remains native. The profile artifacts are
+`/dev/shm/mpc-fixed-resize-perf-oWztBq` and
+`/dev/shm/mpc-artwork-resize-5VKI0g`.
+
+The fixed raster flag is currently consumed for linear sampling by OpenGL.
+Other render backends still benefit from stable core artwork cache dimensions
+but may use nearest sampling. `MPC_FILTER_MODE` remains the emulated-screen
+filter choice; it does not disable fixed-artwork sampling. A small window may
+perform more initial artwork work with fixed 720p than with `auto`.
+
+The strict 32-frame live gate is still open. One fixed-artwork run with an
+automated resize workload logged no PipeWire buffer events inside the marked
+playback interval, but its delivered-audio timeline comparison failed. A
+matched no-resize control also failed independently after a 6.483 ms main
+audio update inserted 96 samples into the delivered timeline. These artifacts
+are `results/diagnostics/live-timing-lr6CRf` and
+`results/diagnostics/live-timing-cgsBB0`. The deterministic PCM, visual and
+resize-compute results above are accepted for patch 0030; they are not being
+presented as a completed live 32-frame/xrun result.
+
 Zero headroom did not pass the longer stability gate. Matched 60-second
 audio-master runs with the same clean binary, 32-frame graph, 16-sample
 cadence, event-driven panel, and video disabled measured:
@@ -410,9 +448,15 @@ Run the deterministic and live timing checks after rebuilding:
 ```bash
 scripts/diagnostics/test-mpc2000xl-timing.sh
 scripts/diagnostics/test-mpc2000xl-async-present.sh
-MPC_ASYNC_PRESENT=1 MPC_VIDEO_MODE=opengl \
+MPC_PIPEWIRE_FRAMES=32 MAME_TIMING_MASTER=audio \
+  MPC_ASYNC_PRESENT=1 MPC_VIDEO_MODE=opengl \
+  MPC_VIEW_NAME='Default Layout' MPC_WINDOW_RESOLUTION=1600x900 \
+  MPC_ARTWORK_RESOLUTION=1280x720 \
   scripts/diagnostics/test-mpc2000xl-live-timing.sh
 ```
+
+Continuously resize the MAME window between the playback begin/end markers in
+the live test. The diagnostic does not automate desktop window management.
 
 During an interactive test, confirm the active graph and error counters with:
 

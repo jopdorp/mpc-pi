@@ -201,6 +201,22 @@ per MAME output stream during aggressive resizing, so resize scaling remains a
 separate measured optimization target rather than being hidden by moving live
 machine reads back to the presenter.
 
+Patch 0030 adds an independently selectable fixed artwork raster. It leaves
+the actual target, input geometry, LCD and UI resolution unchanged while using
+a canonical 1280x720 transform only for layout-element texture generation.
+The core option defaults to `auto`; the MPC2000XL launcher selects 1280x720 and
+can explicitly return to `auto`. In a matched 440-request resize storm, the
+emulation-thread primitive-generation maximum fell from 115.667 ms to 2.433 ms
+after warm-up, about 47.5x. The exact canonical-size fixed/auto image comparison
+had zero changed pixels. OpenGL linearly samples fixed artwork; extending the
+filter hint to other backends and reducing the separate presenter-side resize
+upload/present tail are independent possible changes. The live 32-frame
+PipeWire resize run remains open: an automated-resize run had no in-interval
+buffer events but failed delivered-audio timeline comparison, while a matched
+no-resize control independently underrun after a 6.483 ms producer update.
+Patch 0030 is therefore accepted on its deterministic PCM, visual and
+resize-compute evidence, not as a completed live xrun result.
+
 The earlier profile's largest single symbol, at 12.99%, was the V53 opcode-byte
 fetch lambda configured by `nec_common_device::device_start()`. Each byte goes
 through a `std::function`, V33 address translation, and MAME's cached

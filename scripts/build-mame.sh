@@ -35,6 +35,7 @@ mame_patches=(
     "$repo_root/patches/mame/0027-render-none-skip-unused-primitives.patch"
     "$repo_root/patches/mame/0028-sound-cache-device-interfaces.patch"
     "$repo_root/patches/mame/0029-sdl-generate-primitives-on-emulation-thread.patch"
+    "$repo_root/patches/mame/0030-render-fixed-artwork-resolution.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then
