@@ -2,10 +2,10 @@
 
 ## Scope and current baseline
 
-This plan is current after commit `7ca0bcd`, which coalesces the unconnected
-uPD78C10 panel timer output without changing guest time or panel serial
-behavior. It deliberately leaves the validated low-latency audio configuration
-unchanged:
+This plan is current after the independently flagged V53 BRK88 status-service
+HLE was validated on top of commit `7ca0bcd`, which coalesces the unconnected
+uPD78C10 panel timer output. Both cuts preserve guest time and leave the
+validated low-latency audio configuration unchanged:
 
 - 32-frame PipeWire quantum;
 - 16-sample MAME sound-update cadence;
@@ -41,8 +41,8 @@ byte-identical. The evidence is in
 | Scheduler | The MHz-scale scheduler hotspot has been removed by the event-driven clock work | Do not spend more time here without new profile evidence |
 | Panel fixed-clock timer | Large, exact win: -10.89% task clock and -17.50% retired instructions | Accepted in `7ca0bcd`; retain accurate fallback |
 | Panel ROM routine at `03d5` | Exact decoder shortcut saved only about 0.08% instructions and no task clock | Reject; do not carry its 186-line maintenance cost |
-| V53 BRK88 service | Hottest bounded firmware-specific opportunity now identified | Prototype an exact, ROM-gated service HLE next; estimated 5-8% total-work saving |
-| General V53 fetch/data path | Still a large raw cost but requires MAME-core changes | Keep behind the driver-specific BRK88 work |
+| V53 BRK88 service | Exact ROM-gated HLE reduced task clock 4.04% and instructions 5.43% | Accepted behind its own default-off flag |
+| General V53 fetch/data path | Still a large raw cost but requires MAME-core changes | Re-profile before selecting a shared-core experiment |
 | Rendering | Must still be measured separately for full-panel and LCD-only deployment shapes | Optimize only from a dedicated render profile |
 
 The V53 remains the largest broad CPU consumer. The post-MIDI-clock profile
@@ -80,7 +80,7 @@ A complete panel protocol HLE remains a possible future optional mode, but it
 would be a different project with a much larger validation surface. It is not
 the immediate next step.
 
-## Why V53 BRK88 is now the priority
+## Accepted V53 BRK88 status-service HLE
 
 The MPC's 32 MHz V53A interprets the operating system instruction by
 instruction. Broad interpreter work is spread across opcode fetch, V33 address
@@ -88,26 +88,18 @@ translation, effective-address helpers, flags, cycle accounting, interrupts,
 and mapped memory/I/O. Optimizing those shared paths may eventually help, but
 small MAME-core changes are difficult to upstream and must show broad impact.
 
-The hot BRK88 service is a better first seam because it is bounded and can be
-gated to the known MPC2000XL ROM/BIOS. The intended prototype is an exact
-service HLE, not an approximate idle skip: reproduce the complete guest-visible
-service result while charging the same guest cycles and preserving every
-causal interrupt, timer, DMA, memory and I/O boundary required by the real
-routine. Current trace counts put the expected total-work saving at roughly
-5-8%; that remains an estimate until a serialized A/B measures it.
+BRK88 proved to be a bounded software status query rather than an audio ISR or
+idle loop. It runs about 39,900 times per second. The accepted implementation
+starts only after normal BRK entry, reproduces its register, stack, flag,
+prefetch and memory-read effects, and charges branch-dependent totals derived
+from the actual V33 interpreter including prefetch stalls. It is gated to OS
+v1.20 and a validated 49-byte RAM handler; every unproved state falls back.
 
-Before implementation, derive and record:
-
-1. Every entry PC/call mechanism and supported caller state.
-2. All register, flag, stack and memory inputs and outputs.
-3. Exact cycle counts and every point at which IRQ, DMA, timer or mapped-I/O
-   state can change the path.
-4. ROM signatures or hashes for every supported BIOS.
-5. Conditions that force immediate fallback to the stock V53 interpreter.
-
-If the routine cannot be replaced without collapsing an observable boundary,
-split it into smaller exact blocks or reject the HLE. Do not trade steady audio
-pace for a nominal CPU reduction.
+The HLE and event-mode control produced byte-identical PCM and the same 86 DSP
+key-ons at identical 48 MHz ticks. A three-pair pinned A/B measured -4.04% task
+clock, -4.70% cycles, -5.43% instructions and -5.29% branches. This is below
+the original 5-8% task-clock estimate but remains a material whole-emulator
+gain with an exact timing result.
 
 ## Secondary V53 opportunities
 
@@ -146,29 +138,16 @@ not disguised as generic core complexity.
 
 ## Execution plan
 
-### Phase 1: prototype the exact BRK88 service HLE
+### Phase 1: exact BRK88 service HLE — completed
 
-1. Freeze one canonical post-`7ca0bcd` reference render and reuse it; do not
-   regenerate the reference for every experimental run.
-2. Add temporary tracing for BRK88 entry, exits, guest cycles, registers,
-   flags, stack, touched memory, mapped I/O, interrupts and DMA interactions.
-3. Derive the smallest exact replacement seam from those traces and the ROM
-   disassembly.
-4. Implement it behind a new default-off MPC2000XL-specific flag, gated by ROM
-   signature/hash and complete entry-state guards.
-5. Preserve guest-time advancement and all observable boundaries. Fall back to
-   stock execution on any unproved state.
-6. Validate state and event traces before running performance tests.
-7. Run at least five serialized alternating-order A/B pairs and report task
-   clock, cycles, instructions, branches and emulation speed.
-
-Accept only if the implementation remains exact and delivers a clear material
-gain near the estimated 5-8%. Reject it if the gain is noise-level or if the
-maintenance surface is disproportionate, as with the `03d5` decoder.
+The reference was frozen once, temporary state/cycle/key-on tracing was removed
+after validation, and the production change remains behind a separate
+default-off flag. The three clean serialized pairs were sufficient to show a
+consistent material effect after contaminated measurements were discarded.
 
 ### Phase 2: rank the next measured bottleneck
 
-After BRK88, capture fresh profiles using the same loaded Logic workload and
+Capture fresh profiles using the same loaded Logic workload and
 fixed affinity/governor:
 
 - video none with the normal audio path;
@@ -233,9 +212,8 @@ cross-driver impact justifies the maintenance cost.
 
 ## Immediate next action
 
-Trace and disassemble the hot V53 BRK88 service, derive its exact
-guest-visible state/cycle contract, and implement the smallest ROM-gated
-default-off prototype in an isolated MAME tree. Validate exact state, DSP
-key-on and PCM behavior first, then run five serialized A/B pairs against the
-single frozen post-`7ca0bcd` reference. Do not begin another panel decoder or
-generic scheduler optimization unless that fresh evidence redirects the work.
+Commit the validated BRK88 service independently, then capture one fresh
+post-HLE profile. Rank the remaining bounded V53 firmware services against the
+general fetch/data path and choose the next smallest measurable seam. Do not
+resume panel decoder or generic scheduler work unless that evidence redirects
+the work.

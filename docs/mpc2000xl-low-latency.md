@@ -17,7 +17,9 @@ The known-good full-panel desktop path is:
 - emulation on CPUs 0-11 at nice -10 and SCHED_RR priority 20; and
 - MPC2000XL event-driven panel UART mode; and
 - event-driven MB89371 MIDI baud clocks with the periodic compatibility mode
-  retained for canonical regression renders.
+  retained for canonical regression renders; and
+- an optional cycle-equivalent V53 status-service HLE, with the interpreter
+  retained as the default.
 
 The SDL library is not patched or replaced. These video changes are confined
 to MAME's SDL OSD/backend source (`src/osd/sdl`), which uses the stock system
@@ -65,6 +67,7 @@ host-level commands and must remain documented whenever they change.
 | `MPC_PANEL_TIMER_MODE` | `accurate` | Choose per-transition or cycle-equivalent coalesced panel timer output |
 | `MPC_MIDI_INPUT_MODE` | `accurate` | Choose accurate wire timing, fast external MIDI, or direct internal-pad events |
 | `MPC_MIDI_CLOCK_MODE` | `event` | Event-driven external MIDI baud clocks; use `accurate` for periodic-clock compatibility |
+| `MPC_V53_STATUS_MODE` | `accurate` | Choose interpreted or ROM-gated HLE execution for one hot V53 firmware service |
 
 ## MPD18 input modes
 
@@ -177,6 +180,54 @@ speed, so its average-speed percentage is not a throughput measurement. The
 retired-instruction reduction is the most portable evidence for the intended
 Cortex-A53 target. Performance artifacts are in
 `results/diagnostics/panel-timer-coalesced-perf-WHD9uw`.
+
+## V53 status-service HLE
+
+`MPC_V53_STATUS_MODE=hle` replaces one bounded MPC2000XL V53 firmware service,
+BRK 88 at `0000:4ffc`, after the CPU core has performed the normal interrupt
+entry. The service runs about 39,900 times per second in the loaded Logic
+workload and returns a small status snapshot in registers. The HLE preserves
+the interrupt frame, saved-DS stack write, register and flag results, memory
+read order, prefetch state, and branch-dependent guest cycle count.
+
+This mode is deliberately narrow and defaults to `accurate`. It is enabled
+only for MPC2000XL OS v1.20 with ROM SHA-1
+`382be688972fe3d85caeca99abff4b6c391347fb`. The handler's 49 bytes are also
+validated after the firmware copies them to RAM. Debugging, tracing, an
+unexpected CPU state, a changed address mapping, modified handler code, a
+pending NMI, insufficient scheduler budget, or an unsupported ROM falls back
+to the interpreter. The raw MAME switch is `MAME_MPC_V53_BRK88_HLE`; prefer
+the launcher setting so the fallback is explicitly selected otherwise.
+
+The event-mode reference and HLE render were byte-identical, with SHA-256
+`a65077eb074df2671731ea0e3f315f627044b4ece480c75de2871b8fd81b4014`.
+Temporary 48 MHz DSP tracing found the same 86 key-ons at exactly the same
+ticks: maximum onset delta was 0 samples and 0 microseconds. A deliberately
+modified ROM also exercised the unsupported-ROM fallback. Forced tests of the
+two otherwise unobserved status branches matched the interpreter exactly as
+well: 114 total cycles / 171 ticks at 48 MHz for submode zero, and 116 cycles /
+174 ticks for submode one, with all logged architectural state identical.
+
+A three-pair, pinned short A/B used the loaded Logic playback, video and sound
+outputs disabled, and event-driven panel/MIDI clocks with coalesced panel timer
+output. Medians were:
+
+| Metric | Accurate | HLE | Change |
+|---|---:|---:|---:|
+| Task clock | 16,202.97 ms | 15,548.95 ms | -4.04% |
+| CPU cycles | 38.14 billion | 36.35 billion | -4.70% |
+| Instructions | 93.71 billion | 88.62 billion | -5.43% |
+| Branches | 16.44 billion | 15.57 billion | -5.29% |
+
+The raw counter files are retained locally in the ignored diagnostics directory
+`results/diagnostics/v53-status-hle-perf-guard`.
+
+Run the focused deterministic regression without regenerating the frozen
+event-mode reference:
+
+```bash
+scripts/diagnostics/test-mpc2000xl-v53-status-hle.sh
+```
 
 The client request alone does not guarantee a 32-frame graph when other
 PipeWire clients request a larger quantum. The validated host explicitly

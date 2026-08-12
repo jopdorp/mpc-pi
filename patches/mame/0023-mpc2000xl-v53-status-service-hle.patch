@@ -1,0 +1,263 @@
+--- a/src/devices/cpu/nec/nec.h
++++ b/src/devices/cpu/nec/nec.h
+@@ -26,6 +26,11 @@
+ {
+ 	friend class device_v5x_interface;
+ 
++public:
++	// MPC2000XL firmware-specific optimization. It is disabled unless the
++	// owning driver explicitly opts in.
++	void set_mpc2000xl_brk88_hle(bool enable) { m_mpc2000xl_brk88_hle_enabled = enable; }
++
+ protected:
+ 	// construction/destruction
+ 	nec_common_device(const machine_config &mconfig, device_type type, const char *tag, device_t *owner, uint32_t clock, bool is_16bit, uint8_t prefetch_size, uint8_t prefetch_cycles, uint32_t chip_type, bool has_div_quirk, address_map_constructor internal_port_map = address_map_constructor());
+@@ -41,7 +46,7 @@ protected:
+ 
+ 	// device_execute_interface overrides
+ 	virtual uint32_t execute_min_cycles() const noexcept override { return 1; }
+-	virtual uint32_t execute_max_cycles() const noexcept override { return 80; }
++	virtual uint32_t execute_max_cycles() const noexcept override { return m_mpc2000xl_brk88_hle_enabled ? 116 : 80; }
+ 	virtual uint32_t execute_default_irq_vector(int inputnum) const noexcept override { return 0xff; }
+ 	virtual bool execute_input_edge_triggered(int inputnum) const noexcept override { return inputnum == INPUT_LINE_NMI; }
+ 	virtual void execute_run() override;
+@@ -102,6 +107,13 @@
+ 	uint8_t   m_halted;
+ 	uint32_t  m_rep_params;
+ 
++	bool m_mpc2000xl_brk88_hle_enabled = false;
++	bool m_mpc2000xl_brk88_rom_valid = false;
++	bool m_mpc2000xl_brk88_handler_valid = false;
++	bool m_mpc2000xl_brk88_reported = false;
++	offs_t m_mpc2000xl_brk88_cached_handler_start = 0;
++	memory_passthrough_handler m_mpc2000xl_brk88_handler_tap;
++
+ 	address_space *m_program;
+ 	memory_access<24, 0, 0, ENDIANNESS_LITTLE>::cache m_cache8;
+ 	memory_access<24, 1, 0, ENDIANNESS_LITTLE>::cache m_cache16;
+@@ -152,6 +164,10 @@
+ 	void nec_trap();
+ 	void nec_brk(unsigned int_num);
+ 	void external_int();
++	bool mpc2000xl_brk88_hle(bool saved_tf);
++	bool validate_mpc2000xl_brk88_handler(offs_t handler_start);
++	void install_mpc2000xl_brk88_write_tap(offs_t handler_start);
++	void invalidate_mpc2000xl_brk88_handler();
+ 
+ 	uint8_t start_rep();
+ 	void cont_rep();
+--- a/src/devices/cpu/nec/nec.cpp
++++ b/src/devices/cpu/nec/nec.cpp
+@@ -108,6 +108,8 @@
+ #include "nec.h"
+ #include "necdasm.h"
+ 
++#include "util/hashing.h"
++
+ #define LOG_BUSLOCK (1 << 1)
+ //#define VERBOSE (...)
+ 
+@@ -308,6 +310,7 @@
+ 	m_poll_state = 1;
+ 	m_halted = 0;
+ 	m_rep_params = 0;
++	m_mpc2000xl_brk88_handler_valid = false;
+ 
+ 	if (m_chip_type == V33_TYPE)
+ 		m_xa = false;
+@@ -324,6 +327,7 @@
+ void nec_common_device::nec_interrupt(unsigned int_num, int/*INTSOURCES*/ source)
+ {
+ 	uint32_t dest_seg, dest_off;
++	const bool saved_tf = m_TF;
+ 
+ 	m_rep_params = 0;
+ 	i_pushf();
+@@ -342,6 +346,13 @@
+ 	m_prev_ip = m_ip = (WORD)dest_off;
+ 	Sreg(PS) = (WORD)dest_seg;
+ 	CHANGE_PC;
++
++	// Start the firmware-specific shortcut only after normal BRK entry has
++	// created the architectural interrupt frame and loaded the validated
++	// handler vector. The calling INT instruction still charges its 24-cycle
++	// V33 entry cost after this returns.
++	if (m_mpc2000xl_brk88_hle_enabled && (source == BRK) && (int_num == 0x88))
++		mpc2000xl_brk88_hle(saved_tf);
+ }
+ 
+ void nec_common_device::nec_trap()
+@@ -365,6 +376,132 @@
+ 	CHANGE_PC;
+ }
+ 
++bool nec_common_device::validate_mpc2000xl_brk88_handler(offs_t handler_start)
++{
++	static constexpr u8 expected_handler[] =
++	{
++		0x1e, 0xbd, 0xe7, 0x0f, 0x8e, 0xdd, 0xa0, 0x71,
++		0x43, 0xb4, 0x00, 0x80, 0x3e, 0x72, 0x43, 0x00,
++		0x74, 0x0b, 0xb4, 0x05, 0x80, 0x3e, 0x73, 0x43,
++		0x00, 0x74, 0x02, 0xb4, 0x04, 0x8a, 0xdc, 0x0a,
++		0x1e, 0x82, 0x43, 0x8b, 0x0e, 0xce, 0x28, 0x8a,
++		0xf9, 0x0a, 0xfd, 0x8a, 0x0e, 0x7a, 0x43, 0x1f,
++		0xcf
++	};
++
++	for (unsigned index = 0; index < std::size(expected_handler); ++index)
++		if (read_mem_byte(0x4ffc + index) != expected_handler[index])
++			return false;
++
++	m_mpc2000xl_brk88_cached_handler_start = handler_start;
++	m_mpc2000xl_brk88_handler_valid = true;
++	install_mpc2000xl_brk88_write_tap(handler_start);
++	if (!m_mpc2000xl_brk88_reported)
++	{
++		osd_printf_info("%s: MPC2000XL BRK 88 status-service HLE active\n", tag());
++		m_mpc2000xl_brk88_reported = true;
++	}
++	return true;
++}
++
++void nec_common_device::install_mpc2000xl_brk88_write_tap(offs_t handler_start)
++{
++	// The complete handler is contiguous within XA page one. Rebind its
++	// physical write tap after a translation change so a cached signature can
++	// never outlive the code mapping that was validated.
++	m_mpc2000xl_brk88_handler_tap.remove();
++	m_mpc2000xl_brk88_handler_tap = m_program->install_write_tap(
++		handler_start, handler_start + 0x31, "mpc2000xl_brk88_handler",
++		[this](offs_t, u16 &, u16) { invalidate_mpc2000xl_brk88_handler(); },
++		&m_mpc2000xl_brk88_handler_tap);
++}
++
++void nec_common_device::invalidate_mpc2000xl_brk88_handler()
++{
++	m_mpc2000xl_brk88_handler_valid = false;
++}
++
++bool nec_common_device::mpc2000xl_brk88_hle(bool saved_tf)
++{
++	static constexpr u32 data_segment_base = 0x0fe7U << 4;
++
++	if (!m_mpc2000xl_brk88_hle_enabled || !m_mpc2000xl_brk88_rom_valid ||
++		(m_chip_type != V33_TYPE) || (Sreg(PS) != 0x0000) || (m_ip != 0x4ffc) ||
++		m_rep_params || m_seg_prefix || m_no_interrupt || m_halted ||
++		(m_pending_irq & NMI_IRQ) ||
++		(machine().debug_flags & (DEBUG_FLAG_ENABLED | DEBUG_FLAG_CALL_HOOK)) || saved_tf)
++		return false;
++	// Conservatively require enough budget for the longest branch before any
++	// handler data read. A short-budget fallback then performs exactly the
++	// stock firmware reads once, in stock order.
++	if (m_icount < (24 + 89))
++		return false;
++
++	const offs_t address_mask = m_program->addrmask();
++	const offs_t handler_start = v33_translate(0x4ffc) & address_mask;
++	const offs_t handler_end = handler_start + 0x31;
++	const offs_t stack_start = v33_translate(
++		(u32(Sreg(SS)) << 4) + u16(Wreg(SP) - 2)) & address_mask;
++	const offs_t stack_end = (stack_start + 1) & address_mask;
++	if (((stack_start >= handler_start) && (stack_start <= handler_end)) ||
++		((stack_end >= handler_start) && (stack_end <= handler_end)))
++		return false;
++
++	// BRKXA/RETXA and translation-table writes are both reflected in the
++	// effective masked handler address. Never reuse a validated code binding
++	// when that address changes, including across high-bit aliases.
++	if (m_mpc2000xl_brk88_handler_valid &&
++		(handler_start != m_mpc2000xl_brk88_cached_handler_start))
++		invalidate_mpc2000xl_brk88_handler();
++
++	if (!m_mpc2000xl_brk88_handler_valid && !validate_mpc2000xl_brk88_handler(handler_start))
++		return false;
++
++	// Preserve every architecturally visible side effect of 0000:4ffc-502c,
++	// including the transient saved-DS stack write and the IRET frame reads.
++	PUSH(Sreg(DS0));
++	Wreg(BP) = 0x0fe7;
++	Sreg(DS0) = 0x0fe7;
++
++	Breg(AL) = read_mem_byte(data_segment_base + 0x4371);
++	Breg(AH) = 0;
++	const u8 mode = read_mem_byte(data_segment_base + 0x4372);
++	u8 submode = 0;
++	if (mode)
++	{
++		Breg(AH) = 5;
++		submode = read_mem_byte(data_segment_base + 0x4373);
++		if (submode)
++			Breg(AH) = 4;
++	}
++	Breg(BL) = Breg(AH);
++	Breg(BL) |= read_mem_byte(data_segment_base + 0x4382);
++	Wreg(CW) = read_mem_word(data_segment_base + 0x28ce);
++	Breg(BH) = Breg(CL);
++	Breg(BH) |= Breg(CH);
++	Breg(CL) = read_mem_byte(data_segment_base + 0x437a);
++
++	// These totals include the same per-instruction prefetch accounting as the
++	// interpreter. In this core V33_TYPE indexes the short-branch timing table
++	// at zero, so taken and non-taken JZ paths both charge three cycles.
++	const int handler_cycles = !mode ? 75 : (!submode ? 87 : 89);
++
++	POP(Sreg(DS0));
++	POP(m_ip);
++	POP(Sreg(PS));
++	i_popf();
++	CHANGE_PC;
++
++	// i_popf() charged five of the handler cycles. The remaining debit
++	// includes the other firmware instructions and the rest of IRET.
++	CLK(handler_cycles - 5);
++	m_prev_ip = 0x502c;
++	m_no_interrupt = 0;
++	m_prefetch_count = 0;
++	m_prefetch_reset = 1;
++	return true;
++}
++
+ void nec_common_device::external_int()
+ {
+ 	if (m_pending_irq & NMI_IRQ)
+@@ -506,6 +643,24 @@
+ 	save_item(NAME(m_prefetch_reset));
+ 
+ 	m_program = &space(AS_PROGRAM);
++	if (m_mpc2000xl_brk88_hle_enabled)
++	{
++		util::sha1_t expected_rom_sha1;
++		expected_rom_sha1.from_string("382be688972fe3d85caeca99abff4b6c391347fb");
++		memory_region *const rom = memregion(DEVICE_SELF);
++		m_mpc2000xl_brk88_rom_valid = rom && (rom->bytes() == 0x80000) &&
++			(util::sha1_creator::simple(rom->base(), rom->bytes()) == expected_rom_sha1);
++
++		if (m_mpc2000xl_brk88_rom_valid)
++		{
++			machine().save().register_postload(
++				save_prepost_delegate(FUNC(nec_common_device::invalidate_mpc2000xl_brk88_handler), this));
++		}
++		else
++		{
++			osd_printf_warning("%s: MPC2000XL BRK 88 HLE requested for an unsupported ROM; using accurate execution\n", tag());
++		}
++	}
+ 	if (m_program->data_width() == 8)
+ 	{
+ 		m_program->cache(m_cache8);
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -756,10 +756,13 @@
+ 	const bool coalesced_panel_timer = panel_timer_mode && std::strcmp(panel_timer_mode, "0");
+ 	const char *const midi_brg_mode = osd_getenv("MAME_MPC_MIDI_EVENT_DRIVEN");
+ 	const bool event_driven_midi_brg = midi_brg_mode && std::strcmp(midi_brg_mode, "0");
++	const char *const brk88_hle_mode = osd_getenv("MAME_MPC_V53_BRK88_HLE");
++	const bool brk88_hle = brk88_hle_mode && std::strcmp(brk88_hle_mode, "0");
+ 	if (event_driven_panel)
+ 		add_panel(config, true, coalesced_panel_timer);
+ 
+ 	V53A(config, m_maincpu, 32_MHz_XTAL);
++	m_maincpu->set_mpc2000xl_brk88_hle(brk88_hle);
+ 	m_maincpu->set_direct_brc_timer(event_driven_panel);
+ 	m_maincpu->set_addrmap(AS_PROGRAM, &mpc2000_state::mpc2000_map);
+ 	m_maincpu->set_addrmap(AS_IO, &mpc2000_state::mpc2000_io_map);
