@@ -270,6 +270,24 @@ upstream MAME: shared earlier fork patches are present on both sides. It is
 also headless x86-64 evidence, not yet proof that the full-render audio path
 fits one Cortex-A53 core.
 
+### Rejected post-accessor cuts
+
+Forcing the existing V33 translation helper inline reduced generated fetch
+code and one matched pair retired 1.51% fewer instructions and 6.35% fewer
+branches. It nevertheless regressed task clock by 2.52% and cycles by 1.66%,
+so it is rejected. The apparent 3.89% flat translation symbol was not
+independently removable host time. Direct backing-pointer caching was not
+prototyped because it can bypass memory taps, debugger observers, dynamic
+handlers, and self-modifying-code visibility.
+
+The remaining named panel path has a hard profile ceiling of about 6.04%:
+3.20% in `handle_timers`, 1.68% in panel `execute_run()`, and 1.16% in
+`update_sio()`. Frequent ADC/FE1 interrupts, serial completion, debounce,
+input sampling, and UART boundaries prevent a small exact batching change from
+removing most of it. A complete optional panel-device HLE might recover 4–6%,
+but it is a separately scoped device-model project, not another local speed
+cut. Do not revive the rejected `03d5` decoder shortcut.
+
 ### Phase 4: compiler and deployment-specific builds
 
 Measure LTO, PGO and target tuning after code-path work so compiler effects do
@@ -283,6 +301,17 @@ Measure Pi Zero 2 W with the emulation thread on one A53 and asynchronous
 presentation on a second core. Test full-panel and LCD-only rendering
 separately, record actual frequencies and throttling, and repeat with active
 MIDI/pad input and UI activity.
+
+No suitable Linux-target AArch64 toolchain was available on the development
+host, so static A53 code generation is not a substitute for this test. Build
+the pre-accessor and accessor revisions natively with the same compiler and
+`-mcpu=cortex-a53`. Pin MAME to one isolated A53, put presentation on another,
+fix the performance governor/frequency, and run at least five serialized ABBA
+pairs of the loaded 60-second Logic workload after warm-up. Record task clock,
+cycles, instructions, branches, branch misses, L1I, dTLB and cache misses,
+emulation speed, frequency and thermal/throttle state. Accept the core patch
+for Pi only if task clock and cycles improve consistently without a branch,
+thermal, PCM, timing, MIDI, resize, or xrun regression.
 
 ## Correctness, review and real-time gates
 
@@ -316,8 +345,10 @@ cross-driver impact justifies the maintenance cost.
 
 ## Immediate next action
 
-Finish the clean focused build gate for the concrete opcode accessor, then
-measure the broader V53 memory/dispatch path and the remaining panel execution
-cost as separate candidates. The independently flagged `3f76` callback-wrapper
-prototype has been rejected for negligible gain. Do not resume the panel
-decoder or generic scheduler work unless new evidence redirects the work.
+Run the native Cortex-A53 comparison and full-render low-latency test before
+claiming Pi 3B+/Zero 2 W readiness. The independently flagged `3f76`
+callback-wrapper, forced-inlined V33 translation, and small panel shortcuts are
+all rejected. The next code-sized opportunity must therefore be a separately
+scoped broader V53 dispatch/device-model change with a measured multi-percent
+ceiling; do not resume the panel decoder or generic scheduler work unless new
+evidence redirects the work.
