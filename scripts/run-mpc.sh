@@ -27,6 +27,7 @@ panel_timer_mode=${MPC_PANEL_TIMER_MODE:-accurate}
 midi_input_mode=${MPC_MIDI_INPUT_MODE:-accurate}
 midi_clock_mode=${MPC_MIDI_CLOCK_MODE:-}
 v53_status_mode=${MPC_V53_STATUS_MODE:-accurate}
+v53_event_service_mode=${MPC_V53_EVENT_SERVICE_MODE:-accurate}
 
 if (( $# > 0 )); then shift; fi
 if (( $# > 0 )); then shift; fi
@@ -153,6 +154,23 @@ case "$v53_status_mode" in
         ;;
 esac
 
+case "$v53_event_service_mode" in
+    accurate)
+        v53_event_service_environment=(MAME_MPC_V53_BRKFD_HLE=0)
+        ;;
+    hle)
+        if [[ "$system_name" != mpc2000xl ]]; then
+            printf 'error: MPC_V53_EVENT_SERVICE_MODE=hle is only supported by mpc2000xl\n' >&2
+            exit 2
+        fi
+        v53_event_service_environment=(MAME_MPC_V53_BRKFD_HLE=1)
+        ;;
+    *)
+        printf 'error: MPC_V53_EVENT_SERVICE_MODE must be accurate or hle, got %s\n' "$v53_event_service_mode" >&2
+        exit 2
+        ;;
+esac
+
 if [[ ! "$pipewire_frames" =~ ^[1-9][0-9]*$ ]]; then
     printf 'error: PipeWire period must be a positive frame count, got %s\n' "$pipewire_frames" >&2
     exit 2
@@ -263,6 +281,7 @@ if [[ "$system_name" == mpc2000xl ]]; then
     printf 'MIDI input: %s mode\n' "$midi_input_mode"
     printf 'MIDI baud clocks: %s mode\n' "$midi_clock_mode"
     printf 'V53 status service: %s mode\n' "$v53_status_mode"
+    printf 'V53 event service: %s mode\n' "$v53_event_service_mode"
 fi
 printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, resolution=%s, bilinear=%s\n' \
     "$video_mode" "$async_present" "$external_event_loop" "$view_name" "$window_resolution" "$filter_mode"
@@ -270,7 +289,7 @@ printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, resolution=%s, bi
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
     env "${midi_unset_environment[@]}" "${clock_environment[@]}" "${panel_environment[@]}" \
     "${panel_timer_environment[@]}" "${midi_clock_environment[@]}" "${midi_environment[@]}" \
-    "${v53_status_environment[@]}" \
+    "${v53_status_environment[@]}" "${v53_event_service_environment[@]}" \
     MAME_ASYNC_PRESENT="$async_present" \
     MAME_SDL_EXTERNAL_EVENT_LOOP="$external_event_loop" \
     PIPEWIRE_QUANTUM="$pipewire_quantum" PIPEWIRE_LATENCY="$pipewire_latency" \

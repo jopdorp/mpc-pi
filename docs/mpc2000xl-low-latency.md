@@ -19,7 +19,9 @@ The known-good full-panel desktop path is:
 - event-driven MB89371 MIDI baud clocks with the periodic compatibility mode
   retained for canonical regression renders; and
 - an optional cycle-equivalent V53 status-service HLE, with the interpreter
-  retained as the default.
+  retained as the default; and
+- an independently selectable V53 event-service HLE, also defaulting to the
+  interpreter.
 
 The SDL library is not patched or replaced. These video changes are confined
 to MAME's SDL OSD/backend source (`src/osd/sdl`), which uses the stock system
@@ -68,6 +70,7 @@ host-level commands and must remain documented whenever they change.
 | `MPC_MIDI_INPUT_MODE` | `accurate` | Choose accurate wire timing, fast external MIDI, or direct internal-pad events |
 | `MPC_MIDI_CLOCK_MODE` | `event` | Event-driven external MIDI baud clocks; use `accurate` for periodic-clock compatibility |
 | `MPC_V53_STATUS_MODE` | `accurate` | Choose interpreted or ROM-gated HLE execution for one hot V53 firmware service |
+| `MPC_V53_EVENT_SERVICE_MODE` | `accurate` | Choose interpreted or ROM-gated HLE execution for the bounded BRK FD event service |
 
 ## MPD18 input modes
 
@@ -227,6 +230,38 @@ event-mode reference:
 
 ```bash
 scripts/diagnostics/test-mpc2000xl-v53-status-hle.sh
+```
+
+## V53 event-service HLE
+
+`MPC_V53_EVENT_SERVICE_MODE=hle` independently replaces the bounded BRK FD
+handler at `0000:28ac`. The service runs about 19,656 times per second in the
+loaded Logic workload. It atomically fetches and clears one firmware event
+byte, returns values below 100 in `AL`, and clamps larger values to zero.
+
+Like the status-service optimization, this mode is default-off, restricted to
+MPC2000XL OS v1.20, and validates the RAM handler before use. Normal BRK entry,
+the transient saved-DS stack write, XCHG read/register/write ordering, flags,
+prefetch state, address translation, and branch-dependent guest cycles are
+preserved. Debugging, modified code, an unsupported ROM or CPU state, aliasing
+with the handler, pending NMI, or insufficient scheduler budget falls back to
+the interpreter. The raw switch is `MAME_MPC_V53_BRKFD_HLE`.
+
+The final common-path render was byte-identical to the frozen event-mode PCM,
+SHA-256 `a65077eb074df2671731ea0e3f315f627044b4ece480c75de2871b8fd81b4014`.
+The common handler costs 51 V33 cycles; its value-at-least-100 branch costs 54.
+An independent forced test of that rare branch matched 907 interpreted and
+HLE calls exactly: 81 total cycles and 81 ticks at 32 MHz, with identical
+architectural state and prefetch state.
+Two pinned short pairs measured 1.35% fewer retired host instructions and
+1.27% fewer branches. Their task-clock and cycle results were noisy and did
+not establish a wall-clock speedup, so this remains an optional exact cut
+rather than a claimed throughput improvement.
+
+Run its focused regression without regenerating the reference:
+
+```bash
+scripts/diagnostics/test-mpc2000xl-v53-event-service-hle.sh
 ```
 
 The client request alone does not guarantee a 32-frame graph when other

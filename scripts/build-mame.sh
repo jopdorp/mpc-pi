@@ -29,6 +29,7 @@ mame_patches=(
     "$repo_root/patches/mame/0021-mpc2000xl-event-driven-midi-baud-clocks.patch"
     "$repo_root/patches/mame/0022-upd7810-coalesce-unconnected-timer-output.patch"
     "$repo_root/patches/mame/0023-mpc2000xl-v53-status-service-hle.patch"
+    "$repo_root/patches/mame/0024-mpc2000xl-v53-event-service-hle.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then

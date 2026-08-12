@@ -3,8 +3,9 @@
 ## Scope and current baseline
 
 This plan is current after the independently flagged V53 BRK88 status-service
-HLE was validated on top of commit `7ca0bcd`, which coalesces the unconnected
-uPD78C10 panel timer output. Both cuts preserve guest time and leave the
+HLE and bounded BRK FD event-service HLE were validated on top of commit
+`7ca0bcd`, which coalesces the unconnected uPD78C10 panel timer output. These
+cuts preserve guest time and leave the
 validated low-latency audio configuration unchanged:
 
 - 32-frame PipeWire quantum;
@@ -42,6 +43,7 @@ byte-identical. The evidence is in
 | Panel fixed-clock timer | Large, exact win: -10.89% task clock and -17.50% retired instructions | Accepted in `7ca0bcd`; retain accurate fallback |
 | Panel ROM routine at `03d5` | Exact decoder shortcut saved only about 0.08% instructions and no task clock | Reject; do not carry its 186-line maintenance cost |
 | V53 BRK88 service | Exact ROM-gated HLE reduced task clock 4.04% and instructions 5.43% | Accepted behind its own default-off flag |
+| V53 BRK FD service | Exact ROM-gated HLE reduced instructions 1.35%; two pairs did not prove a task-clock gain | Retain only as a separate default-off option; do not claim throughput yet |
 | General V53 fetch/data path | Still a large raw cost but requires MAME-core changes | Re-profile before selecting a shared-core experiment |
 | Rendering | Must still be measured separately for full-panel and LCD-only deployment shapes | Optimize only from a dedicated render profile |
 
@@ -103,9 +105,30 @@ gain with an exact timing result.
 
 ## Secondary V53 opportunities
 
+### Bounded BRK FD event service
+
+The post-BRK88 profile identified BRK FD as the smallest remaining
+firmware-specific seam. It runs about 19,656 times per second and contains a
+bounded 20-byte handler. The optional HLE preserves normal interrupt entry,
+the handler's stack and atomic memory effects, comparison semantics, prefetch
+state, and its 51/54-cycle branch totals. The common workload render remains
+byte-identical to the frozen event-mode reference.
+
+The otherwise unobserved value-at-least-100 branch was forced independently.
+Across 907 completed calls per mode, interpreted and HLE execution both took
+81 total cycles / 81 ticks at 32 MHz and returned identical complete CPU,
+event-byte and prefetch state.
+
+Two short pinned pairs measured -1.35% retired instructions and -1.27%
+branches, but +0.78% task clock and +0.68% cycles in noisy host conditions.
+This establishes a deterministic retired-work reduction, not a host-time
+speedup. Keep the implementation independent and default-off, and revisit its
+deployment value with Cortex-A53 measurements rather than overstating the
+desktop result.
+
 ### Firmware-specific exact blocks
 
-After BRK88, use the guest-PC/basic-block histogram to rank any other dominant
+After BRK88 and BRK FD, use the guest-PC/basic-block histogram to rank any other dominant
 services or polling loops. Each candidate must be evaluated independently.
 Fast-forwarding is allowed only when the exact next causal event is known;
 otherwise the interpreter must run normally.
@@ -212,8 +235,7 @@ cross-driver impact justifies the maintenance cost.
 
 ## Immediate next action
 
-Commit the validated BRK88 service independently, then capture one fresh
-post-HLE profile. Rank the remaining bounded V53 firmware services against the
-general fetch/data path and choose the next smallest measurable seam. Do not
-resume panel decoder or generic scheduler work unless that evidence redirects
-the work.
+Commit the validated BRK FD service separately, then re-profile before choosing
+between the bounded `3f76` callback wrapper and the broader V53 fetch/access
+path. Do not resume the panel decoder or generic scheduler work unless new
+evidence redirects the work.
