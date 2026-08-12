@@ -157,6 +157,17 @@ separate compile-time specialization, so the flag decision is outside the hot
 instruction loop. The selected opcode set remains subject to native
 Cortex-A53 validation.
 
+Patch 0027 removes primitive generation from MAME's `none` renderer. The
+renderer previously built and scaled the complete layout every frame before
+discarding it. Returning no primitive list is the exact no-render contract;
+screen/device updates and snapshot targets remain independent, and visible
+renderers are unchanged. On the loaded Logic headless workload this reduced
+task clock by 7.61%, cycles by 9.51%, retired instructions by 6.50%, and peak
+RSS by about 169 MiB. The frozen PCM remained exact, and matched 1600x900
+OpenGL captures confirmed that full visual rendering was unaffected. This gain
+applies only to `-video none`, not the full-body desktop view or an LCD view
+that still uses a visible renderer.
+
 The earlier profile's largest single symbol, at 12.99%, was the V53 opcode-byte
 fetch lambda configured by `nec_common_device::device_start()`. Each byte goes
 through a `std::function`, V33 address translation, and MAME's cached

@@ -1,0 +1,17 @@
+diff --git a/src/osd/modules/render/drawnone.cpp b/src/osd/modules/render/drawnone.cpp
+--- a/src/osd/modules/render/drawnone.cpp
++++ b/src/osd/modules/render/drawnone.cpp
+@@ -37,12 +37,7 @@ public:
+ 
+ render_primitive_list *renderer_none::get_primitives()
+ {
+-	osd_dim const dimensions = window().get_size();
+-	if ((dimensions.width() <= 0) || (dimensions.height() <= 0))
+-		return nullptr;
+-
+-	window().target()->set_bounds(dimensions.width(), dimensions.height(), window().pixel_aspect());
+-	return &window().target()->get_primitives();
++	return nullptr;
+ }
+ 
+ 

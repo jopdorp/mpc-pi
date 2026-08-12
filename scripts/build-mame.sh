@@ -32,6 +32,7 @@ mame_patches=(
     "$repo_root/patches/mame/0024-mpc2000xl-v53-event-service-hle.patch"
     "$repo_root/patches/mame/0025-nec-use-concrete-opcode-cache-access.patch"
     "$repo_root/patches/mame/0026-mpc2000xl-specialize-hot-v53-dispatch.patch"
+    "$repo_root/patches/mame/0027-render-none-skip-unused-primitives.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then
