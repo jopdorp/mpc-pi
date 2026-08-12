@@ -1,0 +1,112 @@
+diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
+--- a/src/devices/cpu/nec/nec.cpp
++++ b/src/devices/cpu/nec/nec.cpp
+@@ -759,6 +759,18 @@ void nec_common_device::device_start()
+ 	save_item(NAME(m_prefetch_reset));
+ 
+ 	m_program = &space(AS_PROGRAM);
++	if (m_mpc2000xl_direct_dispatch)
++	{
++		assert(s_nec_instruction[0xc3] == &nec_common_device::i_ret);
++		assert(s_nec_instruction[0xe8] == &nec_common_device::i_call_d16);
++		assert(s_nec_instruction[0x75] == &nec_common_device::i_jnz);
++		assert(s_nec_instruction[0x8b] == &nec_common_device::i_mov_r16w);
++		assert(s_nec_instruction[0x8a] == &nec_common_device::i_mov_r8b);
++		assert(s_nec_instruction[0x0b] == &nec_common_device::i_or_r16w);
++		assert(s_nec_instruction[0x74] == &nec_common_device::i_jz);
++		assert(s_nec_instruction[0x3c] == &nec_common_device::i_cmp_ald8);
++		osd_printf_info("%s: MPC2000XL V53 direct opcode dispatch active\n", tag());
++	}
+ 	if (m_mpc2000xl_brk88_hle_enabled || m_mpc2000xl_brkfd_hle_enabled)
+ 	{
+ 		util::sha1_t expected_rom_sha1;
+@@ -904,6 +916,15 @@ void nec_common_device::state_import(const device_state_entry &entry)
+ 
+ void nec_common_device::execute_run()
+ {
++	if (m_mpc2000xl_direct_dispatch)
++		execute_run_mode<true>();
++	else
++		execute_run_mode<false>();
++}
++
++template <bool DirectDispatch>
++void nec_common_device::execute_run_mode()
++{
+ 	if (m_halted)
+ 	{
+ 		debugger_wait_hook();
+@@ -936,7 +957,26 @@ void nec_common_device::execute_run()
+ 		else
+ 		{
+ 			if (m_MF)
+-				(this->*s_nec_instruction[fetchop()])();
++			{
++				const u8 opcode = fetchop();
++				if constexpr (DirectDispatch)
++				{
++					switch (opcode)
++					{
++					case 0xc3: i_ret(); break;
++					case 0xe8: i_call_d16(); break;
++					case 0x75: i_jnz(); break;
++					case 0x8b: i_mov_r16w(); break;
++					case 0x8a: i_mov_r8b(); break;
++					case 0x0b: i_or_r16w(); break;
++					case 0x74: i_jz(); break;
++					case 0x3c: i_cmp_ald8(); break;
++					default: (this->*s_nec_instruction[opcode])(); break;
++					}
++				}
++				else
++					(this->*s_nec_instruction[opcode])();
++			}
+ 			else
+ 				(this->*s_nec80_instruction[fetchop()])();
+ 		}
+diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
+--- a/src/devices/cpu/nec/nec.h
++++ b/src/devices/cpu/nec/nec.h
+@@ -31,6 +31,7 @@ public:
+ 	// owning driver explicitly opts in.
+ 	void set_mpc2000xl_brk88_hle(bool enable) { m_mpc2000xl_brk88_hle_enabled = enable; }
+ 	void set_mpc2000xl_brkfd_hle(bool enable) { m_mpc2000xl_brkfd_hle_enabled = enable; }
++	void set_mpc2000xl_direct_dispatch(bool enable) { m_mpc2000xl_direct_dispatch = enable; }
+ 
+ protected:
+ 	// construction/destruction
+@@ -110,6 +111,7 @@ private:
+ 
+ 	bool m_mpc2000xl_brk88_hle_enabled = false;
+ 	bool m_mpc2000xl_brkfd_hle_enabled = false;
++	bool m_mpc2000xl_direct_dispatch = false;
+ 	bool m_mpc2000xl_rom_valid = false;
+ 	bool m_mpc2000xl_brk88_handler_valid = false;
+ 	bool m_mpc2000xl_brk88_reported = false;
+@@ -161,6 +163,7 @@ protected:
+ 
+ private:
+ 	inline u8 read_opcode_byte(offs_t address);
++	template <bool DirectDispatch> void execute_run_mode();
+ 	inline void prefetch();
+ 	void do_prefetch();
+ 	inline uint8_t fetch();
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -760,12 +760,15 @@ void mpc2000_state::mpc2000(machine_config &config)
+ 	const bool brk88_hle = brk88_hle_mode && std::strcmp(brk88_hle_mode, "0");
+ 	const char *const brkfd_hle_mode = osd_getenv("MAME_MPC_V53_BRKFD_HLE");
+ 	const bool brkfd_hle = brkfd_hle_mode && std::strcmp(brkfd_hle_mode, "0");
++	const char *const direct_dispatch_mode = osd_getenv("MAME_MPC_V53_DIRECT_DISPATCH");
++	const bool direct_dispatch = direct_dispatch_mode && std::strcmp(direct_dispatch_mode, "0");
+ 	if (event_driven_panel)
+ 		add_panel(config, true, coalesced_panel_timer);
+ 
+ 	V53A(config, m_maincpu, 32_MHz_XTAL);
+ 	m_maincpu->set_mpc2000xl_brk88_hle(brk88_hle);
+ 	m_maincpu->set_mpc2000xl_brkfd_hle(brkfd_hle);
++	m_maincpu->set_mpc2000xl_direct_dispatch(direct_dispatch);
+ 	m_maincpu->set_direct_brc_timer(event_driven_panel);
+ 	m_maincpu->set_addrmap(AS_PROGRAM, &mpc2000_state::mpc2000_map);
+ 	m_maincpu->set_addrmap(AS_IO, &mpc2000_state::mpc2000_io_map);

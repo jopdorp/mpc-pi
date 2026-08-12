@@ -143,6 +143,20 @@ stack.
 
 ### Opcode and data-access machinery
 
+The concrete opcode-cache accessor is now patch 0025. On the loaded Logic
+workload it reduced task clock by 4.48%, cycles by 4.43%, and retired
+instructions by 3.59%, with exact reference PCM and focused V20/V30/V33
+coverage.
+
+Patch 0026 adds an independent MPC2000XL-only direct-dispatch experiment. A
+playback histogram found that eight V53 opcodes represent 44.09% of dispatches.
+Calling the existing canonical instruction methods directly for those opcodes
+reduced host cycles by 6.14% and task clock by 4.24% relative to its accurate
+mode while preserving the frozen PCM byte-for-byte. The accurate CPU loop is a
+separate compile-time specialization, so the flag decision is outside the hot
+instruction loop. The selected opcode set remains subject to native
+Cortex-A53 validation.
+
 The earlier profile's largest single symbol, at 12.99%, was the V53 opcode-byte
 fetch lambda configured by `nec_common_device::device_start()`. Each byte goes
 through a `std::function`, V33 address translation, and MAME's cached

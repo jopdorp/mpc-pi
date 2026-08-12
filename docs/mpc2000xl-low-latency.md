@@ -71,6 +71,7 @@ host-level commands and must remain documented whenever they change.
 | `MPC_MIDI_CLOCK_MODE` | `event` | Event-driven external MIDI baud clocks; use `accurate` for periodic-clock compatibility |
 | `MPC_V53_STATUS_MODE` | `accurate` | Choose interpreted or ROM-gated HLE execution for one hot V53 firmware service |
 | `MPC_V53_EVENT_SERVICE_MODE` | `accurate` | Choose interpreted or ROM-gated HLE execution for the bounded BRK FD event service |
+| `MPC_V53_DISPATCH_MODE` | `accurate` | Choose canonical or MPC-profiled direct dispatch for eight hot V53 opcodes |
 
 ## MPD18 input modes
 
@@ -262,6 +263,47 @@ Run its focused regression without regenerating the reference:
 
 ```bash
 scripts/diagnostics/test-mpc2000xl-v53-event-service-hle.sh
+```
+
+## V53 direct opcode dispatch
+
+`MPC_V53_DISPATCH_MODE=direct` keeps the canonical NEC interpreter as the
+source of truth, but directly calls its existing implementations for eight
+opcodes that account for 44.09% of V53 dispatches in the loaded Logic playback
+workload. All other opcodes still use the canonical dispatch table. The mode
+does not bypass opcode fetches, memory handlers, debugger hooks, instruction
+semantics, prefetch accounting, or guest cycle accounting.
+
+The eight-opcode set was selected by measuring four-, eight-, and sixteen-case
+variants with the current x86-64 compiler. Eight cases produced the lowest host
+cycle count. This selection is workload- and compiler-specific rather than an
+architecture-neutral result; it must be remeasured on Cortex-A53 before using
+it as Raspberry Pi performance evidence. The mode is MPC2000XL-only,
+independently switchable, and defaults to `accurate`. Its raw MAME switch is
+`MAME_MPC_V53_DIRECT_DISPATCH`.
+
+A clean CPU-17 comparison selected the mode once per CPU slice, leaving the
+accurate inner loop unchanged. Means from two runs per configuration were:
+
+| Metric | Accurate | Direct | Change |
+|---|---:|---:|---:|
+| Task clock | 9,690.07 ms | 9,279.62 ms | -4.24% |
+| CPU cycles | 33.20 billion | 31.16 billion | -6.14% |
+| Instructions | 84.60 billion | 85.79 billion | +1.41% |
+| Branches | 15.25 billion | 16.27 billion | +6.74% |
+| Branch misses | 119.52 million | 106.46 million | -10.93% |
+
+The frozen Logic render remains byte-identical, SHA-256
+`a65077eb074df2671731ea0e3f315f627044b4ece480c75de2871b8fd81b4014`.
+The Ableton tutorial project provided a second workload. One initial accurate
+capture differed, but the repeated accurate capture and two direct captures
+were byte-identical with SHA-256
+`bc7c2fedaf6735d78b09928c2dc0b71b1f8fb9b7f693b8d9a01923cc6aed2900`.
+This demonstrates the cold-run difference was not specific to direct mode.
+Run the focused regression with:
+
+```bash
+scripts/diagnostics/test-mpc2000xl-v53-direct-dispatch.sh
 ```
 
 The client request alone does not guarantee a 32-frame graph when other
