@@ -1,0 +1,117 @@
+diff --git a/src/devices/cpu/upd7810/upd7810.cpp b/src/devices/cpu/upd7810/upd7810.cpp
+index d15490c3..fa7b73cc 100644
+--- a/src/devices/cpu/upd7810/upd7810.cpp
++++ b/src/devices/cpu/upd7810/upd7810.cpp
+@@ -443,6 +443,7 @@ upd7810_device::upd7810_device(const machine_config &mconfig, device_type type,
+ 	, m_pc_pullups(0xff)
+ 	, m_pd_pullups(0xff)
+ 	, m_pf_pullups(0xff)
++	, m_coalesce_unconnected_to_output(false)
+ {
+ }
+ 
+@@ -1518,10 +1519,22 @@ void upd7810_device::handle_timers(int cycles)
+ 	if (0x02 == (TMM & 0x03))
+ 	{
+ 		OVCF += cycles;
+-		while (OVCF >= 1)
++		// When TO is unconnected and not selected on PC4, fixed-clock
++		// transitions are externally unobservable and can be coalesced.
++		if (m_coalesce_unconnected_to_output && !(SMH & 0x03) && !(m_mcc & 0x10))
+ 		{
+-			upd7810_to_output_change(TO ^ 1);
+-			OVCF -= 1;
++			const int transitions = OVCF;
++			OVCF = 0;
++			update_sio(transitions);
++			TO ^= transitions & 1;
++		}
++		else
++		{
++			while (OVCF >= 1)
++			{
++				upd7810_to_output_change(TO ^ 1);
++				OVCF -= 1;
++			}
+ 		}
+ 	}
+ 
+@@ -1690,6 +1703,8 @@ void upd78c05_device::handle_timers(int cycles)
+ 
+ void upd7810_device::base_device_start()
+ {
++	m_coalesce_unconnected_to_output &= m_to_func.isunset();
++
+ 	space(AS_PROGRAM).specific(m_program);
+ 	space(AS_PROGRAM).cache(m_opcodes);
+ 	if (has_space(AS_IO))
+diff --git a/src/devices/cpu/upd7810/upd7810.h b/src/devices/cpu/upd7810/upd7810.h
+index 2ecbd25e..a254cd12 100644
+--- a/src/devices/cpu/upd7810/upd7810.h
++++ b/src/devices/cpu/upd7810/upd7810.h
+@@ -74,6 +74,7 @@ public:
+ 	void set_pc_pullups(uint8_t p) { m_pc_pullups = p; }
+ 	void set_pd_pullups(uint8_t p) { m_pd_pullups = p; }
+ 	void set_pf_pullups(uint8_t p) { m_pf_pullups = p; }
++	void set_coalesce_unconnected_to_output(bool enable) { m_coalesce_unconnected_to_output = enable; }
+ 
+ 	auto pt_in_cb() { return m_pt_in_cb.bind(); }
+ 
+@@ -296,6 +297,7 @@ protected:
+ 	uint8_t   m_pc_pullups;
+ 	uint8_t   m_pd_pullups;
+ 	uint8_t   m_pf_pullups;
++	bool      m_coalesce_unconnected_to_output;
+ 	uint8_t   m_cr[4];  /* analog digital conversion registers */
+ 	uint8_t   m_txb;    /* transmitter buffer */
+ 	uint8_t   m_rxb;    /* receiver buffer */
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+index 143bbc98..d52a5a76 100644
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -146,7 +146,7 @@ private:
+ 	void mpc2000_map(address_map &map) ATTR_COLD;
+ 	void mpc2000_io_map(address_map &map) ATTR_COLD;
+ 	void mpc2000_sub_map(address_map &map) ATTR_COLD;
+-	void add_panel(machine_config &config, bool event_driven);
++	void add_panel(machine_config &config, bool event_driven, bool coalesce_timer_output);
+ 	void dsp_map(address_map &map) ATTR_COLD;
+ 	void dsp_rom_map(address_map &map) ATTR_COLD;
+ 
+@@ -726,10 +726,12 @@ static void add_formats(format_registration &fr)
+ 	fr.add(FLOPPY_HFE_FORMAT);
+ }
+ 
+-void mpc2000_state::add_panel(machine_config &config, bool event_driven)
++void mpc2000_state::add_panel(machine_config &config, bool event_driven, bool coalesce_timer_output)
+ {
+ 	UPD78C10(config, m_subcpu, 12_MHz_XTAL);
+ 	m_subcpu->set_addrmap(AS_PROGRAM, &mpc2000_state::mpc2000_sub_map);
++	if (coalesce_timer_output)
++		m_subcpu->set_coalesce_unconnected_to_output(true);
+ 	if (event_driven)
+ 		m_subcpu->txd_func().set(FUNC(mpc2000_state::panel_txd_w));
+ 	else
+@@ -750,10 +752,12 @@ void mpc2000_state::mpc2000(machine_config &config)
+ {
+ 	const char *const panel_mode = osd_getenv("MAME_MPC_PANEL_EVENT_DRIVEN");
+ 	const bool event_driven_panel = panel_mode && std::strcmp(panel_mode, "0");
++	const char *const panel_timer_mode = osd_getenv("MAME_MPC_PANEL_TIMER_COALESCED");
++	const bool coalesced_panel_timer = panel_timer_mode && std::strcmp(panel_timer_mode, "0");
+ 	const char *const midi_brg_mode = osd_getenv("MAME_MPC_MIDI_EVENT_DRIVEN");
+ 	const bool event_driven_midi_brg = midi_brg_mode && std::strcmp(midi_brg_mode, "0");
+ 	if (event_driven_panel)
+-		add_panel(config, true);
++		add_panel(config, true, coalesced_panel_timer);
+ 
+ 	V53A(config, m_maincpu, 32_MHz_XTAL);
+ 	m_maincpu->set_direct_brc_timer(event_driven_panel);
+@@ -805,7 +809,7 @@ void mpc2000_state::mpc2000(machine_config &config)
+ 	hiledlatch.q_out_cb<7>().set_output("led15").invert(); // 16 Levels
+ 
+ 	if (!event_driven_panel)
+-		add_panel(config, false);
++		add_panel(config, false, coalesced_panel_timer);
+ 
+ 	SCREEN(config, m_screen).set_lcd();
+ 	m_screen->set_refresh_hz(80);

@@ -23,6 +23,7 @@ maximize_window=${MPC_MAXIMIZE:-1}
 external_event_loop=${MPC_SDL_EXTERNAL_EVENT_LOOP:-1}
 bios_name=${MAME_BIOS:-}
 panel_mode=${MPC_PANEL_MODE:-}
+panel_timer_mode=${MPC_PANEL_TIMER_MODE:-accurate}
 midi_input_mode=${MPC_MIDI_INPUT_MODE:-accurate}
 midi_clock_mode=${MPC_MIDI_CLOCK_MODE:-}
 
@@ -69,6 +70,23 @@ case "$panel_mode" in
         ;;
     *)
         printf 'error: MPC_PANEL_MODE must be accurate or event, got %s\n' "$panel_mode" >&2
+        exit 2
+        ;;
+esac
+
+case "$panel_timer_mode" in
+    accurate)
+        panel_timer_environment=(MAME_MPC_PANEL_TIMER_COALESCED=0)
+        ;;
+    coalesced)
+        if [[ "$system_name" != mpc2000xl ]]; then
+            printf 'error: MPC_PANEL_TIMER_MODE=coalesced is only supported by mpc2000xl\n' >&2
+            exit 2
+        fi
+        panel_timer_environment=(MAME_MPC_PANEL_TIMER_COALESCED=1)
+        ;;
+    *)
+        printf 'error: MPC_PANEL_TIMER_MODE must be accurate or coalesced, got %s\n' "$panel_timer_mode" >&2
         exit 2
         ;;
 esac
@@ -223,6 +241,7 @@ printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s (PipeWire 
 printf 'Timing master: %s\n' "$timing_master"
 if [[ "$system_name" == mpc2000xl ]]; then
     printf 'Panel UART: %s mode\n' "$panel_mode"
+    printf 'Panel timer output: %s mode\n' "$panel_timer_mode"
     printf 'MIDI input: %s mode\n' "$midi_input_mode"
     printf 'MIDI baud clocks: %s mode\n' "$midi_clock_mode"
 fi
@@ -231,7 +250,7 @@ printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, resolution=%s, bi
 
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
     env "${midi_unset_environment[@]}" "${clock_environment[@]}" "${panel_environment[@]}" \
-    "${midi_clock_environment[@]}" "${midi_environment[@]}" \
+    "${panel_timer_environment[@]}" "${midi_clock_environment[@]}" "${midi_environment[@]}" \
     MAME_ASYNC_PRESENT="$async_present" \
     MAME_SDL_EXTERNAL_EVENT_LOOP="$external_event_loop" \
     PIPEWIRE_QUANTUM="$pipewire_quantum" PIPEWIRE_LATENCY="$pipewire_latency" \

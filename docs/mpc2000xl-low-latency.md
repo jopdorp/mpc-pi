@@ -62,6 +62,7 @@ host-level commands and must remain documented whenever they change.
 | `MPC_MAXIMIZE` | `1` | Start maximized |
 | `MPC_WINDOW_RESOLUTION` | `auto` | Let MAME size the render target |
 | `MPC_PANEL_MODE` | `event` | Event-driven MPC2000XL panel UART |
+| `MPC_PANEL_TIMER_MODE` | `accurate` | Choose per-transition or cycle-equivalent coalesced panel timer output |
 | `MPC_MIDI_INPUT_MODE` | `accurate` | Choose accurate wire timing, fast external MIDI, or direct internal-pad events |
 | `MPC_MIDI_CLOCK_MODE` | `event` | Event-driven external MIDI baud clocks; use `accurate` for periodic-clock compatibility |
 
@@ -132,6 +133,50 @@ sample addresses, and simultaneous-event groups. Against the theoretical
 residual. Their median residuals were 16.0 and 15.1 samples respectively. The
 PCM phase changes, so canonical hash checks explicitly select `accurate` MIDI
 clocks; sample playback remains continuously clocked after each key-on.
+
+## Panel timer-output coalescing
+
+`MPC_PANEL_TIMER_MODE=coalesced` removes a separate source of panel CPU host
+work without changing its guest clock. The MPC2000XL panel firmware selects
+the uPD78C10 fixed-clock timer output, which toggles TO once per 4 MHz machine
+cycle. TO is not connected on this machine and firmware does not expose it on
+Port C, but the generic CPU core still performed a callback and a serial-clock
+update for every transition.
+
+Coalesced mode advances the internal serial state by the same transition count
+in one operation and retains the exact final TO phase. It dynamically uses the
+original transition-by-transition path if the TO callback is connected, TO is
+selected on Port C, or the serial mode changes. The raw MAME switch is
+`MAME_MPC_PANEL_TIMER_COALESCED`; use the launcher setting above so accurate
+mode explicitly clears it.
+
+The complete panel TXD trace across boot, project loading, idle/status traffic,
+and a scripted Play press contained 14,320 edges. Accurate and coalesced modes
+had byte-identical 12 MHz timestamps and line states, with SHA-256
+`33258ed401e24fbc014ad69dd6612d641da281a6f715b978d24d567e99141786`.
+Two coalesced Logic renders were also byte-identical to each other and to the
+canonical accurate PCM SHA-256
+`22f76ffaaedc4364b8279a79672a07a35f93997f180b8665e9ef3a576ae176a9`.
+The trace artifact is
+`results/diagnostics/panel-timer-coalesced-txd-0vMqPy`.
+
+A five-pair, alternating-order A/B used the 84-second loaded Logic workload on
+CPU 20 with the host in balanced mode, video and sound output disabled, video
+timing, event-driven panel/MIDI clocks, and SDL event-loop isolation disabled.
+Medians were:
+
+| Metric | Accurate | Coalesced | Change |
+|---|---:|---:|---:|
+| Task clock | 34,393.46 ms | 30,647.48 ms | -10.89% |
+| CPU cycles | 77.80 billion | 69.21 billion | -11.04% |
+| Instructions | 194.28 billion | 160.29 billion | -17.50% |
+| Branches | 33.43 billion | 27.92 billion | -16.50% |
+
+The steady-state part of this workload is deliberately throttled to normal
+speed, so its average-speed percentage is not a throughput measurement. The
+retired-instruction reduction is the most portable evidence for the intended
+Cortex-A53 target. Performance artifacts are in
+`results/diagnostics/panel-timer-coalesced-perf-WHD9uw`.
 
 The client request alone does not guarantee a 32-frame graph when other
 PipeWire clients request a larger quantum. The validated host explicitly

@@ -8,33 +8,48 @@ capture_script="$repo_root/scripts/diagnostics/capture-logic-mpc2000xl.lua"
 clock_script="$repo_root/scripts/diagnostics/exercise-pipewire-clock-mpc2000xl.lua"
 result_dir=$(mktemp -d "$repo_root/results/diagnostics/timing-regression-XXXXXX")
 
-for run in a b; do
-    runtime_dir=$(mktemp -d "$repo_root/results/runtime/timing-regression-${run}-XXXXXX")
-    MAME_RUNTIME_DIR="$runtime_dir" MAME_NICE=0 MPC_PANEL_MODE=accurate MPC_MIDI_CLOCK_MODE=accurate \
+render_mode() {
+    local timer_mode=$1
+    local run=$2
+    local runtime_dir
+    runtime_dir=$(mktemp -d "$repo_root/results/runtime/timing-regression-${timer_mode}-${run}-XXXXXX")
+    MAME_RUNTIME_DIR="$runtime_dir" MAME_NICE=0 MPC_PANEL_MODE=accurate \
+        MPC_PANEL_TIMER_MODE="$timer_mode" MPC_MIDI_CLOCK_MODE=accurate \
         "$repo_root/scripts/run-mpc.sh" mpc2000xl 32 \
         -flop "$project" \
         -skip_gameinfo \
         -video none \
         -sound none \
-        -wavwrite "$result_dir/render-${run}.wav" \
+        -wavwrite "$result_dir/render-${timer_mode}-${run}.wav" \
         -autoboot_script "$capture_script"
-done
+}
 
-if ! cmp -s "$result_dir/render-a.wav" "$result_dir/render-b.wav"; then
-    printf 'FAIL: intrinsic renders differ; emulator jitter is non-zero\n' >&2
+render_mode accurate reference
+render_mode coalesced a
+render_mode coalesced b
+
+if ! cmp -s "$result_dir/render-coalesced-a.wav" "$result_dir/render-coalesced-b.wav"; then
+    printf 'FAIL: coalesced panel-timer renders differ; emulator jitter is non-zero\n' >&2
     exit 1
 fi
-render_sha256=$(sha256sum "$result_dir/render-a.wav")
-render_sha256=${render_sha256%% *}
-if [[ "$render_sha256" != "$expected_sha256" ]]; then
-    printf 'FAIL: render differs from the native-tempo reference PCM\n' >&2
-    printf 'expected SHA-256 %s, got %s\n' "$expected_sha256" "$render_sha256" >&2
+if ! cmp -s "$result_dir/render-accurate-reference.wav" "$result_dir/render-coalesced-a.wav"; then
+    printf 'FAIL: coalesced panel timer changed PCM relative to accurate mode\n' >&2
     exit 1
 fi
-printf 'PASS: intrinsic PCM is byte-identical (integer and fractional jitter 0.00 samples)\n'
+for render in "$result_dir"/render-*.wav; do
+    render_sha256=$(sha256sum "$render")
+    render_sha256=${render_sha256%% *}
+    if [[ "$render_sha256" != "$expected_sha256" ]]; then
+        printf 'FAIL: %s differs from the native-tempo reference PCM\n' "$render" >&2
+        printf 'expected SHA-256 %s, got %s\n' "$expected_sha256" "$render_sha256" >&2
+        exit 1
+    fi
+done
+printf 'PASS: accurate and coalesced panel-timer PCM are byte-identical (integer and fractional jitter 0.00 samples)\n'
 
 runtime_dir=$(mktemp -d "$repo_root/results/runtime/pipewire-regression-XXXXXX")
-MAME_RUNTIME_DIR="$runtime_dir" MAME_PIPEWIRE_STATS=1 MPC_PANEL_MODE=event MPC_MIDI_CLOCK_MODE=event \
+MAME_RUNTIME_DIR="$runtime_dir" MAME_PIPEWIRE_STATS=1 MPC_PANEL_MODE=event \
+    MPC_PANEL_TIMER_MODE=coalesced MPC_MIDI_CLOCK_MODE=event \
     "$repo_root/scripts/run-mpc.sh" mpc2000xl 32 \
     -flop "$project" \
     -skip_gameinfo \
