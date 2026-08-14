@@ -1,0 +1,11 @@
+config BR2_PACKAGE_MPC_MK1_DISPLAY
+	bool "mpc-mk1-display"
+	depends on BR2_PACKAGE_PYTHON3
+	select BR2_PACKAGE_PYTHON_PYUSB
+	help
+	  Pushes the emulated MPC2000XL panel LCD to a Native Instruments
+	  Maschine MK1 over USB, reading frames from the export file that
+	  patch 0039 writes.
+
+comment "mpc-mk1-display needs python3"
+	depends on !BR2_PACKAGE_PYTHON3

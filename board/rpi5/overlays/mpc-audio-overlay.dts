@@ -1,0 +1,92 @@
+// PCM5102A DAC plus PCM1808 ADC sharing one I2S bus.
+//
+// Neither part has a control interface: the PCM5102A is strapped by pins and
+// the PCM1808 has no register map at all, so the ADC is represented by the
+// generic dummy receiver codec rather than a driver of its own. The Pi is the
+// clock producer for both, which is what makes a single bus carry playback
+// and capture at the same rate.
+//
+// Wiring assumed (Pi 5 40-pin header, RP1 I2S):
+//   GPIO18  BCLK   -> PCM5102 BCK, PCM1808 BCK
+//   GPIO19  LRCLK  -> PCM5102 LRCK, PCM1808 LRC
+//   GPIO21  DOUT   -> PCM5102 DIN     (playback, Pi transmits)
+//   GPIO20  DIN    <- PCM1808 DOUT    (capture, Pi receives)
+// The PCM1808 must be strapped to slave mode (FMT/MD pins per its datasheet)
+// so that it accepts BCLK/LRCLK from the Pi rather than driving them.
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	fragment@0 {
+		target = <&i2s_clk_producer>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target-path = "/";
+		__overlay__ {
+			mpc_dac: mpc_dac {
+				#sound-dai-cells = <0>;
+				compatible = "ti,pcm5102a";
+				status = "okay";
+			};
+
+			mpc_adc: mpc_adc {
+				#sound-dai-cells = <0>;
+				compatible = "linux,spdif-dir";
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@2 {
+		target = <&sound>;
+		__overlay__ {
+			compatible = "simple-audio-card";
+			simple-audio-card,name = "mpc-audio";
+			status = "okay";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			simple-audio-card,dai-link@0 {
+				reg = <0>;
+				format = "i2s";
+				bitclock-master = <&mpc_cpu_play>;
+				frame-master = <&mpc_cpu_play>;
+
+				mpc_cpu_play: cpu {
+					sound-dai = <&i2s_clk_producer>;
+					dai-tdm-slot-num = <2>;
+					dai-tdm-slot-width = <32>;
+				};
+
+				codec {
+					sound-dai = <&mpc_dac>;
+				};
+			};
+
+			simple-audio-card,dai-link@1 {
+				reg = <1>;
+				format = "i2s";
+				bitclock-master = <&mpc_cpu_cap>;
+				frame-master = <&mpc_cpu_cap>;
+
+				mpc_cpu_cap: cpu {
+					sound-dai = <&i2s_clk_producer>;
+					dai-tdm-slot-num = <2>;
+					dai-tdm-slot-width = <32>;
+				};
+
+				codec {
+					sound-dai = <&mpc_adc>;
+				};
+			};
+		};
+	};
+};

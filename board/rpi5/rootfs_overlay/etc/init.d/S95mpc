@@ -1,0 +1,22 @@
+#!/bin/sh
+DAEMON=mpc
+PIDFILE=/var/run/mpc.pid
+
+case "$1" in
+	start)
+		printf 'Starting MPC2000XL: '
+		start-stop-daemon -S -q -m -b -p "$PIDFILE" \
+			-x /usr/bin/mpc-start.sh && echo OK || echo FAIL
+		;;
+	stop)
+		printf 'Stopping MPC2000XL: '
+		start-stop-daemon -K -q -p "$PIDFILE" && echo OK || echo FAIL
+		;;
+	restart)
+		"$0" stop; sleep 2; "$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

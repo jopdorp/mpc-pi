@@ -1,0 +1,6 @@
+menu "MPC Pi packages"
+
+source "$BR2_EXTERNAL_MPC_PI_PATH/package/mame-mpc/Config.in"
+source "$BR2_EXTERNAL_MPC_PI_PATH/package/mpc-mk1-display/Config.in"
+
+endmenu

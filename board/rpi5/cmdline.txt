@@ -1,0 +1,1 @@
+root=PARTUUID=00000000-02 rootwait console=ttyAMA0,115200 console=tty1 isolcpus=nohz,domain,managed_irq,2-3 nohz_full=2-3 rcu_nocbs=2-3 threadirqs
