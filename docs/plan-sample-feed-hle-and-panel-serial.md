@@ -447,6 +447,25 @@ Expected return: uPD78C10 is ~13% of host cycles; the per-instruction
 | 4 | `bb58` superblock | 1-2 days | +10-16% | ~1280-1400% |
 | 5 | Secondary regions (`1b180`, `1acc0`, `302c0`, `37e00`) - characterize, then HLE the top one or two by the same pattern | 1-2 days | +5-10% | ~1350-1500% |
 
+### 2.1d Feed-wait loop: DONE (third revision of 0037). DMA-ready poll: falsified
+
+The induction/dead-store extension landed and the feed-wait loop skips
+exactly (see the 0037 patch header for the mechanism and numbers). The
+official binary measured 1242.5% single-run with frozen PCM intact.
+
+The DMA-ready poll (`0x36115`, 7.7% of post-v4 guest instructions) was then
+tried as a fourth recorded head using the one-port I/O whitelist. It ARMS -
+the loop is a pure 14-cycle `in/test/je` with no memory traffic - and the
+result falsifies the whitelist's soundness argument: average speed collapsed
+to 418% with 52M skipped iterations, because the V53's internal DMAC
+advances during CPU execution, so bulk-skipping the poll starves the very
+transfer it waits on and the guest spins roughly ten times longer in guest
+time. Slice-stability holds for external devices, not for the CPU's own
+internal peripherals. The whitelist must never be pointed at an
+internal-peripheral port; skipping this poll requires the DMAC to export a
+cycles-until-completion hint instead. Head 4 is reverted; the whitelist
+machinery remains for genuinely external status ports.
+
 If step 5 lands short of 1500%, the remaining known reserves are: the
 `0x36115` DMA-poll (needs a device-cooperative completion hint from the V53
 DMAC - deferred because it couples devices), PGO retraining after each

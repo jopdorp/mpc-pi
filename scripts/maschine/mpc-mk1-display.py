@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Push the emulated MPC2000XL LCD to a Maschine MK1 display over USB.
+
+Frame source: the shared file written by MAME when MAME_MPC_LCD_EXPORT is
+set (patch 0039): a 16-byte header (magic 'MPCL', u32 sequence, u16 width,
+u16 height, u32 reserved) followed by width*height bytes, one per pixel,
+nonzero = lit. The emulator rewrites it only when the frame content changes.
+
+Modes:
+  --usb            send to the first Maschine MK1 (default when available)
+  --preview out.png  render the current frame to a PNG instead (no hardware)
+  --ascii          dump the frame as text once and exit (no dependencies)
+
+The USB protocol follows docs/maschine-mk1-display-protocol.md, ported from
+shaduzlabs/cabl (BSD-style; see that repo for the original).
+"""
+
+import argparse
+import mmap
+import os
+import struct
+import sys
+import time
+
+MK1_VENDOR = 0x17CC
+MK1_PRODUCT = 0x0808  # Maschine MK1 controller; verify with lsusb on hardware
+EP_DISPLAY = 0x08
+
+DISPLAY_W = 255
+DISPLAY_H = 64
+TRIPLES_PER_ROW = 85          # 255 px / 3
+ROW_BYTES = TRIPLES_PER_ROW * 2  # 3 px pack into 2 bytes (5 bpp)
+FRAME_BYTES = 10 * 502 + 338  # 5358, cabl's exact chunking
+
+HEADER_FMT = "<4sIHHI"
+HEADER_SIZE = struct.calcsize(HEADER_FMT)
+
+
+def read_frame(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < HEADER_SIZE:
+        return None
+    magic, seq, width, height, _ = struct.unpack_from(HEADER_FMT, data, 0)
+    if magic != b"MPCL":
+        return None
+    pixels = data[HEADER_SIZE:HEADER_SIZE + width * height]
+    if len(pixels) < width * height:
+        return None
+    return seq, width, height, pixels
+
+
+def pack_display(width, height, pixels, level=0x1F):
+    """Pack a 1-bpp-ish frame into the MK1's 5-bpp 3-pixels-per-2-bytes
+    layout, placed at the top-left of the 255x64 panel."""
+    out = bytearray(FRAME_BYTES)
+    for y in range(DISPLAY_H):
+        row_base = y * ROW_BYTES
+        if row_base + ROW_BYTES > FRAME_BYTES:
+            break
+        for x in range(DISPLAY_W):
+            lit = 0
+            if x < width and y < height and pixels[y * width + x]:
+                lit = level
+            triple = x // 3
+            block = x % 3
+            byte_index = row_base + triple * 2
+            if byte_index + 1 >= FRAME_BYTES:
+                break
+            # 15 bits little-window packing per cabl GDisplayMaschineMK1:
+            # px0 -> byte0 bits 7..3, px1 -> byte0 bits 2..0 + byte1 bits
+            # 7..6, px2 -> byte1 bits 5..1.
+            if block == 0:
+                out[byte_index] = (out[byte_index] & 0x07) | (lit << 3)
+            elif block == 1:
+                out[byte_index] = (out[byte_index] & 0xF8) | (lit >> 2)
+                out[byte_index + 1] = (out[byte_index + 1] & 0x3F) | ((lit & 0x03) << 6)
+            else:
+                out[byte_index + 1] = (out[byte_index + 1] & 0xC1) | (lit << 1)
+    return bytes(out)
+
+
+class Mk1Usb:
+    def __init__(self, display_index=0):
+        import usb.core
+        import usb.util
+        self.usb = __import__("usb.core", fromlist=["core"])
+        self.dev = usb.core.find(idVendor=MK1_VENDOR)
+        if self.dev is None:
+            raise RuntimeError("no Maschine MK1 found (vendor 0x17cc)")
+        if self.dev.is_kernel_driver_active(0):
+            self.dev.detach_kernel_driver(0)
+        self.dev.set_configuration()
+        self.d = display_index << 1
+
+    def _w(self, header, payload=b""):
+        self.dev.write(EP_DISPLAY, bytes(header) + payload, timeout=1000)
+
+    def init_display(self):
+        d = self.d
+        self._w([d, 0x00, 0x01, 0x30])
+        self._w([d, 0x00, 0x04, 0xCA, 0x04, 0x0F, 0x00])
+        time.sleep(0.02)
+        self._w([d, 0x00, 0x02, 0xBB, 0x00])
+        self._w([d, 0x00, 0x01, 0xD1])
+        self._w([d, 0x00, 0x01, 0x94])
+        self._w([d, 0x00, 0x03, 0x81, 0x1E, 0x02])
+        time.sleep(0.02)
+        self._w([d, 0x00, 0x02, 0x20, 0x08])
+        time.sleep(0.02)
+        self._w([d, 0x00, 0x02, 0x20, 0x0B])
+        time.sleep(0.02)
+        self._w([d, 0x00, 0x01, 0xA6])
+        self._w([d, 0x00, 0x01, 0x31])
+
+    def send_frame(self, frame):
+        d = self.d
+        assert len(frame) == FRAME_BYTES
+        self._w([d, 0x00, 0x03, 0x75, 0x00, 0x3F])
+        self._w([d, 0x00, 0x03, 0x15, 0x00, 0x54])
+        self._w([d, 0x01, 0xF7, 0x5C], frame[0:502])
+        offset = 502
+        for _ in range(9):
+            self._w([d + 1, 0x01, 0xF6], frame[offset:offset + 502])
+            offset += 502
+        self._w([d + 1, 0x01, 0x52], frame[offset:offset + 338])
+
+
+def preview_png(width, height, pixels, path):
+    # minimal PNG writer (grayscale, no deps)
+    import zlib
+    rows = b""
+    for y in range(height):
+        rows += b"\x00" + bytes(
+            255 if pixels[y * width + x] else 0 for x in range(width))
+    def chunk(tag, data):
+        c = tag + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(rows))
+           + chunk(b"IEND", b""))
+    with open(path, "wb") as f:
+        f.write(png)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("frame_file", help="path written by MAME_MPC_LCD_EXPORT")
+    ap.add_argument("--display", type=int, default=0, choices=[0, 1])
+    ap.add_argument("--preview", metavar="PNG", help="write one frame to PNG and exit")
+    ap.add_argument("--ascii", action="store_true", help="dump one frame as text and exit")
+    ap.add_argument("--poll-hz", type=float, default=60.0)
+    args = ap.parse_args()
+
+    frame = read_frame(args.frame_file)
+    if frame is None:
+        sys.exit(f"no valid frame in {args.frame_file}")
+    seq, width, height, pixels = frame
+
+    if args.ascii:
+        step = 4
+        for y in range(0, height, step):
+            print("".join("#" if pixels[y * width + x] else "." for x in range(0, width, 2)))
+        return
+    if args.preview:
+        preview_png(width, height, pixels, args.preview)
+        print(f"frame {seq} ({width}x{height}) -> {args.preview}")
+        return
+
+    mk1 = Mk1Usb(args.display)
+    mk1.init_display()
+    last_seq = None
+    interval = 1.0 / args.poll_hz
+    while True:
+        frame = read_frame(args.frame_file)
+        if frame is not None:
+            seq, width, height, pixels = frame
+            if seq != last_seq:
+                mk1.send_frame(pack_display(width, height, pixels))
+                last_seq = seq
+        time.sleep(interval)
+
+
+if __name__ == "__main__":
+    main()
