@@ -206,6 +206,43 @@ recorder would refuse anyway) but it must be fixed with a loop over
 `IDLE_HEAD_COUNT` before any third head is relied on, and that fix needs the
 full acceptance battery because it changes which loops get recorded.
 
+### 2.1c Second working session: the loop DOES spin, and the blocker is one stack slot
+
+Cycle-delta measurement at the `0xbb58` head (`total_cycles()` between
+consecutive arrivals, 4000 samples): **3975 are exactly 164 cycles**, ~20 are
+741 (a periodic interrupt path). The loop spins constantly at a deterministic
+164 cycles per pass - the earlier "flag is always set on first poll" reading
+was wrong, and the iteration IS skippable in principle.
+
+The recorder's rejection is down to exactly one word: stack slot `0x108ca`,
+which alternates between `0xf283` and `0xf287` - values differing only in
+bit 2, the V33 parity flag. It is the PSW pushed by `int 0x92`, and
+`decw [countdown]` in `bb78` flips the result parity each pass.
+
+Two fixes were implemented on top of the induction extension:
+- multi-head dispatch bug fixed (committed `0037` only checks heads 0 and 1;
+  the fix loops over `IDLE_HEAD_COUNT` - fold into `0037` regardless);
+- per-head **iteration period**: when a period-1 close fails cleanly on write
+  accounting, retry recording across two passes, over which a per-pass parity
+  alternation should be net-zero and the countdown a delta -2 induction.
+
+Measured result: period-2 recordings STILL close with `old=f287 now=f283`, so
+the alternation is not strictly per-pass and the simple parity model is
+wrong. Rare `f293/f297` variants exist too. The true period is unknown until
+the write SEQUENCE on `0x108ca` within one recording is logged.
+
+**Precise next diagnostic**: log `(visit, old, new)` for every write to the
+failing address during the first ~10 recordings at head 2, then either fix
+the period logic or generalize the induction class. Work-in-progress code is
+preserved in `results/diagnostics/induction-wip-nec.{cpp,h}` and the session
+scratchpad; it builds cleanly, keeps frozen PCM bit-exact, and only fails to
+arm the third head.
+
+Cost warning: the period retry thrashes when it cannot arm (~700k record
+attempts over the fixture, 843% average speed versus the 1077% baseline in
+that diagnostic build), so the retry needs a per-head failure cooldown before
+this ships.
+
 ### 2.2 Phase A - characterization (half a day, no emulator changes)
 
 All commands runnable today; record outputs into
