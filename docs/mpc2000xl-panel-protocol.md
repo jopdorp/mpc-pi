@@ -14,7 +14,7 @@ Every message is two bytes: a status byte and one data byte.
 |---|---|---|---|
 | `e0` | `11` | boot handshake | every 19,966 panel cycles (200 Hz) until ~4.0 M cycles |
 | `83` | `05` | boot complete | once, at ~4.0 M cycles |
-| `86` | `00` | idle heartbeat, no key down | every ~156,157 cycles (25.6 Hz) |
+| `86` | slider | NOTE VARIATION slider position, and keep-alive | every ~156,157 cycles (25.6 Hz) |
 | `84` | keycode | key down | on event |
 | `85` | keycode | key up | on event |
 | `9n` | velocity | pad `n` struck (patch 0020 already emits this form) | on event |
@@ -108,13 +108,18 @@ exactly 32 `81 01` messages followed by 32 `80 01`, so the encoder reports one
 message per detent with the count in the data byte: `81` for increment, `80`
 for decrement.
 
-## Unresolved: the NOTE VARIATION slider
+## The NOTE VARIATION slider: resolved
 
-Driving the `VARIATION` adjuster from Lua produced no serial traffic at all.
-That is most likely a harness artifact rather than a protocol fact: the driver
-only updates `m_variation_slider` from its `PORT_CHANGED_MEMBER`
-(`variation_changed`), and a scripted `set_value()` on a `PORT_ADJUSTER` does
-not necessarily raise that callback, so the panel's AN4 reading never moved.
-Before an HLE can claim slider coverage this needs re-testing by driving the
-adjuster through a real input event, or by writing `m_variation_slider`
-directly and confirming a message appears.
+The first attempt to characterize the slider from Lua produced no traffic,
+which was a harness artifact: a scripted `set_value()` on a `PORT_ADJUSTER`
+never raised the `PORT_CHANGED_MEMBER` that updates `m_variation_slider`, so
+the panel's AN4 reading never moved. Forcing AN4 to ramp in the driver instead
+(`MAME_MPC_PANEL_SLIDER_SWEEP=1`) settled it immediately.
+
+**There is no separate slider message, and there is no bare heartbeat.** The
+`86` message *is* the slider report: its data byte is the AN4 reading halved
+to seven bits, and it is emitted every ~39 ms whether or not the value moved,
+so it doubles as the panel's keep-alive. A ramp of AN4 across `00`-`fe`
+produced `86 1d`, `86 29`, `86 36`, ... `86 7f` and wrapped with the sweep.
+The idle stream reads `86 00` only because the slider rests at zero, which is
+what made it look like a heartbeat in the first capture.

@@ -103,8 +103,16 @@ case "$panel_mode" in
         fi
         panel_environment=(MAME_MPC_PANEL_EVENT_DRIVEN=1)
         ;;
+    hle)
+        if [[ "$system_name" != mpc2000xl ]]; then
+            printf 'error: MPC_PANEL_MODE=hle is only supported by mpc2000xl\n' >&2
+            exit 2
+        fi
+        # The panel CPU is suspended and its serial stream is synthesized.
+        panel_environment=(MAME_MPC_PANEL_EVENT_DRIVEN=1 MAME_MPC_PANEL_HLE=1)
+        ;;
     *)
-        printf 'error: MPC_PANEL_MODE must be accurate or event, got %s\n' "$panel_mode" >&2
+        printf 'error: MPC_PANEL_MODE must be accurate, event, or hle, got %s\n' "$panel_mode" >&2
         exit 2
         ;;
 esac

@@ -1,0 +1,331 @@
+--- a/src/devices/cpu/upd7810/upd7810.h
++++ b/src/devices/cpu/upd7810/upd7810.h
+@@ -365,6 +365,7 @@
+ 	void timer_materialize();
+ 	int32_t timer_next_horizon();
+ 	bool m_mpc_timer_fast = false;
++	bool m_mpc_tx_log = false;
+ 	int32_t m_timer_horizon = 0;
+ 	int32_t m_timer_pending = 0;
+ 	uint64_t m_timer_fast_hits = 0;
+--- a/src/devices/cpu/upd7810/upd7810.cpp
++++ b/src/devices/cpu/upd7810/upd7810.cpp
+@@ -1119,6 +1119,9 @@
+ 		if (0 == m_txbuf)
+ 			return;
+ 		m_txbuf = 0;
++		if (UNEXPECTED(m_mpc_tx_log))
++			fprintf(stderr, "PANEL_TX cycle=%llu byte=%02x\n",
++					(unsigned long long)total_cycles(), TXB);
+ 
+ 		if (SML & 0x03)         /* asynchronous mode ? */
+ 		{
+@@ -1944,6 +1947,7 @@
+ 		m_mpc_pc_histogram = std::make_unique<uint64_t[]>(1 << 16);
+ 	}
+ 	m_mpc_timer_fast = (std::getenv("MAME_MPC_PANEL_TIMER_FAST") != nullptr);
++	m_mpc_tx_log = (std::getenv("MAME_MPC_PANEL_TX_LOG") != nullptr);
+ 	if (const char *const idle_stats = std::getenv("MAME_MPC_PANEL_IDLE_STATS"))
+ 	{
+ 		m_mpc_idle_stats = true;
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -178,6 +178,23 @@
+ 	TIMER_CALLBACK_MEMBER(panel_txd_sync);
+ 	void midi_input_byte(uint8_t data);
+ 	void enqueue_fast_pad_byte(uint8_t data);
++	void panel_hle_start();
++	void panel_hle_emit(uint8_t status, uint8_t data);
++	TIMER_CALLBACK_MEMBER(panel_hle_tick);
++
++	struct panel_key_binding { int port; ioport_value mask; uint8_t code; };
++	std::vector<panel_key_binding> m_panel_key_bindings;
++	ioport_value m_panel_key_state[8]{};
++	emu_timer *m_panel_hle_timer = nullptr;
++	bool m_panel_hle_enabled = false;
++	bool m_panel_slider_sweep = false;
++	int m_panel_hle_boot_ticks = 0;
++	int m_panel_hle_beat_ticks = 0;
++	int m_panel_hle_last_dial = 0;
++	bool m_panel_hle_banner_sent = false;
++	bool m_panel_hle_primed = false;
++	uint64_t m_panel_hle_drops = 0;
++	int m_fast_pad_retry_us = 4;
+ 	TIMER_CALLBACK_MEMBER(fast_pad_byte_tick);
+ 
+ 	void fdc_scsi_w(int state);
+@@ -216,6 +233,11 @@
+ 	m_panel_txd_timer = timer_alloc(FUNC(mpc2000_state::panel_txd_sync), this);
+ 	m_fast_pad_timer = timer_alloc(FUNC(mpc2000_state::fast_pad_byte_tick), this);
+ 	m_fast_pad_enabled = bool(osd_getenv("MAME_MPC_MIDI_INTERNAL_PADS"));
++	m_panel_hle_timer = timer_alloc(FUNC(mpc2000_state::panel_hle_tick), this);
++	m_panel_hle_enabled = bool(osd_getenv("MAME_MPC_PANEL_HLE"));
++	m_panel_slider_sweep = bool(osd_getenv("MAME_MPC_PANEL_SLIDER_SWEEP"));
++	if (m_panel_hle_enabled)
++		panel_hle_start();
+ 	char const *const lcd_skip_unchanged = osd_getenv("MAME_MPC_LCD_SKIP_UNCHANGED");
+ 	m_lcd_skip_unchanged = lcd_skip_unchanged && std::strcmp(lcd_skip_unchanged, "0");
+ 	if (char const *const lcd_export = osd_getenv("MAME_MPC_LCD_EXPORT"))
+@@ -603,6 +625,13 @@
+ 
+ uint8_t mpc2000_state::an4_r()
+ {
++	if (m_panel_slider_sweep)
++	{
++		// Sweep 0x00-0xfe over four seconds of emulated time so the emitted
++		// message for a slider move can be identified in the TX log.
++		const uint64_t ms = machine().time().as_ticks(1000);
++		return uint8_t((ms / 16) & 0xfe);
++	}
+ 	return m_variation_slider;
+ }
+ 
+@@ -667,6 +696,211 @@
+ 	m_maincpu->rxd_w(param);
+ }
+ 
++// Panel event bus (MAME_MPC_PANEL_HLE). The uPD78C10 front-panel CPU spends
++// roughly ten thousand interpreted instructions per byte it actually
++// transmits, scanning a key matrix that does not exist when the panel is
++// external hardware. Its link to the V53 is one way and its whole protocol is
++// two-byte messages, so the CPU is suspended and the same messages are
++// synthesized from the input ports here. See
++// docs/mpc2000xl-panel-protocol.md.
++//
++// This is deliberately not timing-accurate: messages are produced on a host
++// timer rather than by scanning firmware, so key phase and debounce differ.
++namespace {
++
++struct panel_key_code { char const *name; uint8_t code; };
++
++// Measured with scripts/diagnostics/map-panel-keycodes.lua. The codes follow
++// neither the port nor the bit ordering, so they are bound by field name.
++const panel_key_code s_panel_key_codes[] =
++{
++	{ "Soft Key 1", 0x01 },
++	{ "Soft Key 2", 0x02 },
++	{ "Soft Key 3", 0x03 },
++	{ "Soft Key 4", 0x04 },
++	{ "Soft Key 5", 0x05 },
++	{ "Soft Key 6", 0x06 },
++	{ "9 / MIDI/Sync", 0x07 },
++	{ "Enter", 0x08 },
++	{ "3 / Load", 0x09 },
++	{ "6 / Program", 0x0a },
++	{ "Main Screen", 0x0b },
++	{ "Window", 0x0c },
++	{ "8 / Other", 0x0d },
++	{ "2 / Misc", 0x0e },
++	{ "1 / Song", 0x0f },
++	{ "5 / Trim", 0x10 },
++	{ "4 / Sample", 0x11 },
++	{ "7 / Mixer", 0x12 },
++	{ "Shift", 0x13 },
++	{ "0", 0x14 },
++	{ "After", 0x15 },
++	{ "Tap Tempo", 0x16 },
++	{ "Undo", 0x17 },
++	{ "Erase", 0x18 },
++	{ "Step <", 0x19 },
++	{ "Step >", 0x1a },
++	{ "Go To", 0x1b },
++	{ "Record", 0x1c },
++	{ "Over Dub", 0x1d },
++	{ "Stop", 0x1e },
++	{ "Play", 0x1f },
++	{ "<< Bar", 0x20 },
++	{ "Down Arrow", 0x21 },
++	{ "Right Arrow", 0x22 },
++	{ "Left Arrow", 0x23 },
++	{ "Up Arrow", 0x24 },
++	{ "Bank A", 0x25 },
++	{ "Full Level", 0x26 },
++	{ "16 Levels", 0x27 },
++	{ "Bar >>", 0x28 },
++	{ "Play Start", 0x29 },
++	{ "Next Seq", 0x2a },
++	{ "Track Mute", 0x2b },
++	{ "Bank B", 0x2c },
++	{ "Bank C", 0x2d },
++	{ "Bank D", 0x2e },
++};
++
++char const *const s_panel_banner = "PAD CPU V1.00 Feb.15,1999";
++
++// The tick only samples the emulated front panel's own ports. MAME refreshes
++// those once per frame (ioport_manager::frame_update runs on MACHINE_NOTIFY_FRAME),
++// so sampling faster than the frame rate cannot observe a change any sooner.
++// External controllers do not use this path at all: MIDI bytes are injected
++// synchronously from midi_input_byte(), with no polling.
++constexpr int PANEL_HLE_TICK_US = 5000;      // input poll period
++constexpr int PANEL_HLE_BOOT_STRIDE = 1;     // e0 11 every 5 ms
++constexpr int PANEL_HLE_BOOT_COUNT = 200;    // for ~1.0 s, as measured
++constexpr int PANEL_HLE_BEAT_TICKS = 8;      // slider report every 40 ms (~39 ms measured)
++
++} // anonymous namespace
++
++void mpc2000_state::panel_hle_start()
++{
++	for (int port = 0; port < 8; port++)
++	{
++		for (ioport_field const &field : m_keys[port]->fields())
++		{
++			if (field.name().empty())
++				continue;
++			for (panel_key_code const &entry : s_panel_key_codes)
++			{
++				if (field.name() == entry.name)
++				{
++					m_panel_key_bindings.push_back({ port, field.mask(), entry.code });
++					break;
++				}
++			}
++		}
++	}
++	if (m_panel_key_bindings.size() != std::size(s_panel_key_codes))
++		osd_printf_warning("MPC panel HLE bound %d of %d key codes\n",
++				int(m_panel_key_bindings.size()), int(std::size(s_panel_key_codes)));
++
++	// Input ports cannot be read during device start, so the first tick
++	// takes the reference sample instead.
++	m_panel_hle_primed = false;
++
++	// The panel CPU never runs; nothing else reads its ports.
++	m_subcpu->suspend(SUSPEND_REASON_DISABLE, 1);
++	m_panel_hle_timer->adjust(attotime::from_usec(PANEL_HLE_TICK_US),
++			0, attotime::from_usec(PANEL_HLE_TICK_US));
++	osd_printf_info("MPC2000XL panel event-bus HLE active (%d keys bound)\n",
++			int(m_panel_key_bindings.size()));
++}
++
++void mpc2000_state::panel_hle_emit(uint8_t status, uint8_t data)
++{
++	// Drop whole messages rather than half of one, and never fill the queue:
++	// its retry timer reschedules every 4 us, so a stalled receiver would
++	// otherwise become a scheduler storm.
++	if ((m_fast_pad_count + 2) > m_fast_pad_queue.size())
++	{
++		m_panel_hle_drops++;
++		return;
++	}
++	enqueue_fast_pad_byte(status);
++	enqueue_fast_pad_byte(data);
++}
++
++TIMER_CALLBACK_MEMBER(mpc2000_state::panel_hle_tick)
++{
++	if (!m_panel_hle_primed)
++	{
++		m_panel_hle_primed = true;
++		// The suspended panel is the only thing that ever drove this line,
++		// and the V53 SCU will not accept a byte while it reads low.
++		m_maincpu->rxd_w(1);
++		for (int port = 0; port < 8; port++)
++			m_panel_key_state[port] = m_keys[port]->read();
++		m_panel_hle_last_dial = m_dataentry->read();
++	}
++
++	if (m_panel_hle_boot_ticks < (PANEL_HLE_BOOT_COUNT * PANEL_HLE_BOOT_STRIDE))
++	{
++		if ((m_panel_hle_boot_ticks % PANEL_HLE_BOOT_STRIDE) == 0)
++			panel_hle_emit(0xe0, 0x11);
++		if (++m_panel_hle_boot_ticks == (PANEL_HLE_BOOT_COUNT * PANEL_HLE_BOOT_STRIDE))
++			panel_hle_emit(0x83, 0x05);
++		return;
++	}
++
++	if (!m_panel_hle_banner_sent)
++	{
++		m_panel_hle_banner_sent = true;
++		enqueue_fast_pad_byte(0xff);
++		for (char const *p = s_panel_banner; *p; p++)
++			enqueue_fast_pad_byte(uint8_t(*p));
++	}
++
++	bool sent = false;
++	for (int port = 0; port < 8; port++)
++	{
++		const ioport_value now = m_keys[port]->read();
++		const ioport_value changed = now ^ m_panel_key_state[port];
++		if (!changed)
++			continue;
++		for (panel_key_binding const &binding : m_panel_key_bindings)
++		{
++			if ((binding.port != port) || !(changed & binding.mask))
++				continue;
++			// Panel key inputs are active low.
++			panel_hle_emit((now & binding.mask) ? 0x85 : 0x84, binding.code);
++			sent = true;
++		}
++		m_panel_key_state[port] = now;
++	}
++
++	const int dial = m_dataentry->read();
++	if (dial != m_panel_hle_last_dial)
++	{
++		int delta = dial - m_panel_hle_last_dial;
++		if (delta > 0x80)
++			delta -= 0x100;
++		if (delta < -0x80)
++			delta += 0x100;
++		m_panel_hle_last_dial = dial;
++		if (delta != 0)
++		{
++			panel_hle_emit((delta > 0) ? 0x81 : 0x80, uint8_t(std::abs(delta)));
++			sent = true;
++		}
++	}
++
++	if (++m_panel_hle_beat_ticks >= PANEL_HLE_BEAT_TICKS)
++	{
++		m_panel_hle_beat_ticks = 0;
++		if (!sent)
++		{
++			// 0x86 reports the NOTE VARIATION slider, halved by the firmware,
++			// and doubles as the panel's keep-alive. It reads 0x00 at rest,
++			// which is why the idle stream looks like a bare heartbeat.
++			panel_hle_emit(0x86, uint8_t((m_variation_slider >> 1) & 0x7f));
++		}
++	}
++}
++
+ void mpc2000_state::enqueue_fast_pad_byte(uint8_t data)
+ {
+ 	if (m_fast_pad_count == m_fast_pad_queue.size())
+@@ -706,9 +940,14 @@
+ 	// retry also lets authentic front-panel traffic share the V53 SCU safely.
+ 	if (m_maincpu->scu_rx_ready() || !m_maincpu->scu_line_idle())
+ 	{
+-		m_fast_pad_timer->adjust(attotime::from_usec(4));
++		// Back off rather than respinning at 4 us: a receiver that stays busy
++		// would otherwise cost far more scheduler work than the traffic it
++		// carries. The interval resets as soon as a byte is accepted.
++		m_fast_pad_retry_us = std::min<int>(m_fast_pad_retry_us * 2, 500);
++		m_fast_pad_timer->adjust(attotime::from_usec(m_fast_pad_retry_us));
+ 		return;
+ 	}
++	m_fast_pad_retry_us = 4;
+ 
+ 	const uint8_t data = m_fast_pad_queue[m_fast_pad_head];
+ 	m_fast_pad_head = (m_fast_pad_head + 1) % m_fast_pad_queue.size();
+@@ -747,6 +986,20 @@
+ 	}
+ 
+ 	m_midi_data_pos = 0;
++
++	// Notes 52 upwards drive front-panel keys, so an external controller's
++	// buttons reach the firmware the same way its pads do. The key codes are
++	// contiguous from 0x01, so note 52 is Soft Key 1; see
++	// docs/mpc2000xl-panel-protocol.md for the full table.
++	if ((m_midi_note >= 52) && (m_midi_note < (52 + 0x2e)))
++	{
++		const uint8_t code = uint8_t(m_midi_note - 52 + 1);
++		const bool down = (kind == 0x90) && data;
++		enqueue_fast_pad_byte(down ? 0x84 : 0x85);
++		enqueue_fast_pad_byte(code);
++		return;
++	}
++
+ 	if (m_midi_note < 36 || m_midi_note >= 52)
+ 		return;
+ 

@@ -25,6 +25,10 @@ set -euo pipefail
 
 # Latency-changing: the deployment input path.
 export MPC_MIDI_INPUT_MODE=${MPC_MIDI_INPUT_MODE:-internal-pads}
+# Latency-changing: suspend the front-panel CPU and synthesize its serial
+# stream. Measured +14.8% throughput, and it removes panel scan, debounce and
+# serial shift from the input path.
+export MPC_PANEL_MODE=${MPC_PANEL_MODE:-hle}
 
 # Exact fast paths held back from the reference preset as A53 candidates.
 export MPC_V53_DATA_MODE=${MPC_V53_DATA_MODE:-window}
