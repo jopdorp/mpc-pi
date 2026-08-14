@@ -205,7 +205,71 @@ interpretation overhead dominates them. Conservatively +12-20% average speed.
 
 ---
 
-## 3. Work item 2: panel serial event extension (patch `0039`)
+## 3. Work item 2: panel batching - SECOND ATTEMPT FAILED, cause now exact
+
+**Status after the implementation attempt on 2026-08-14: not viable in this
+configuration. The serial hypothesis below was wrong; the real blocker is the
+event counter.** Keep this section for the corrected analysis; do not
+re-attempt without addressing 3.0.
+
+### 3.0 What the second attempt established
+
+Measured runtime state disproves the serial hypothesis:
+
+```
+SMH=0c SML=4f txcnt=0 rxcnt=0 txbuf=0 interval_half=64 rx_starts=0
+```
+
+- `SML & 3 == 3` selects prescale 64, so a serial edge falls every **64**
+  machine cycles, not every cycle as previously recorded.
+- `SML & 3 != 0` means asynchronous mode, and the driver never binds the
+  panel's `rxd_func()`, so RXD is the unbound constant 1. The start-bit test
+  `(m_rxs & 0xc000) != 0x4000` can never pass: `rx_starts=0` over a full
+  fixture. The receive half is inert.
+- Patch `0022` already drives `update_sio()` with coalesced counts, and
+  `update_sio` is exact for a given total, so serial deferral only changes
+  batch granularity.
+
+The attempt added every timer/serial special-register flush hook including
+`upd7810_write_TXB()` (the hook genuinely missing the first time), a
+one-cycle bound while `txcnt>0 || txbuf!=0 || rxcnt>0`, and a permanent
+kill-switch if a receive ever starts. Frozen PCM still diverged.
+
+Bisection with the `MAME_MPC_PANEL_TIMER_BATCH=<cap>` bound cap:
+
+| cap | frozen PCM |
+|---|---|
+| 2, 3, 4 | exact `a65077eb...` |
+| 6 and above | diverges |
+
+Isolating the event counter (forcing bound 1 only for the ECNT branch,
+everything else batched and uncapped) restored bit-exact PCM. **The ECNT
+bound is the defect**, and its 4-cycle increment period is exactly the
+observed cap-4/cap-6 boundary.
+
+The panel runs `ETMM=0x0c`: free-running internal clock, ECNT incrementing
+every `12/3 = 4` machine cycles, clear-on-`ETM1`-match. The attempted bound
+was `min(u16(ETM0-ECNT), u16(ETM1-ECNT)) * 4 - OVCE`, the distance to the next
+`IRR`/CO0/CO1 event. Something in the increment path is observable beyond
+those matches, or `ETM0`/`ETM1` move without passing a hooked write. The value
+dump that would settle it segfaulted in its own scaffolding (a compound-literal
+array in the probe) and was not retried.
+
+Consequence: with ECNT active at a 4-cycle period, an exact bound of 4 cycles
+is shorter than the average instruction, so batching yields nothing. **Panel
+timer batching is dead unless the ECNT bound defect is found**, and even then
+the win depends on `ETM0`/`ETM1` sitting far from `ECNT` in practice.
+
+Next step if resumed: dump `ECNT`/`ETM0`/`ETM1`/`OVCE`/`ETMM` at bound
+computation using plain scalar `fprintf` arguments, and check whether
+`upd7810_co0_output_change()`/`co1` are connected in the MPC driver - if the
+CO pins are wired, every match is observable through a second path.
+
+Reducing panel cost is better approached by extending the `0019` event-driven
+pattern to the timer F/F, not by cycle batching. The uPD78C10 remains about
+13% of host cycles.
+
+### 3.1 (superseded) Original serial-blocker analysis
 
 ### 3.1 What actually blocked timer batching (from this session's bisection)
 
@@ -285,7 +349,7 @@ Expected return: uPD78C10 is ~13% of host cycles; the per-instruction
 | Step | What | Effort | Expected gain | Cumulative estimate |
 |---|---|---|---|---|
 | 0 | Phase A characterization (2.2) | 0.5 day | evidence | 1077% |
-| 1 | Panel serial + batching (item 2) | 1 day | +5-9% | ~1130-1170% |
+| 1 | ~~Panel serial + batching~~ **failed, see 3.0** | done | 0% | 1077% |
 | 2 | Shadow mode (2.3) | 1 day | tooling | - |
 | 3 | `int 0x92`/`0x77`/`0xb6` HLEs | 0.5 day | +2-4% | ~1160-1210% |
 | 4 | `bb58` superblock | 1-2 days | +10-16% | ~1280-1400% |
