@@ -665,6 +665,14 @@ scoped broader V53 dispatch/device-model change with a measured multi-percent
 ceiling; do not resume the panel decoder or generic scheduler work unless new
 evidence redirects the work.
 
+## Current standing (41-patch stack)
+
+Official binary, deployment P-cores, loaded Logic project: **1279% mean**
+(1297.7 / 1296.7 / 1242.9), frozen PCM `a65077eb074df267` exact. The stack is
+`0001`-`0041`; `0036`, `0038` and `0041` are Cortex-A53 candidates that are
+deliberately default-off because their measured benefit on this desktop is
+instruction count rather than wall clock.
+
 ## Final-push plan
 
 The concrete implementation plan for the two remaining large levers - the

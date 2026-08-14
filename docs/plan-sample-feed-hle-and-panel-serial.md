@@ -522,6 +522,18 @@ every IRR set and ADC ioport sample lands on its exact cycle. ADC
 completions every 144/192 cycles bound the fast-path window; ioport
 slice-stability covers the sampling within a window.
 
+**DSP voice-state hoist: falsified, the compiler already does it.** The
+`l7a1045` mixer is 7.9% of playback host time and re-reads fourteen voice
+fields per sample because `stream.add_int()` can alias the voice struct.
+Carrying them in loop locals with a single write-back is exact (frozen PCM
+bit-identical) but measured **+0.17% instructions and +0.58% cycles** - a
+small regression. Under PGO+LTO the compiler already inlines the mixer
+write and proves the non-aliasing itself, so the explicit locals only add
+up-front loads and register pressure. Reverted; do not retry as a
+source-level transform. Anything further in the mixer needs to change the
+work itself (for example vectorising the per-sample filter and envelope
+chain) rather than help the optimiser.
+
 **Countdown fast path landed as patch `0041`, default-off.** Implemented as
 described above and gated: frozen PCM bit-identical, 17.7M fast-path hits
 against 5.65M materializes (75.8% of `handle_timers` calls avoided). The
