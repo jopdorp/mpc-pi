@@ -723,7 +723,10 @@ advancing by a constant delta, which bound the skip) and dead stores
 lets the third head cover the OS's calibrated 164-cycle feed-wait loop at
 `0x0bb58`: 4.09M skipped iterations, frozen PCM still bit-identical, zero
 playback underruns, and a matched ABBA of 858.3% against 1165.6% (peak
-1181.8%). The remaining guest work concentrates in the 31.4 kHz
+1181.8%). The official build-script binary measured 1242.5%, and retraining
+the PGO profile on the post-skip hot-path shape (the previous profile
+predated the entire recorder) brought the verified standing to 1269-1290%
+across three runs, mean 1281%, PCM bit-identical throughout. The remaining guest work concentrates in the 31.4 kHz
 sample-feed service (V53 DMA programming toward the DSP) and the DMA-ready
 poll at `0x36115`, which are real work rather than idle and would need
 service-level HLE or device-cooperative completion hints. Artifacts:
