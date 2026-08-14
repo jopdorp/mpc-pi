@@ -16,10 +16,24 @@ A pad hit on an external controller reaches the speakers through these stages.
 | MAME MIDI input poll | 1500 Hz stock, up to 0.67 ms | `MAME_MPC_MIDI_POLL_HZ` (patch 0043) |
 | Panel-link injection | ~0 | already synchronous (patch 0020) |
 | Firmware pad handling | emulated, compressed by emulation speed | - |
-| DSP DMA pacing | one word per 64 DSP clocks | `MAME_MPC_DSP_DMA_TURBO` (patch 0043) |
+| DSP DMA pacing | **not in the play path** (loading/sampling only) | `MAME_MPC_DSP_DMA_TURBO` (patch 0043) |
 | Sound update cadence | 0.36 ms at 16 frames | `MPC_SOUND_UPDATES_PER_QUANTUM` (patch 0034) |
 | PipeWire quantum plus margin | ~1.1 ms at 32/44100 | launcher forces the graph |
 | DAC | ~1 ms | hardware |
+
+## The DSP DMA divider is not a latency fix
+
+`MAME_MPC_DSP_DMA_TURBO` is listed above for completeness, but measurement
+showed it does not shorten the pad-to-sound path: DMA channel 3 moves data
+between V53 memory and wave RAM, which is sample loading and sampling, while
+playback reads wave RAM directly. Striking a pad triggers no DMA.
+
+Keep it enabled anyway. At divider 4 it cuts bulk transfer time by sixteen -
+about 83 ms to 5 ms per second of 44.1 kHz audio loaded - and it is a net
+throughput gain of -2.01% instructions and -2.83% cycles, because the
+firmware's DMA-ready polling shortens by more than the extra timer callbacks
+cost. Divider 1 goes too far and regresses to +3.85% instructions against
+stock.
 
 ## CPU idle states
 
