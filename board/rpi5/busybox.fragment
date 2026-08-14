@@ -1,0 +1,4 @@
+# mpc-start.sh pins the emulator with taskset; busybox does not enable it by
+# default (chrt it does).
+CONFIG_TASKSET=y
+CONFIG_FEATURE_TASKSET_FANCY=y

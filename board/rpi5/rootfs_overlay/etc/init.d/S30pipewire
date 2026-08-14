@@ -1,0 +1,28 @@
+#!/bin/sh
+# PipeWire as a system service. It normally runs per user under systemd; on
+# this appliance there is exactly one audio user, so it runs as root with a
+# fixed runtime directory that the emulator's launcher shares.
+export XDG_RUNTIME_DIR=/run/pipewire
+
+case "$1" in
+	start)
+		printf 'Starting pipewire: '
+		mkdir -p "$XDG_RUNTIME_DIR"
+		start-stop-daemon -S -q -m -b -p /var/run/pipewire.pid \
+			-x /usr/bin/pipewire && echo OK || echo FAIL
+		sleep 1
+		printf 'Starting wireplumber: '
+		start-stop-daemon -S -q -m -b -p /var/run/wireplumber.pid \
+			-x /usr/bin/wireplumber && echo OK || echo FAIL
+		;;
+	stop)
+		start-stop-daemon -K -q -p /var/run/wireplumber.pid
+		start-stop-daemon -K -q -p /var/run/pipewire.pid
+		;;
+	restart)
+		"$0" stop; sleep 1; "$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"; exit 1
+		;;
+esac

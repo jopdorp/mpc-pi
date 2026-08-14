@@ -4,6 +4,9 @@
 # on the appliance this process owns the audio device.
 set -eu
 
+# Must match S30pipewire, or the emulator cannot find the daemon's socket.
+export XDG_RUNTIME_DIR=/run/pipewire
+
 ROMS=${MPC_ROMS:-/usr/share/mpc-pi/roms}
 PROJECT=${MPC_PROJECT:-/data/project.img}
 LCD_EXPORT=${MPC_LCD_EXPORT:-/dev/shm/mpc-lcd}
