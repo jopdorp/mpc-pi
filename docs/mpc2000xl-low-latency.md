@@ -716,9 +716,14 @@ the producer margin); and a matched interleaved ABBA measured:
 | skip on | 1036.3% | 990-1070 |
 
 +26.4% with complete separation. A second recorded head covering the
-tick-counter wait loop at linear `0x01691` raised the mean to 1062% (peak
-1119%) with 3,044,036 skipped iterations, still bit-exact and still zero
-playback underruns. The remaining guest work concentrates in the 31.4 kHz
+tick-counter wait loop at linear `0x01691` raised the mean to 1062%. The
+third revision classifies induction variables (read-before-write counters
+advancing by a constant delta, which bound the skip) and dead stores
+(write-before-read stack slots, provably unconsumable after a skip), which
+lets the third head cover the OS's calibrated 164-cycle feed-wait loop at
+`0x0bb58`: 4.09M skipped iterations, frozen PCM still bit-identical, zero
+playback underruns, and a matched ABBA of 858.3% against 1165.6% (peak
+1181.8%). The remaining guest work concentrates in the 31.4 kHz
 sample-feed service (V53 DMA programming toward the DSP) and the DMA-ready
 poll at `0x36115`, which are real work rather than idle and would need
 service-level HLE or device-cooperative completion hints. Artifacts:

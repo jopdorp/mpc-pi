@@ -47,6 +47,30 @@ direct host pointer at arm time, so steady-state verification is a flat
 compare loop with no handler dispatch; any entry that does not resolve to
 plain memory keeps the handler-path verification for the whole set.
 
+Third revision extends the recorder with the two classifications that let it
+skip the OS's calibrated feed-wait loop (RAM linear 0xbb58, a deterministic
+164-cycle pass measured over 4000 arrivals):
+
+- Induction variables: an address the iteration reads before writing and
+  advances by a constant delta (the feed countdown, decremented twice per
+  pass) is excluded from read verification and instead bounds the number of
+  skippable iterations so it can never cross the value that changes control
+  flow; skipped iterations advance it by delta times the count.
+- Dead stores: an address the iteration writes before ever reading (the call
+  return slots and the PSW/PS/IP/ds/bp words pushed by the pass's int 0x92,
+  whose pushed flags alternate with the countdown's parity) can never expose
+  a stale value, because the pops consume the pass's own pushes and any
+  observer - the executed remainder pass or an interrupt handler pushing over
+  the same stack area - rewrites the slot before reading it. Such writes are
+  exempt from net-zero accounting.
+
+The multi-head dispatch defect (only heads 0 and 1 were tested) is fixed by
+looping over IDLE_HEAD_COUNT, and the third head now covers the feed-wait
+loop. With all three heads the fixture skips 4.09M iterations, frozen PCM
+stays bit-identical, live playback records zero underruns with 4.14M skips,
+and a matched ABBA measured 858.3% against 1165.6% average speed in its
+window - roughly +8% over the previous revision of this patch.
+
 diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
 --- a/src/devices/cpu/nec/nec.h
 +++ b/src/devices/cpu/nec/nec.h
@@ -66,7 +90,7 @@ diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
  
  protected:
  	// construction/destruction
-@@ -179,6 +188,154 @@
+@@ -179,6 +188,179 @@
  	// Matches the V33_TYPE macro in necpriv.ipp, which is not visible here.
  	static constexpr uint32_t CHIP_TYPE_V33 = 0;
  
@@ -87,6 +111,11 @@ diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
 +	static constexpr int IDLE_MAX_WRITES = 256;
 +	struct idle_access { offs_t addr; u16 value; u8 size; };
 +	struct idle_probe { const u8 *ptr; u16 value; u8 size; };
++	// An induction variable: an address the iteration both reads and writes,
++	// changing by a constant delta each pass (a countdown). It is excluded
++	// from read verification and instead limits how many iterations may be
++	// skipped, so it never reaches the value that changes control flow.
++	struct idle_induction { offs_t addr; u16 value; s32 delta; u8 size; };
 +	struct idle_snapshot
 +	{
 +		necbasicregs regs;
@@ -102,6 +131,15 @@ diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
 +	bool m_idle_skip_enabled = false;
 +	bool m_idle_recording = false;
 +	u32 m_idle_heads[IDLE_HEAD_COUNT] = { 0, 0, 0 };
++	// Iteration period per head: a loop whose per-pass state alternates
++	// with period two (the parity flag of a countdown, pushed as PSW each
++	// pass) is net-zero over a pair, so a failed period-1 recording
++	// retries once with period 2.
++	u8 m_idle_period[IDLE_HEAD_COUNT] = { 1, 1, 1 };
++	u8 m_idle_visits = 0;
++	bool m_idle_last_close_was_netzero_fail = false;
++	int m_idle_wseq_remaining = 0;
++	u64 m_idle_dead_writes = 0;
 +	// One byte-wide I/O status port may join the recorded read set: reads of
 +	// it must be side-effect-free, and its value cannot change inside the
 +	// V33's own timeslice because the producing device only advances in its
@@ -121,6 +159,9 @@ diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
 +	std::unique_ptr<u16[]> m_idle_write_old;
 +	std::unique_ptr<idle_probe[]> m_idle_probes;
 +	int m_idle_probe_count = 0;
++	static constexpr int IDLE_MAX_INDUCTIONS = 4;
++	idle_induction m_idle_inductions[IDLE_MAX_INDUCTIONS];
++	int m_idle_induction_count = 0;
 +	bool m_idle_probes_valid = false;
 +	idle_snapshot m_idle_snapshot;
 +	s32 m_idle_slice_start = 0;
@@ -162,6 +203,14 @@ diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
 +	{
 +		if (!m_idle_viable)
 +			return;
++		// Raw write-sequence log (pre-dedup): the only view that shows the
++		// true per-visit pattern of an alternating slot.
++		if (UNEXPECTED(m_idle_wseq_remaining > 0) && (m_idle_active_head == 2))
++		{
++			fprintf(stderr, "V53_WSEQ visit=%u addr=%05x size=%u old=%04x\n",
++					m_idle_visits, addr, size, old_value);
++			m_idle_wseq_remaining--;
++		}
 +		// Net-zero is judged against the value before the iteration's FIRST
 +		// write to an address, so an exact repeat (same slot re-pushed by
 +		// every call in the loop) records once. A partial overlap would make
@@ -221,7 +270,7 @@ diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
  	// Direct-pointer data window (MAME_MPC_V53_DATA_WINDOW). A small
  	// direct-mapped table of translated 16 KiB pages, separate for reads and
  	// writes so ROM stays writable only through the handler path. A page that
-@@ -186,9 +343,15 @@
+@@ -186,9 +368,15 @@
  	// null base so it never re-probes on the hot path.
  	static constexpr int DATA_WINDOW_COUNT = 64;
  	struct data_window { offs_t page = ~offs_t(0); u8 *base = nullptr; };
@@ -237,7 +286,7 @@ diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
  	void invalidate_data_windows();
  	u8 *fill_data_window(offs_t phys, bool is_write);
  
-@@ -204,6 +367,12 @@
+@@ -204,6 +392,12 @@
  		if (m_chip_type != CHIP_TYPE_V33)
  			return m_program->read_byte(a);
  		const offs_t phys = v33_translate_fast(a);
@@ -250,7 +299,7 @@ diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
  		if (m_data_window_enable)
  		{
  			data_window &w = m_data_read_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
-@@ -223,6 +392,12 @@
+@@ -223,6 +417,12 @@
  		if (m_chip_type != CHIP_TYPE_V33)
  			return m_program->read_word_unaligned(a);
  		const offs_t phys = v33_translate_fast(a);
@@ -263,7 +312,7 @@ diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
  		if (m_data_window_enable && EXPECTED((phys & V33_PAGE_MASK) != V33_PAGE_MASK))
  		{
  			data_window &w = m_data_read_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
-@@ -248,6 +423,8 @@
+@@ -248,6 +448,8 @@
  			return;
  		}
  		const offs_t phys = v33_translate_fast(a);
@@ -272,7 +321,7 @@ diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
  		if (m_data_window_enable)
  		{
  			data_window &w = m_data_write_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
-@@ -276,6 +453,8 @@
+@@ -276,6 +478,8 @@
  			return;
  		}
  		const offs_t phys = v33_translate_fast(a);
@@ -323,7 +372,7 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
  void nec_common_device::device_reset()
  {
  	invalidate_fetch_window();
-@@ -860,8 +885,248 @@
+@@ -860,8 +885,348 @@
  	return true;
  }
  
@@ -389,6 +438,7 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
 +	m_idle_cycles_accum = 0;
 +	m_idle_slice_start = m_icount;
 +	idle_capture_snapshot(m_idle_snapshot);
++	m_idle_visits = 0;
 +	m_idle_recording = true;
 +	m_idle_phase = idle_phase::RECORDING;
 +}
@@ -414,6 +464,7 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
 +
 +	bool net_zero = m_idle_viable && (iter_cycles > 0) && (iter_cycles < 65536)
 +			&& idle_snapshot_matches(m_idle_snapshot);
++	m_idle_induction_count = 0;
 +	if (net_zero)
 +	{
 +		const bool was_candidate = true;
@@ -426,10 +477,45 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
 +				: m_program->read_word_unaligned(w.addr);
 +			if (now != m_idle_write_old[i])
 +			{
-+				if (m_idle_netzero_dumps < 24)
++				// Not net-zero, but it may be an induction variable: the
++				// iteration must also read the address, and it must advance
++				// by a fixed delta each pass. Such an address bounds how far
++				// the skip may run instead of disqualifying the iteration.
++				int read_slot = -1;
++				for (int j = 0; j < m_idle_read_count; j++)
 +				{
-+					fprintf(stderr, "V53_IDLE_NETZERO addr=%05x size=%u old=%04x now=%04x\n",
-+							w.addr, w.size, m_idle_write_old[i], now);
++					if (m_idle_reads[j].addr == w.addr && m_idle_reads[j].size == w.size)
++					{
++						read_slot = j;
++						break;
++					}
++				}
++				if ((read_slot >= 0) && (m_idle_induction_count < IDLE_MAX_INDUCTIONS))
++				{
++					m_idle_inductions[m_idle_induction_count++] = idle_induction{
++							w.addr, u16(now),
++							s32(now) - s32(m_idle_write_old[i]), w.size };
++					continue;
++				}
++				if (read_slot < 0)
++				{
++					// Dead store: the iteration writes this address before
++					// ever reading it (its live-in reads exclude it), so the
++					// value left by skipped passes can never be consumed -
++					// the executed remainder pass, or an interrupt handler
++					// pushing over the same stack area, rewrites it before
++					// any read. Exempt from net-zero.
++					m_idle_dead_writes++;
++					continue;
++				}
++				if (m_idle_netzero_dumps < 40)
++				{
++					fprintf(stderr, "V53_REJECT head=%d period=%d addr=%05x size=%u old=%04x now=%04x read_slot=%d inductions=%d writes=%d reads=%d\n",
++							m_idle_active_head,
++							(m_idle_active_head >= 0) ? m_idle_period[m_idle_active_head] : 0,
++							w.addr, w.size,
++							m_idle_write_old[i], now, read_slot,
++							m_idle_induction_count, m_idle_write_count, m_idle_read_count);
 +					m_idle_netzero_dumps++;
 +				}
 +				net_zero = false;
@@ -452,6 +538,19 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
 +		for (int i = 0; i < m_idle_read_count && m_idle_probes_valid; i++)
 +		{
 +			const idle_access &r = m_idle_reads[i];
++			// Induction variables advance by design; the skip bounds them
++			// through the induction room check, not the verify set.
++			bool is_induction = false;
++			for (int k = 0; k < m_idle_induction_count; k++)
++			{
++				if (m_idle_inductions[k].addr == r.addr)
++				{
++					is_induction = true;
++					break;
++				}
++			}
++			if (is_induction)
++				continue;
 +			u16 *const lo = static_cast<u16 *>(m_program->get_read_ptr(r.addr));
 +			if (!lo)
 +			{
@@ -479,8 +578,10 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
 +	}
 +	else
 +	{
-+		if (m_idle_viable && (iter_cycles > 0) && (iter_cycles < 65536)
-+				&& idle_snapshot_matches(m_idle_snapshot))
++		m_idle_last_close_was_netzero_fail =
++				m_idle_viable && (iter_cycles > 0) && (iter_cycles < 65536)
++				&& idle_snapshot_matches(m_idle_snapshot);
++		if (m_idle_last_close_was_netzero_fail)
 +			m_idle_fail_netzero++;
 +		m_idle_phase = idle_phase::RECORD_PENDING;
 +	}
@@ -501,6 +602,25 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
 +					unchanged = false;
 +					break;
 +				}
++			}
++			// Induction variables are expected to change; they bound the
++			// skip instead of being verified.
++			u32 induction_limit = ~u32(0);
++			for (int i = 0; i < m_idle_induction_count && unchanged; i++)
++			{
++				const idle_induction &v = m_idle_inductions[i];
++				const u16 now = (v.size == 1)
++					? m_program->read_byte(v.addr)
++					: m_program->read_word_unaligned(v.addr);
++				// Stay strictly clear of the wrap, so every skipped pass
++				// takes the branch the recorded pass took.
++				const s64 room = (v.delta < 0)
++					? (s64(now) - 1) / -s64(v.delta)
++					: (s64((v.size == 1) ? 0xff : 0xffff) - s64(now)) / s64(v.delta);
++				if (room <= 0)
++					unchanged = false;
++				else if (u64(room) < u64(induction_limit))
++					induction_limit = u32(room);
 +			}
 +			if (unchanged)
 +			{
@@ -524,6 +644,17 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
 +				for (int i = 0; i < m_idle_read_count; i++)
 +				{
 +					const idle_access &r = m_idle_reads[i];
++					bool is_induction = false;
++					for (int k = 0; k < m_idle_induction_count; k++)
++					{
++						if (m_idle_inductions[k].addr == r.addr)
++						{
++							is_induction = true;
++							break;
++						}
++					}
++					if (is_induction)
++						continue;
 +					const u16 now = (r.size == 1)
 +						? m_program->read_byte(r.addr)
 +						: m_program->read_word_unaligned(r.addr);
@@ -537,9 +668,23 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
 +			}
 +			if (unchanged)
 +			{
-+				const u32 iterations = u32(m_icount - 1) / m_idle_iter_cycles;
++				u32 iterations = u32(m_icount - 1) / m_idle_iter_cycles;
++				if (iterations > induction_limit)
++					iterations = induction_limit;
 +				if (iterations)
 +				{
++					for (int i = 0; i < m_idle_induction_count; i++)
++					{
++						const idle_induction &v = m_idle_inductions[i];
++						const u16 now = (v.size == 1)
++							? m_program->read_byte(v.addr)
++							: m_program->read_word_unaligned(v.addr);
++						const u16 advanced = u16(s32(now) + v.delta * s32(iterations));
++						if (v.size == 1)
++							m_program->write_byte(v.addr, u8(advanced));
++						else
++							m_program->write_word_unaligned(v.addr, advanced);
++					}
 +					m_icount -= s32(iterations * m_idle_iter_cycles);
 +					m_idle_skipped += iterations;
 +				}
@@ -552,10 +697,14 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
 +		}
 +		break;
 +	case idle_phase::RECORDING:
-+		idle_close_recording();
-+		if (m_idle_phase != idle_phase::ARMED)
++		if (++m_idle_visits < m_idle_period[m_idle_active_head])
 +			break;
-+		idle_head_event();
++		idle_close_recording();
++		if (m_idle_phase == idle_phase::ARMED)
++		{
++			idle_head_event();
++			break;
++		}
 +		break;
 +	case idle_phase::RECORD_PENDING:
 +		if ((m_pending_irq == 0) && !m_halted)
@@ -572,8 +721,11 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
  	if (m_pending_irq & NMI_IRQ)
  	{
  		nec_interrupt(NEC_NMI_VECTOR, NMI_IRQ);
-@@ -1005,6 +1270,11 @@
+@@ -1003,8 +1368,14 @@
+ 	m_fetch_window = (m_chip_type == V33_TYPE)
+ 			&& (std::getenv("MAME_MPC_V53_FETCH_WINDOW") != nullptr);
  	invalidate_fetch_window();
++	m_idle_wseq_remaining = std::getenv("MAME_MPC_V53_WSEQ") ? 400 : 0;
  	m_data_window_enable = (m_chip_type == V33_TYPE)
  			&& (std::getenv("MAME_MPC_V53_DATA_WINDOW") != nullptr);
 +	if (const char *const histogram_path = std::getenv("MAME_MPC_V53_PC_HISTOGRAM"))
@@ -584,7 +736,7 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
  	invalidate_data_windows();
  
  	m_program = &space(AS_PROGRAM);
-@@ -1185,9 +1455,37 @@
+@@ -1185,9 +1556,45 @@
  		return;
  	}
  
@@ -599,9 +751,17 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
 +		if (UNEXPECTED(m_idle_skip_enabled))
 +		{
 +			const u32 linear = ((u32(Sreg(PS)) << 4) + m_ip) & 0xfffff;
-+			if (UNEXPECTED(linear == m_idle_heads[0]) || UNEXPECTED(linear == m_idle_heads[1]))
++			int head = -1;
++			for (int i = 0; i < IDLE_HEAD_COUNT; i++)
 +			{
-+				const int head = (linear == m_idle_heads[0]) ? 0 : 1;
++				if (linear == m_idle_heads[i])
++				{
++					head = i;
++					break;
++				}
++			}
++			if (UNEXPECTED(head >= 0))
++			{
 +				if (m_idle_phase == idle_phase::RECORDING)
 +				{
 +					if (head == m_idle_active_head)
@@ -622,7 +782,7 @@ diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
  
  		// Dispatch IRQ
  		if (m_pending_irq && m_no_interrupt==0)
-@@ -1239,4 +1537,10 @@
+@@ -1239,4 +1646,10 @@
  		}
  		do_prefetch();
  	}
@@ -675,7 +835,7 @@ diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
 +	// Heads: main scheduler loop, tick-counter wait, DMA-ready poll. The
 +	// whitelisted status port is the polled DMA-ready register, whose read is
 +	// side-effect-free and slice-stable.
-+	m_maincpu->set_mpc2000xl_idle_skip(idle_skip, 0x0077f, 0x01691, 0x36115, 0xc03b);
++	m_maincpu->set_mpc2000xl_idle_skip(idle_skip, 0x0077f, 0x01691, 0x0bb58, 0xc03b);
  	m_maincpu->set_direct_brc_timer(event_driven_panel);
  	m_maincpu->set_addrmap(AS_PROGRAM, &mpc2000_state::mpc2000_map);
  	m_maincpu->set_addrmap(AS_IO, &mpc2000_state::mpc2000_io_map);
