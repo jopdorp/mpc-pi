@@ -1,0 +1,44 @@
+--- a/src/devices/imagedev/midiin.cpp
++++ b/src/devices/imagedev/midiin.cpp
+@@ -195,7 +195,17 @@
+ 			return std::make_pair(image_error::UNSPECIFIED, std::string());
+ 		}
+ 
+-		m_timer->adjust(attotime::from_hz(1500), 0, attotime::from_hz(1500));
++		// The stock 1500 Hz poll adds up to 0.67 ms of queueing delay to every
++		// incoming message. MAME_MPC_MIDI_POLL_HZ raises it for latency-led
++		// configurations; each extra poll is one non-blocking driver check.
++		int poll_hz = 1500;
++		if (char const *const rate = std::getenv("MAME_MPC_MIDI_POLL_HZ"))
++		{
++			const int requested = std::atoi(rate);
++			if ((requested >= 1500) && (requested <= 96000))
++				poll_hz = requested;
++		}
++		m_timer->adjust(attotime::from_hz(poll_hz), 0, attotime::from_hz(poll_hz));
+ 		return std::make_pair(std::error_condition(), std::string());
+ 	}
+ }
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -625,8 +625,18 @@
+ 
+ 	if (BIT(m_control, CONTROL_DMA_START))
+ 	{
+-		// 8x the sample period
+-		const auto time = attotime::from_ticks(64, clock());
++		// 8x the sample period. On real hardware this spreads DMA so it does
++		// not monopolise the bus; in emulation it only makes the firmware
++		// wait. MAME_MPC_DSP_DMA_TURBO shortens the interval so transfers
++		// complete sooner and terminal count arrives earlier. This changes
++		// machine timing deliberately and is not accuracy-preserving.
++		int divider = 64;
++		if (char const *const turbo = std::getenv("MAME_MPC_DSP_DMA_TURBO"))
++		{
++			const int requested = std::atoi(turbo);
++			divider = ((requested >= 1) && (requested <= 64)) ? requested : 4;
++		}
++		const auto time = attotime::from_ticks(divider, clock());
+ 		m_dma_timer->adjust(time, 0, time);
+ 	}
+ 	else

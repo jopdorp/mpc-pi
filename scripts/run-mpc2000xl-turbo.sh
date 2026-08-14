@@ -45,5 +45,28 @@ if [[ -n "$lcd_export_path" ]]; then
     export MAME_MPC_LCD_EXPORT="$lcd_export_path"
 fi
 
+# Input latency: poll MIDI far more often than the stock 1500 Hz (0.67 ms of
+# pure queueing before a note reaches the emulator) and stop the DSP DMA from
+# pacing transfers at one word per 64 clocks.
+export MAME_MPC_MIDI_POLL_HZ=${MAME_MPC_MIDI_POLL_HZ:-8000}
+export MAME_MPC_DSP_DMA_TURBO=${MAME_MPC_DSP_DMA_TURBO:-4}
+
+# Deep CPU idle states cost more wake-up latency than anything left in the
+# emulator: C6 exits in ~140 us and C10 in ~310 us on a Core Ultra. Holding
+# /dev/cpu_dma_latency at 0 keeps the cores out of them for this session.
+if [[ -w /dev/cpu_dma_latency ]]; then
+    exec 9<>/dev/cpu_dma_latency
+    printf '\x00\x00\x00\x00' >&9
+    printf 'CPU deep idle: held off through /dev/cpu_dma_latency\n'
+else
+    printf 'CPU deep idle: NOT held off (/dev/cpu_dma_latency needs root).\n'
+    printf '  C-state exit latency stays in the input path. To enable:\n'
+    printf '    sudo setfacl -m u:$USER:rw /dev/cpu_dma_latency\n'
+    printf '  or install a udev rule granting your user access.\n'
+fi
+if [[ "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)" == powersave ]]; then
+    printf 'CPU governor: powersave (consider performance for a faster ramp out of idle)\n'
+fi
+
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 exec "$repo_root/scripts/run-mpc2000xl-fast.sh" "$@"
