@@ -151,6 +151,61 @@ and independently removable; land them in this order.
   interpretation for that iteration. Fallback must be free of partial
   effects: validate everything before mutating any state.
 
+### 2.1a Phase A result: `bb78` is a spin-wait, not DMAC programming
+
+Disassembled from the playback RAM dump. The plan guessed the helper
+programmed the DMAC; it does not:
+
+```
+bb78: push ax; push dx
+bb7a: mov ax,0xffff
+bb7d: mul ax                ; deliberate time-waster, no architectural effect
+bb7f: pop dx; pop ax
+bb81: decw [ds:-0x5f66]     ; primary countdown
+bb85: je bb88
+bb87: ret
+bb88: decw [ds:-0x5f64]     ; secondary countdown
+bb8c: jne bb91
+bb8e: jmp 0xa9dc            ; timeout path
+bb91: ret
+```
+
+(`bb92` onward is an ASCII hex-digit table, not code.) So the whole `bb58`
+loop is a **bounded spin-wait**: burn time, decrement a counter, poll the
+`int 0x92` flag that the `int 0x23` ISR sets, exit on flag or on timeout.
+The DMAC programming seen at `bb41` belongs to a different entry path.
+
+That is much better news than a DMAC service: it is an idle loop, and the
+`0037` recorder already skips idle loops. It refuses this one for exactly one
+reason - the countdown makes the writes non-net-zero.
+
+### 2.1b Induction-variable extension: implemented, not yet arming
+
+The natural extension is to allow an address that the iteration both reads and
+writes with a constant delta (a countdown) to act as an *induction variable*:
+excluded from read verification, and instead limiting the skip so the counter
+never reaches the value that changes control flow. Iterations then advance it
+by `delta * N` in one step. This preserves the existing exactness argument
+because every skipped pass provably takes the branch the recorded pass took.
+
+Implemented on top of `0037` (classification in `idle_close_recording`, bound
+and advance in `idle_head_event`). Frozen PCM stayed bit-exact. It does not
+arm yet: with head 2 pointed at `0xbb58`, `record_attempts` rises from 35,341
+to 698,067 and `fail_netzero` to 664,728, so the loop is recorded but some
+written address is still neither net-zero nor classifiable as an induction.
+Next step is a diagnostic dump of the rejecting address in that path (which
+address, old/new value, and whether it appears in the read set) - the same
+technique that found the stack-slot dedup bug in the original recorder. The
+work in progress is preserved in the session scratchpad.
+
+**A real bug was found in the committed `0037` while doing this**:
+`IDLE_HEAD_COUNT` is 3, but the dispatch in `execute_run_mode` only tests
+`m_idle_heads[0]` and `m_idle_heads[1]`, so the third head never fires. It is
+currently harmless (the third head is set to the DMA-ready poll, which the
+recorder would refuse anyway) but it must be fixed with a loop over
+`IDLE_HEAD_COUNT` before any third head is relied on, and that fix needs the
+full acceptance battery because it changes which loops get recorded.
+
 ### 2.2 Phase A - characterization (half a day, no emulator changes)
 
 All commands runnable today; record outputs into
