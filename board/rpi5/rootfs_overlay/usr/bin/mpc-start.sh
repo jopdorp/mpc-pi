@@ -37,9 +37,15 @@ export MAME_MPC_V53_IDLE_SKIP=1
 export MAME_MPC_LCD_SKIP_UNCHANGED=1
 export MAME_MPC_STEREO_ONLY=1
 
+# The Maschine input bridge writes MIDI into a snd-virmidi port; the emulator
+# reads the same port. PortMidi names ALSA virmidi ports "Virtual Raw MIDI
+# <card>-<dev>"; adjust MPC_MIDIIN if the card order differs on real hardware.
+MIDIIN=${MPC_MIDIIN:-Virtual Raw MIDI 1-0}
+
 set -- mpc mpc2000xl \
 	-rompath "$ROMS" \
 	-video none -sound pipewire -samplerate 44100 \
+	-midiin1 "$MIDIIN" \
 	-skip_gameinfo -nomaximize
 [ -f "$PROJECT" ] && set -- "$@" -flop "$PROJECT"
 

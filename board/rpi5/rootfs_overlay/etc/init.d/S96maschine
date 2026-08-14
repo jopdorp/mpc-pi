@@ -1,0 +1,27 @@
+#!/bin/sh
+# Maschine MK1 bridges: panel LCD out over USB, pads/buttons in as MIDI.
+# Both tolerate the device being absent and simply exit; a udev-triggered
+# restart on hotplug is a refinement for later.
+
+case "$1" in
+	start)
+		printf 'Starting Maschine bridges: '
+		start-stop-daemon -S -q -m -b -p /var/run/mk1-display.pid \
+			-x /usr/bin/mpc-mk1-display -- /dev/shm/mpc-lcd --usb || true
+		start-stop-daemon -S -q -m -b -p /var/run/mk1-input.pid \
+			-x /usr/bin/mpc-mk1-input -- --midi /dev/snd/midiC1D0 || true
+		echo OK
+		;;
+	stop)
+		printf 'Stopping Maschine bridges: '
+		start-stop-daemon -K -q -p /var/run/mk1-display.pid || true
+		start-stop-daemon -K -q -p /var/run/mk1-input.pid || true
+		echo OK
+		;;
+	restart)
+		"$0" stop; sleep 1; "$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"; exit 1
+		;;
+esac

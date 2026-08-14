@@ -23,6 +23,7 @@
 	fragment@0 {
 		target = <&i2s_clk_producer>;
 		__overlay__ {
+			#sound-dai-cells = <0>;
 			status = "okay";
 		};
 	};

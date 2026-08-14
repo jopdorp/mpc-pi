@@ -1,0 +1,27 @@
+# USB audio and USB MIDI class drivers, plus the ALSA sequencer the MIDI path
+# needs. Built in rather than modular so they are present before userspace
+# starts and the card ordering is stable.
+CONFIG_SND_USB=y
+CONFIG_SND_USB_AUDIO=y
+CONFIG_SND_USB_AUDIO_MIDI_V2=y
+CONFIG_SND_RAWMIDI=y
+CONFIG_SND_SEQUENCER=y
+CONFIG_SND_SEQ_DUMMY=y
+# Virtual raw MIDI: the Maschine daemon writes pad and button events into one
+# of these ports and the emulator opens it as an ordinary MIDI input, so the
+# controller reaches the firmware through the path patch 0020 already serves.
+CONFIG_SND_VIRMIDI=m
+CONFIG_SND_HRTIMER=y
+
+# The two I2S codecs: a real driver for the DAC, the generic dummy receiver
+# for the PCM1808, and the card that binds them.
+CONFIG_SND_SOC=y
+CONFIG_SND_SOC_PCM5102A=y
+CONFIG_SND_SOC_SPDIF=y
+CONFIG_SND_SIMPLE_CARD=y
+CONFIG_SND_SIMPLE_CARD_UTILS=y
+
+# Low latency: full preemption and high-resolution timers.
+CONFIG_PREEMPT=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_HZ_1000=y

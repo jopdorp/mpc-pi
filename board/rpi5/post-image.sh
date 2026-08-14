@@ -4,8 +4,6 @@ set -euo pipefail
 
 BOARD_DIR="$(dirname "$0")"
 BINARIES_DIR="${BINARIES_DIR:-$1}"
-GENIMAGE_CFG="${BOARD_DIR}/genimage.cfg"
-
 # The overlay is compiled here rather than shipped as a blob so the source
 # stays reviewable and tracks whatever kernel the build selected.
 dtc_bin="${HOST_DIR}/bin/dtc"
@@ -19,9 +17,7 @@ mkdir -p "${BINARIES_DIR}/rpi-firmware/overlays"
     -o "${BINARIES_DIR}/rpi-firmware/overlays/mpc-audio.dtbo" \
     "${BOARD_DIR}/overlays/mpc-audio-overlay.dts"
 
-install -m 0644 "${BOARD_DIR}/config.txt" "${BINARIES_DIR}/rpi-firmware/config.txt"
-install -m 0644 "${BOARD_DIR}/cmdline.txt" "${BINARIES_DIR}/rpi-firmware/cmdline.txt"
+# config.txt and cmdline.txt are installed by the rpi-firmware package via
+# BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE / _CMDLINE_FILE.
 
-if [[ -f "$GENIMAGE_CFG" ]]; then
-    support/scripts/genimage.sh -c "$GENIMAGE_CFG"
-fi
+# The upstream board/raspberrypi5/post-image.sh runs genimage after this one.

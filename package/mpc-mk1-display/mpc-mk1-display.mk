@@ -16,6 +16,8 @@ endef
 define MPC_MK1_DISPLAY_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/mpc-mk1-display.py \
 		$(TARGET_DIR)/usr/bin/mpc-mk1-display
+	$(INSTALL) -D -m 0755 $(@D)/mpc-mk1-input.py \
+		$(TARGET_DIR)/usr/bin/mpc-mk1-input
 endef
 
 $(eval $(generic-package))

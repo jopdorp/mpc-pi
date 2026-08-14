@@ -18,3 +18,6 @@ __pycache__/
 
 # Ignore VS Code AI rules
 .github/instructions/codacy.instructions.md
+
+# Cross-compiled emulator binary, produced by scripts/build-mame-rpi5.sh
+board/rpi5/rootfs_overlay/usr/bin/mpc
