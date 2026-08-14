@@ -476,6 +476,74 @@ host instructions. One portability note: `install_write_tap` requires
 bus-aligned ranges, and both handlers start on odd addresses - the taps are
 widened to word bounds (a boundary-byte write just forces revalidation).
 
+### 2.1f DMA completion-hint: falsified by host profile; the playback rock is the panel CPU
+
+A playback-window host profile of the official 0040 binary (perf on a pinned
+P-core, sampling delayed past boot, PCM exact under the profiler) killed the
+completion-hint premise: the DMAU/am9517 machinery is below 1% of host time.
+The guest burns 7.7% of its instruction dispatches polling `0xc03b`, but the
+host executes that cached three-instruction loop so cheaply it does not
+matter. The DSP DRQ pacing (one word per 64 DSP clocks, an eighth of the
+sample period) is bus-bandwidth shaping, not a latency margin, and the
+HREQ->HACK loopback in the driver means the CPU never even gates the bus.
+Floppy PLL churn (~8% in the whole-run profile) is boot-only project
+loading - absent in the playback window - so that avenue is closed too.
+
+Playback-window host shares: V33 interpreter ~28%, **uPD7810 panel CPU
+~17.7%** (`handle_timers` 6.8 + `execute_run` 6.1 + call/irq/ret ~3.8),
+audio path ~11% (`l7a1045 sound_stream_update` 7.9 + resampler + speaker),
+machine manager ~2.3%. The panel CPU is the next rock. The old
+timer-batching falsification (unidentified per-4-cycle observable) does not
+bar an 0037-pattern idle-iteration skip for the 78C10: skip replays exact
+per-iteration state deltas (timer counters as induction variables,
+whitelisted slice-stable port reads) instead of deferring work, so the
+mystery observable is preserved by construction if iterations verify as
+fixed points. Characterization (panel PC histogram, loop disassembly) is
+the entry step.
+
+**Panel idle-skip premise measured and falsified; countdown fast path is
+the design.** The `MAME_MPC_PANEL_IDLE_STATS` instrument (loop head
+`0x014b`) measured 304,264 loop iterations with only 3.9% consecutive
+register fixed points and 279,662 accepted interrupts - every one the
+ETIMER vector (ECNT match), roughly one per iteration, cycle deltas
+multi-modal (dominant 1169, 69.7%, plus a 425/676/888/1139/1420 family).
+The scan loop is paced by ECNT-match interrupts whose ISR rotates scan
+state, so an 0037-pattern iteration skip can never arm. The real cost is
+per-instruction overhead, not instruction count (35.7M panel instructions
+per run is trivial; `handle_timers` walking every timer block per
+instruction is 6.8% of host): the fix is a **timer event countdown fast
+path** in the 78C10 core - precompute cycles-to-next-observable-event
+(timer0/1 match, ECNT match/wrap, ADC conversion boundary, F/F+SIO when
+active), make `handle_timers(cc)` a subtract-and-branch on the fast path,
+chunk-replay the original walk at event boundaries, and materialize
+counters exactly on any special-register access (sr moves, SKIT/SKNIT).
+Nothing is deferred past an observable, unlike the falsified batching:
+every IRR set and ADC ioport sample lands on its exact cycle. ADC
+completions every 144/192 cycles bound the fast-path window; ioport
+slice-stability covers the sampling within a window.
+
+**Countdown fast path landed as patch `0041`, default-off.** Implemented as
+described above and gated: frozen PCM bit-identical, 17.7M fast-path hits
+against 5.65M materializes (75.8% of `handle_timers` calls avoided). The
+horizon is bounded in practice by the SIO half-interval edge (64 cycles at
+the panel's `SML`) rather than by the ADC, which is why the rate is 76% and
+not higher. Instruction-count A/B: **-2.51% host instructions with cycles
+flat** (14.651e9 against 14.654e9), and wall clock inside noise across three
+interleaved pairs. That is the `0036`/`0038` signature - work removed that
+an out-of-order x86 was already hiding - so it ships default-off as a
+Cortex-A53 candidate rather than in the fast preset. A follow-up that could
+roughly double the hit rate: prove the serial line idle between bytes (no
+transmit in flight, receive callback unbound) and drop the SIO term from the
+horizon, letting the ADC's 144/192-cycle boundary bind instead.
+
+A separate idea recorded for the latency workstream, not throughput: an
+opt-in "instant write-DMA" hot-rod (0031-class, deliberately not
+accuracy-preserving, default off, validated by the live-timing harness
+rather than the frozen PCM) would complete RAM->DSP block loads at bus-max
+rate so firmware sees TC early and proceeds sooner, cutting the
+instrument's internal event-to-sound delay. The sampling direction
+(`dma_r16_cb`) must never be shortwired - it is paced by ADC production.
+
 ### 2.1d Feed-wait loop: DONE (third revision of 0037). DMA-ready poll: falsified
 
 The induction/dead-store extension landed and the feed-wait loop skips

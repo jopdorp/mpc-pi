@@ -1,0 +1,800 @@
+--- a/src/devices/cpu/upd7810/upd7810.h
++++ b/src/devices/cpu/upd7810/upd7810.h
+@@ -140,6 +140,7 @@
+ 	// device-level overrides
+ 	virtual void device_start() override ATTR_COLD;
+ 	virtual void device_reset() override ATTR_COLD;
++	virtual void device_stop() override ATTR_COLD;
+ 
+ 	// device_execute_interface overrides
+ 	virtual uint64_t execute_clocks_to_cycles(uint64_t clocks) const noexcept override { return (clocks + 3 - 1) / 3; }
+@@ -351,6 +352,54 @@
+ 	memory_access<16, 0, 0, ENDIANNESS_LITTLE>::specific m_io;
+ 	int m_icount;
+ 
++	// Diagnostic: per-instruction PC histogram (MAME_MPC_PANEL_PC_HISTOGRAM)
++	std::unique_ptr<uint64_t[]> m_mpc_pc_histogram;
++	std::string m_mpc_pc_histogram_path;
++
++	// Timer event countdown fast path (MAME_MPC_PANEL_TIMER_FAST): between
++	// observable timer events, handle_timers() only accumulates a pending
++	// cycle count; the full walk replays exactly at event boundaries, on
++	// counter reads, and at the end of every timeslice, so every IRR set,
++	// output change and ADC sample still lands on its exact cycle.
++	void handle_timers_core(int cycles);
++	void timer_materialize();
++	int32_t timer_next_horizon();
++	bool m_mpc_timer_fast = false;
++	int32_t m_timer_horizon = 0;
++	int32_t m_timer_pending = 0;
++	uint64_t m_timer_fast_hits = 0;
++	uint64_t m_timer_materializes = 0;
++
++	// Barriers used by the special-register opcodes: any read of a counter
++	// and any write of timer configuration must see, respectively, fully
++	// advanced counters and cycles still charged under the old configuration.
++	void timer_read_barrier() { if (UNEXPECTED(m_mpc_timer_fast)) timer_materialize(); }
++	void timer_write_barrier()
++	{
++		if (UNEXPECTED(m_mpc_timer_fast))
++		{
++			timer_materialize();
++			m_timer_horizon = 0;
++		}
++	}
++
++
++	// Diagnostic: idle-loop head statistics (MAME_MPC_PANEL_IDLE_STATS=<hex pc>)
++	void mpc_idle_stats_head_visit();
++	bool m_mpc_idle_stats = false;
++	uint16_t m_mpc_idle_stats_head = 0;
++	uint64_t m_mpc_stats_head_visits = 0;
++	uint64_t m_mpc_stats_head_prev_cycles = 0;
++	bool m_mpc_stats_have_prev = false;
++	uint32_t m_mpc_stats_delta_val[16] = {};
++	uint64_t m_mpc_stats_delta_cnt[16] = {};
++	int m_mpc_stats_delta_n = 0;
++	uint64_t m_mpc_stats_reg_fixed = 0;
++	uint64_t m_mpc_stats_reg_changed = 0;
++	uint16_t m_mpc_stats_regs[12] = {};
++	uint64_t m_mpc_stats_irq_accepted = 0;
++	uint64_t m_mpc_stats_irq_by_vector[8] = {};
++
+ 	uint8_t RP(offs_t port);
+ 	void WP(offs_t port, uint8_t data);
+ 	void upd7810_write_EOM();
+--- a/src/devices/cpu/upd7810/upd7810.cpp
++++ b/src/devices/cpu/upd7810/upd7810.cpp
+@@ -942,6 +942,11 @@
+ 		IRR &= ~irr_mask;
+ 		PSW &= ~(SK|L0|L1);
+ 		PC = vector;
++		if (UNEXPECTED(m_mpc_idle_stats))
++		{
++			m_mpc_stats_irq_accepted++;
++			m_mpc_stats_irq_by_vector[(vector >> 3) & 7]++;
++		}
+ 	}
+ }
+ 
+@@ -1474,6 +1479,132 @@
+ 
+ void upd7810_device::handle_timers(int cycles)
+ {
++	if (!UNEXPECTED(m_mpc_timer_fast))
++	{
++		handle_timers_core(cycles);
++		return;
++	}
++
++	// Between observable events the walk below cannot change anything the
++	// CPU or the outside world can see, so the cycles are only accumulated.
++	// They are replayed in one chunk at the first instruction boundary that
++	// reaches the horizon - the same boundary at which the unbatched walk
++	// would first have observed the event - which leaves every counter,
++	// IRR bit, output transition and ADC sample on its exact cycle.
++	m_timer_pending += cycles;
++	if (m_timer_pending < m_timer_horizon)
++	{
++		m_timer_fast_hits++;
++		return;
++	}
++
++	const int32_t pending = m_timer_pending;
++	m_timer_pending = 0;
++	handle_timers_core(pending);
++	m_timer_materializes++;
++	m_timer_horizon = timer_next_horizon();
++}
++
++void upd7810_device::timer_materialize()
++{
++	if (m_timer_pending > 0)
++	{
++		const int32_t pending = m_timer_pending;
++		m_timer_pending = 0;
++		handle_timers_core(pending);
++		m_timer_materializes++;
++	}
++	m_timer_horizon = timer_next_horizon();
++}
++
++int32_t upd7810_device::timer_next_horizon()
++{
++	int32_t horizon = INT32_MAX;
++
++	// Timer 0: CNT0 advances once per clkdiv cycles and raises INTFT0 (and
++	// possibly a TO transition) on reaching TM0. External-TI and disabled
++	// sources are not advanced from here at all.
++	if (!(TMM & 0x10))
++	{
++		const int clkdiv = ((TMM & 0x0c) == 0x00) ? 4 : (((TMM & 0x0c) == 0x04) ? 128 : 0);
++		if (clkdiv)
++		{
++			int steps = (int(TM0) - int(CNT0)) & 0xff;
++			if (steps == 0)
++				steps = 256;
++			horizon = std::min<int32_t>(horizon, steps * clkdiv - OVC0);
++		}
++	}
++
++	// Timer 1. In chained mode it is advanced by timer 0, whose own match is
++	// already a horizon, so only the independent clock sources are bounded.
++	if (!(TMM & 0x80))
++	{
++		const int clkdiv = ((TMM & 0x60) == 0x00) ? 4 : (((TMM & 0x60) == 0x20) ? 128 : 0);
++		if (clkdiv)
++		{
++			int steps = (int(TM1) - int(CNT1)) & 0xff;
++			if (steps == 0)
++				steps = 256;
++			horizon = std::min<int32_t>(horizon, steps * clkdiv - OVC1);
++		}
++	}
++
++	// ETIMER: ECNT advances every four cycles. ETM0/ETM1 matches raise
++	// INTFE0/INTFE1 and can change CO0/CO1; a wrap sets the overflow flag.
++	if (0x00 != (ETMM & 0x0c))
++	{
++		// Only the free-running internal clock is bounded here; the CI-gated
++		// and edge-sourced modes depend on an input line that can change
++		// asynchronously inside a window.
++		if (0x00 != (ETMM & 0x03))
++			return 0;
++
++		const uint32_t targets[3] = { uint32_t(ETM0), uint32_t(ETM1), 0 };
++		uint32_t steps = 0x10000;
++		for (uint32_t target : targets)
++		{
++			uint32_t distance = (target - uint32_t(ECNT)) & 0xffff;
++			if (distance == 0)
++				distance = 0x10000;
++			if (distance < steps)
++				steps = distance;
++		}
++		horizon = std::min<int32_t>(horizon, int32_t(steps) * 4 - OVCE);
++	}
++
++	// Timer F/F. Fixed-clock transitions are only unobservable when the
++	// MPC panel coalescing conditions hold; otherwise TO changes every cycle.
++	bool sio_advances = ((SMH & 0x03) == 0x01) || ((SMH & 0x03) == 0x02);
++	if (0x02 == (TMM & 0x03))
++	{
++		if (!(m_coalesce_unconnected_to_output && !(SMH & 0x03) && !(m_mcc & 0x10)))
++			return 0;
++		sio_advances = true;
++	}
++
++	// SIO: an edge can shift a bit out, sample RXD or start a transfer, so
++	// the next half-interval edge always bounds the window.
++	if (sio_advances)
++	{
++		static const int divider[] = { 2, 384 / 3, 24 / 3, 2 };
++		static const int prescale[] = { 1, 1, 16, 64 };
++		const int interval = divider[SMH & 0x03] * prescale[SML & 0x03];
++		horizon = std::min<int32_t>(horizon, (interval / 2) - OVCS);
++	}
++
++	// ADC. The analog sample is taken on the first call after a conversion
++	// completes, so that boundary is kept exact, as is the completion itself
++	// (it writes CR and can raise INTFAD) and any converter reconfiguration.
++	if ((m_shdone == 0) || (PANM != ANM))
++		return 0;
++	horizon = std::min<int32_t>(horizon, m_adtot - m_adcnt + 1);
++
++	return (horizon > 0) ? horizon : 0;
++}
++
++void upd7810_device::handle_timers_core(int cycles)
++{
+ 	/**** TIMER 0 ****/
+ 	if (TMM & 0x10)         /* timer 0 upcounter reset ? */
+ 		CNT0 = 0;
+@@ -1807,6 +1938,19 @@
+ {
+ 	base_device_start();
+ 
++	if (const char *const histogram_path = std::getenv("MAME_MPC_PANEL_PC_HISTOGRAM"))
++	{
++		m_mpc_pc_histogram_path = histogram_path;
++		m_mpc_pc_histogram = std::make_unique<uint64_t[]>(1 << 16);
++	}
++	m_mpc_timer_fast = (std::getenv("MAME_MPC_PANEL_TIMER_FAST") != nullptr);
++	if (const char *const idle_stats = std::getenv("MAME_MPC_PANEL_IDLE_STATS"))
++	{
++		m_mpc_idle_stats = true;
++		const unsigned long head = strtoul(idle_stats, nullptr, 16);
++		m_mpc_idle_stats_head = (head > 1) ? uint16_t(head) : 0x014b;
++	}
++
+ 	MM = 8;
+ 	m_ram_view.select(0);
+ 
+@@ -2059,6 +2203,75 @@
+ 	m_ovc0 = ( ( TMM & 0x04 ) ? 16 * 8 : 8 ) * TM0;
+ }
+ 
++void upd7810_device::device_stop()
++{
++	if (m_mpc_pc_histogram)
++	{
++		FILE *const out = fopen(m_mpc_pc_histogram_path.c_str(), "wb");
++		if (out)
++		{
++			fwrite(m_mpc_pc_histogram.get(), sizeof(uint64_t), 1 << 16, out);
++			fclose(out);
++		}
++	}
++
++	if (m_mpc_timer_fast)
++		fprintf(stderr, "PANEL_TIMER_FAST hits=%llu materializes=%llu\n",
++				(unsigned long long)m_timer_fast_hits,
++				(unsigned long long)m_timer_materializes);
++
++	if (m_mpc_idle_stats)
++	{
++		fprintf(stderr, "PANEL_IDLE_STATS head=%04x visits=%llu reg_fixed=%llu reg_changed=%llu irq_accepted=%llu\n",
++				m_mpc_idle_stats_head,
++				(unsigned long long)m_mpc_stats_head_visits,
++				(unsigned long long)m_mpc_stats_reg_fixed,
++				(unsigned long long)m_mpc_stats_reg_changed,
++				(unsigned long long)m_mpc_stats_irq_accepted);
++		for (int slot = 0; slot < m_mpc_stats_delta_n; slot++)
++			fprintf(stderr, "PANEL_IDLE_STATS delta=%u count=%llu\n",
++					m_mpc_stats_delta_val[slot],
++					(unsigned long long)m_mpc_stats_delta_cnt[slot]);
++		static const char *const vector_names[8] =
++				{ "v00", "nmi04", "timer08", "v0c", "int10", "etimer18", "adc20", "serial28" };
++		for (int v = 0; v < 8; v++)
++			if (m_mpc_stats_irq_by_vector[v])
++				fprintf(stderr, "PANEL_IDLE_STATS irq_%s=%llu\n",
++						vector_names[v], (unsigned long long)m_mpc_stats_irq_by_vector[v]);
++	}
++}
++
++void upd7810_device::mpc_idle_stats_head_visit()
++{
++	const uint64_t now = total_cycles();
++	const uint16_t regs[12] =
++	{
++		uint16_t(m_psw), m_ea.w.l, m_va.w.l, m_bc.w.l, m_de.w.l, m_hl.w.l,
++		m_ea2.w.l, m_va2.w.l, m_bc2.w.l, m_de2.w.l, m_hl2.w.l, m_sp.w.l
++	};
++
++	m_mpc_stats_head_visits++;
++	if (m_mpc_stats_have_prev)
++	{
++		const uint32_t delta = uint32_t(now - m_mpc_stats_head_prev_cycles);
++		int slot = 0;
++		while ((slot < m_mpc_stats_delta_n) && (m_mpc_stats_delta_val[slot] != delta))
++			slot++;
++		if (slot == m_mpc_stats_delta_n && m_mpc_stats_delta_n < 16)
++			m_mpc_stats_delta_val[m_mpc_stats_delta_n++] = delta;
++		if (slot < 16)
++			m_mpc_stats_delta_cnt[slot]++;
++
++		if (0 == memcmp(regs, m_mpc_stats_regs, sizeof(regs)))
++			m_mpc_stats_reg_fixed++;
++		else
++			m_mpc_stats_reg_changed++;
++	}
++	memcpy(m_mpc_stats_regs, regs, sizeof(regs));
++	m_mpc_stats_head_prev_cycles = now;
++	m_mpc_stats_have_prev = true;
++}
++
+ void upd7810_device::execute_run()
+ {
+ 	do
+@@ -2076,6 +2289,10 @@
+ 		int cc;
+ 
+ 		PPC = PC;
++		if (UNEXPECTED(m_mpc_pc_histogram != nullptr))
++			m_mpc_pc_histogram[PC]++;
++		if (UNEXPECTED(m_mpc_idle_stats) && (PC == m_mpc_idle_stats_head))
++			mpc_idle_stats_head_visit();
+ 		debugger_instruction_hook(PC);
+ 
+ 		RDOP(OP);
+@@ -2145,6 +2362,12 @@
+ 		upd7810_take_irq();
+ 		m_iff = m_iff_pending;
+ 	} while (m_icount > 0);
++
++	// Nothing observable is pending at this point (the horizon has not been
++	// reached), but leaving the timeslice with counters advanced keeps save
++	// states and debugger reads straightforward.
++	if (UNEXPECTED(m_mpc_timer_fast))
++		timer_materialize();
+ }
+ 
+ void upd7801_device::execute_set_input(int irqline, int state)
+--- a/src/devices/cpu/upd7810/upd7810_opcodes.cpp
++++ b/src/devices/cpu/upd7810/upd7810_opcodes.cpp
+@@ -832,24 +832,28 @@
+ /* 48 c0: 0100 1000 1100 0000 */
+ void upd7810_device::DMOV_EA_ECNT()
+ {
++	timer_read_barrier();
+ 	EA = ECNT;
+ }
+ 
+ /* 48 c1: 0100 1000 1100 0001 */
+ void upd7810_device::DMOV_EA_ECPT()
+ {
++	timer_read_barrier();
+ 	EA = ECPT;
+ }
+ 
+ /* 48 d2: 0100 1000 1101 0010 */
+ void upd7810_device::DMOV_ETM0_EA()
+ {
++	timer_write_barrier();
+ 	ETM0 = EA;
+ }
+ 
+ /* 48 d3: 0100 1000 1101 0011 */
+ void upd7810_device::DMOV_ETM1_EA()
+ {
++	timer_write_barrier();
+ 	ETM1 = EA;
+ }
+ 
+@@ -931,30 +935,35 @@
+ /* 4c d9: 0100 1100 1101 1001 */
+ void upd7810_device::MOV_A_RXB()
+ {
++	timer_read_barrier();
+ 	A = RXB;
+ }
+ 
+ /* 4c e0: 0100 1100 1110 0000 */
+ void upd7810_device::MOV_A_CR0()
+ {
++	timer_read_barrier();
+ 	A = CR[0];
+ }
+ 
+ /* 4c e1: 0100 1100 1110 0001 */
+ void upd7810_device::MOV_A_CR1()
+ {
++	timer_read_barrier();
+ 	A = CR[1];
+ }
+ 
+ /* 4c e2: 0100 1100 1110 0010 */
+ void upd7810_device::MOV_A_CR2()
+ {
++	timer_read_barrier();
+ 	A = CR[2];
+ }
+ 
+ /* 4c e3: 0100 1100 1110 0011 */
+ void upd7810_device::MOV_A_CR3()
+ {
++	timer_read_barrier();
+ 	A = CR[3];
+ }
+ 
+@@ -1004,24 +1013,28 @@
+ /* 4d c8: 0100 1101 1100 1000 */
+ void upd7810_device::MOV_ANM_A()
+ {
++	timer_write_barrier();
+ 	ANM = A;
+ }
+ 
+ /* 4d c9: 0100 1101 1100 1001 */
+ void upd7810_device::MOV_SMH_A()
+ {
++	timer_write_barrier();
+ 	write_smh(A);
+ }
+ 
+ /* 4d ca: 0100 1101 1100 1010 */
+ void upd7810_device::MOV_SML_A()
+ {
++	timer_write_barrier();
+ 	SML = A;
+ }
+ 
+ /* 4d cb: 0100 1101 1100 1011 */
+ void upd7810_device::MOV_EOM_A()
+ {
++	timer_write_barrier();
+ 	EOM = A;
+ 	upd7810_write_EOM();
+ }
+@@ -1029,12 +1042,14 @@
+ /* 4d cc: 0100 1101 1100 1100 */
+ void upd7810_device::MOV_ETMM_A()
+ {
++	timer_write_barrier();
+ 	ETMM = A;
+ }
+ 
+ /* 4d cd: 0100 1101 1100 1101 */
+ void upd7810_device::MOV_TMM_A()
+ {
++	timer_write_barrier();
+ 	TMM = A;
+ }
+ 
+@@ -1097,6 +1112,7 @@
+ /* 4d d8: 0100 1101 1101 1000 */
+ void upd7810_device::MOV_TXB_A()
+ {
++	timer_write_barrier();
+ 	TXB = A;
+ 	upd7810_write_TXB();
+ }
+@@ -1104,12 +1120,14 @@
+ /* 4d da: 0100 1101 1101 1010 */
+ void upd7810_device::MOV_TM0_A()
+ {
++	timer_write_barrier();
+ 	TM0 = A;
+ }
+ 
+ /* 4d db: 0100 1101 1101 1011 */
+ void upd7810_device::MOV_TM1_A()
+ {
++	timer_write_barrier();
+ 	TM1 = A;
+ }
+ 
+@@ -4084,12 +4102,14 @@
+ /* 64 80: 0110 0100 1000 0000 xxxx xxxx */
+ void upd7810_device::MVI_ANM_xx()
+ {
++	timer_write_barrier();
+ 	RDOPARG( ANM );
+ }
+ 
+ /* 64 81: 0110 0100 1000 0001 xxxx xxxx */
+ void upd7810_device::MVI_SMH_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 
+ 	RDOPARG( imm );
+@@ -4099,6 +4119,7 @@
+ /* 64 83: 0110 0100 1000 0011 xxxx xxxx */
+ void upd7810_device::MVI_EOM_xx()
+ {
++	timer_write_barrier();
+ 	RDOPARG( EOM );
+ 	upd7810_write_EOM();
+ }
+@@ -4106,12 +4127,14 @@
+ /* 64 85: 0110 0100 1000 0101 xxxx xxxx */
+ void upd7810_device::MVI_TMM_xx()
+ {
++	timer_write_barrier();
+ 	RDOPARG( TMM );
+ }
+ 
+ /* 64 88: 0110 0100 1000 1000 xxxx xxxx */
+ void upd7810_device::ANI_ANM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 
+ 	RDOPARG( imm );
+@@ -4122,6 +4145,7 @@
+ /* 64 89: 0110 0100 1000 1001 xxxx xxxx */
+ void upd7810_device::ANI_SMH_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 
+ 	RDOPARG( imm );
+@@ -4132,6 +4156,7 @@
+ /* 64 8b: 0110 0100 1000 1011 xxxx xxxx */
+ void upd7810_device::ANI_EOM_xx()
+ {
++	timer_write_barrier();
+ 	/* only bits #1 and #5 can be read */
+ 	uint8_t eom = EOM & 0x22;
+ 	uint8_t imm;
+@@ -4146,6 +4171,7 @@
+ /* 64 8d: 0110 0100 1000 1101 xxxx xxxx */
+ void upd7810_device::ANI_TMM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 
+ 	RDOPARG( imm );
+@@ -4156,6 +4182,7 @@
+ /* 64 90: 0110 0100 1001 0000 xxxx xxxx */
+ void upd7810_device::XRI_ANM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 
+ 	RDOPARG( imm );
+@@ -4166,6 +4193,7 @@
+ /* 64 91: 0110 0100 1001 0001 xxxx xxxx */
+ void upd7810_device::XRI_SMH_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 
+ 	RDOPARG( imm );
+@@ -4176,6 +4204,7 @@
+ /* 64 93: 0110 0100 1001 0011 xxxx xxxx */
+ void upd7810_device::XRI_EOM_xx()
+ {
++	timer_write_barrier();
+ 	/* only bits #1 and #5 can be read */
+ 	uint8_t eom = EOM & 0x22;
+ 	uint8_t imm;
+@@ -4190,6 +4219,7 @@
+ /* 64 95: 0110 0100 1001 0101 xxxx xxxx */
+ void upd7810_device::XRI_TMM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 
+ 	RDOPARG( imm );
+@@ -4200,6 +4230,7 @@
+ /* 64 98: 0110 0100 1001 1000 xxxx xxxx */
+ void upd7810_device::ORI_ANM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 
+ 	RDOPARG( imm );
+@@ -4210,6 +4241,7 @@
+ /* 64 99: 0110 0100 1001 1001 xxxx xxxx */
+ void upd7810_device::ORI_SMH_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 
+ 	RDOPARG( imm );
+@@ -4220,6 +4252,7 @@
+ /* 64 9b: 0110 0100 1001 1011 xxxx xxxx */
+ void upd7810_device::ORI_EOM_xx()
+ {
++	timer_write_barrier();
+ 	/* only bits #1 and #5 can be read */
+ 	uint8_t eom = EOM & 0x22;
+ 	uint8_t imm;
+@@ -4234,6 +4267,7 @@
+ /* 64 9d: 0110 0100 1001 1101 xxxx xxxx */
+ void upd7810_device::ORI_TMM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 
+ 	RDOPARG( imm );
+@@ -4244,6 +4278,7 @@
+ /* 64 a0: 0110 0100 1010 0000 xxxx xxxx */
+ void upd7810_device::ADINC_ANM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4257,6 +4292,7 @@
+ /* 64 a1: 0110 0100 1010 0001 xxxx xxxx */
+ void upd7810_device::ADINC_SMH_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4270,6 +4306,7 @@
+ /* 64 a3: 0110 0100 1010 0011 xxxx xxxx */
+ void upd7810_device::ADINC_EOM_xx()
+ {
++	timer_write_barrier();
+ 	/* only bits #1 and #5 can be read */
+ 	uint8_t eom = EOM & 0x22;
+ 	uint8_t tmp, imm;
+@@ -4287,6 +4324,7 @@
+ /* 64 a5: 0110 0100 1010 0101 xxxx xxxx */
+ void upd7810_device::ADINC_TMM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4354,6 +4392,7 @@
+ /* 64 b0: 0110 0100 1011 0000 xxxx xxxx */
+ void upd7810_device::SUINB_ANM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4366,6 +4405,7 @@
+ /* 64 b1: 0110 0100 1011 0001 xxxx xxxx */
+ void upd7810_device::SUINB_SMH_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4378,6 +4418,7 @@
+ /* 64 b3: 0110 0100 1011 0011 xxxx xxxx */
+ void upd7810_device::SUINB_EOM_xx()
+ {
++	timer_write_barrier();
+ 	/* only bits #1 and #5 can be read */
+ 	uint8_t eom = EOM & 0x22;
+ 	uint8_t tmp, imm;
+@@ -4393,6 +4434,7 @@
+ /* 64 b5: 0110 0100 1011 0101 xxxx xxxx */
+ void upd7810_device::SUINB_TMM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4451,6 +4493,7 @@
+ /* 64 c0: 0110 0100 1100 0000 xxxx xxxx */
+ void upd7810_device::ADI_ANM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4463,6 +4506,7 @@
+ /* 64 c1: 0110 0100 1100 0001 xxxx xxxx */
+ void upd7810_device::ADI_SMH_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4475,6 +4519,7 @@
+ /* 64 c3: 0110 0100 1100 0011 xxxx xxxx */
+ void upd7810_device::ADI_EOM_xx()
+ {
++	timer_write_barrier();
+ 	/* only bits #1 and #5 can be read */
+ 	uint8_t eom = EOM & 0x22;
+ 	uint8_t tmp, imm;
+@@ -4490,6 +4535,7 @@
+ /* 64 c5: 0110 0100 1100 0101 xxxx xxxx */
+ void upd7810_device::ADI_TMM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4544,6 +4590,7 @@
+ /* 64 d0: 0110 0100 1101 0000 xxxx xxxx */
+ void upd7810_device::ACI_ANM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4556,6 +4603,7 @@
+ /* 64 d1: 0110 0100 1101 0001 xxxx xxxx */
+ void upd7810_device::ACI_SMH_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4568,6 +4616,7 @@
+ /* 64 d3: 0110 0100 1101 0011 xxxx xxxx */
+ void upd7810_device::ACI_EOM_xx()
+ {
++	timer_write_barrier();
+ 	/* only bits #1 and #5 can be read */
+ 	uint8_t eom = EOM & 0x22;
+ 	uint8_t tmp, imm;
+@@ -4583,6 +4632,7 @@
+ /* 64 d5: 0110 0100 1101 0101 xxxx xxxx */
+ void upd7810_device::ACI_TMM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4637,6 +4687,7 @@
+ /* 64 e0: 0110 0100 1110 0000 xxxx xxxx */
+ void upd7810_device::SUI_ANM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4648,6 +4699,7 @@
+ /* 64 e1: 0110 0100 1110 0001 xxxx xxxx */
+ void upd7810_device::SUI_SMH_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4659,6 +4711,7 @@
+ /* 64 e3: 0110 0100 1110 0011 xxxx xxxx */
+ void upd7810_device::SUI_EOM_xx()
+ {
++	timer_write_barrier();
+ 	/* only bits #1 and #5 can be read */
+ 	uint8_t eom = EOM & 0x22;
+ 	uint8_t tmp, imm;
+@@ -4673,6 +4726,7 @@
+ /* 64 e5: 0110 0100 1110 0101 xxxx xxxx */
+ void upd7810_device::SUI_TMM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4730,6 +4784,7 @@
+ /* 64 f0: 0110 0100 1111 0000 xxxx xxxx */
+ void upd7810_device::SBI_ANM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4741,6 +4796,7 @@
+ /* 64 f1: 0110 0100 1111 0001 xxxx xxxx */
+ void upd7810_device::SBI_SMH_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -4752,6 +4808,7 @@
+ /* 64 f3: 0110 0100 1111 0011 xxxx xxxx */
+ void upd7810_device::SBI_EOM_xx()
+ {
++	timer_write_barrier();
+ 	/* only bits #1 and #5 can be read */
+ 	uint8_t eom = EOM & 0x22;
+ 	uint8_t tmp, imm;
+@@ -4766,6 +4823,7 @@
+ /* 64 f5: 0110 0100 1111 0101 xxxx xxxx */
+ void upd7810_device::SBI_TMM_xx()
+ {
++	timer_write_barrier();
+ 	uint8_t tmp, imm;
+ 
+ 	RDOPARG( imm );
+@@ -8716,6 +8774,7 @@
+ /* 58: 0101 1000 bbbb bbbb (7807 only) */
+ void upd7810_device::SETB()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 	int bit;
+ 
+@@ -8766,6 +8825,7 @@
+ /* 5b: 0101 1011 bbbb bbbb (7807 only) */
+ void upd7810_device::CLR()
+ {
++	timer_write_barrier();
+ 	uint8_t imm;
+ 	int bit;
+ 

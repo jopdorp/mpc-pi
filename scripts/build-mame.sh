@@ -52,6 +52,7 @@ mame_patches=(
     "$repo_root/patches/mame/0038-l7a1045-direct-wave-ram-window.patch"
     "$repo_root/patches/mame/0039-mpc2000xl-lcd-frame-export.patch"
     "$repo_root/patches/mame/0040-mpc2000xl-v53-wait-service-hles.patch"
+    "$repo_root/patches/mame/0041-upd7810-timer-event-countdown.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then

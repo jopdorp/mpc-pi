@@ -32,6 +32,7 @@ midi_clock_mode=${MPC_MIDI_CLOCK_MODE:-}
 v53_status_mode=${MPC_V53_STATUS_MODE:-accurate}
 v53_event_service_mode=${MPC_V53_EVENT_SERVICE_MODE:-accurate}
 v53_feed_flag_mode=${MPC_V53_FEED_FLAG_MODE:-accurate}
+panel_timer_countdown_mode=${MPC_PANEL_TIMER_COUNTDOWN:-accurate}
 v53_tick_read_mode=${MPC_V53_TICK_READ_MODE:-accurate}
 v53_dispatch_mode=${MPC_V53_DISPATCH_MODE:-accurate}
 v53_divide_mode=${MPC_V53_DIVIDE_MODE:-accurate}
@@ -233,6 +234,25 @@ case "$v53_tick_read_mode" in
         ;;
     *)
         printf 'error: MPC_V53_TICK_READ_MODE must be accurate or hle, got %s\n' "$v53_tick_read_mode" >&2
+        exit 2
+        ;;
+esac
+
+panel_timer_countdown_unset=()
+panel_timer_countdown_environment=()
+case "$panel_timer_countdown_mode" in
+    accurate)
+        panel_timer_countdown_unset=(-u MAME_MPC_PANEL_TIMER_FAST)
+        ;;
+    countdown)
+        if [[ "$system_name" != mpc2000xl ]]; then
+            printf 'error: MPC_PANEL_TIMER_COUNTDOWN=countdown is only supported by mpc2000xl\n' >&2
+            exit 2
+        fi
+        panel_timer_countdown_environment=(MAME_MPC_PANEL_TIMER_FAST=1)
+        ;;
+    *)
+        printf 'error: MPC_PANEL_TIMER_COUNTDOWN must be accurate or countdown, got %s\n' "$panel_timer_countdown_mode" >&2
         exit 2
         ;;
 esac
@@ -571,11 +591,12 @@ printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, window-resolution
     "$window_resolution" "$artwork_resolution" "$filter_mode" "$gl_vbo"
 
 exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
-    env "${sound_cadence_unset[@]}" "${v53_fetch_unset[@]}" "${v53_data_unset[@]}" "${v53_idle_unset[@]}" "${dsp_read_unset[@]}" "${midi_unset_environment[@]}" \
+    env "${panel_timer_countdown_unset[@]}" "${sound_cadence_unset[@]}" "${v53_fetch_unset[@]}" "${v53_data_unset[@]}" "${v53_idle_unset[@]}" "${dsp_read_unset[@]}" "${midi_unset_environment[@]}" \
     "${clock_environment[@]}" "${panel_environment[@]}" \
     "${panel_timer_environment[@]}" "${midi_clock_environment[@]}" "${midi_environment[@]}" \
     "${v53_status_environment[@]}" "${v53_event_service_environment[@]}" \
     "${v53_feed_flag_environment[@]}" "${v53_tick_read_environment[@]}" \
+    "${panel_timer_countdown_environment[@]}" \
     "${v53_dispatch_environment[@]}" "${v53_divide_environment[@]}" \
     "${lcd_update_environment[@]}" \
     "${sound_cadence_environment[@]}" \
