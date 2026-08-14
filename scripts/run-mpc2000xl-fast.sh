@@ -42,6 +42,11 @@ export MPC_V53_FETCH_MODE=${MPC_V53_FETCH_MODE:-window}
 # Exact idle-iteration skip of the OS main scheduler loop: PCM-exact with
 # hundreds of thousands of skips, zero live underruns, +26.4% average speed.
 export MPC_V53_IDLE_MODE=${MPC_V53_IDLE_MODE:-skip}
+# Wait-service HLEs for the firmware feed-flag (BRK 92) and tick-read
+# (BRK 77) handlers: byte-validated substitution with empirically measured
+# cycle charges (V53_ISR23_MEASURE). PCM-exact, -0.86% host instructions.
+export MPC_V53_FEED_FLAG_MODE=${MPC_V53_FEED_FLAG_MODE:-hle}
+export MPC_V53_TICK_READ_MODE=${MPC_V53_TICK_READ_MODE:-hle}
 # One host sound update per half quantum: exactly 16 frames at 44.1 kHz/q32, so
 # a PipeWire callback consumes exactly two producer updates instead of a
 # drifting 2.177. On a marginal deadline (LP-E cores at RR1) this halved
@@ -89,6 +94,10 @@ require_binary_capability()
     require_binary_capability MAME_MPC_V53_FETCH_WINDOW MPC_V53_FETCH_MODE=window
 [[ "$MPC_V53_IDLE_MODE" != skip ]] || \
     require_binary_capability MAME_MPC_V53_IDLE_SKIP MPC_V53_IDLE_MODE=skip
+[[ "$MPC_V53_FEED_FLAG_MODE" != hle ]] || \
+    require_binary_capability MAME_MPC_V53_BRK92_HLE MPC_V53_FEED_FLAG_MODE=hle
+[[ "$MPC_V53_TICK_READ_MODE" != hle ]] || \
+    require_binary_capability MAME_MPC_V53_BRK77_HLE MPC_V53_TICK_READ_MODE=hle
 
 setting_value()
 {

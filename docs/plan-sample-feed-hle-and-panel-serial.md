@@ -443,9 +443,38 @@ Expected return: uPD78C10 is ~13% of host cycles; the per-instruction
 | 0 | Phase A characterization (2.2) | 0.5 day | evidence | 1077% |
 | 1 | ~~Panel serial + batching~~ **failed, see 3.0** | done | 0% | 1077% |
 | 2 | Shadow mode (2.3) | 1 day | tooling | - |
-| 3 | `int 0x92`/`0x77`/`0xb6` HLEs | 0.5 day | +2-4% | ~1160-1210% |
+| 3 | ~~`int 0x92`/`0x77`/`0xb6` HLEs~~ **done as patch `0040`, see 2.1e** | done | -0.86% host instructions | measured |
 | 4 | `bb58` superblock | 1-2 days | +10-16% | ~1280-1400% |
 | 5 | Secondary regions (`1b180`, `1acc0`, `302c0`, `37e00`) - characterize, then HLE the top one or two by the same pattern | 1-2 days | +5-10% | ~1350-1500% |
+
+### 2.1e Wait-service HLEs: DONE (patch `0040`); `int 0x23` HLE premise falsified by measurement
+
+A cycle-delta diagnostic (`MAME_MPC_V53_ISR23_MEASURE`, part of `0040`) arms
+at the end of `nec_interrupt` and closes at the loop top when the pushed
+return PC/SP reappear, so it captures the interpreter's true post-dispatch
+cost including any prefetch stalls. Under the official 48 kHz render it
+settled the two open questions at once:
+
+- **`int 0x23` is not the 31.4 kHz feed.** The hardware ISR fired 42 times
+  in the whole render with a dead-constant delta of 55 cycles - exactly the
+  table sum the earlier HLE attempt used. The old `4fefb740` PCM divergence
+  was therefore an effects bug, not a cycle-model error, and with 42
+  invocations the HLE is worthless either way. Abandoned on data.
+- **The fc0 heat is the software `INT 92` service** (2.49M guest
+  instructions, 3.09% of dispatches, ~250k calls from the feed-wait loop at
+  `0xbb5d`), plus `INT 77` (522k instructions, 0.65%, hot site `0x302cb`).
+
+Both are now BRK88-pattern HLEs in patch `0040` (launcher
+`MPC_V53_FEED_FLAG_MODE=hle`, `MPC_V53_TICK_READ_MODE=hle`; fast preset
+enables both). Measured per-path deltas were dead-constant across the render
+- peek 78, consume 89, tick-read 65, all minus the caller's 24-cycle INT
+charge, all equal to the V33 table sums (no prefetch stalls in this handler
+family). Frozen PCM is bit-identical with both active, the measurement hook
+reproduces identical deltas and counts against the HLE path (cycle-perfect
+substitution), and a deterministic instruction-count A/B measured -0.86%
+host instructions. One portability note: `install_write_tap` requires
+bus-aligned ranges, and both handlers start on odd addresses - the taps are
+widened to word bounds (a boundary-byte write just forces revalidation).
 
 ### 2.1d Feed-wait loop: DONE (third revision of 0037). DMA-ready poll: falsified
 

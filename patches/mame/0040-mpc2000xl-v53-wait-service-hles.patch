@@ -1,0 +1,453 @@
+--- a/src/devices/cpu/nec/nec.h
++++ b/src/devices/cpu/nec/nec.h
+@@ -31,6 +31,8 @@
+ 	// owning driver explicitly opts in.
+ 	void set_mpc2000xl_brk88_hle(bool enable) { m_mpc2000xl_brk88_hle_enabled = enable; }
+ 	void set_mpc2000xl_brkfd_hle(bool enable) { m_mpc2000xl_brkfd_hle_enabled = enable; }
++	void set_mpc2000xl_brk92_hle(bool enable) { m_mpc2000xl_brk92_hle_enabled = enable; }
++	void set_mpc2000xl_brk77_hle(bool enable) { m_mpc2000xl_brk77_hle_enabled = enable; }
+ 	void set_mpc2000xl_direct_dispatch(bool enable) { m_mpc2000xl_direct_dispatch = enable; }
+ 	void set_mpc2000xl_divide_superblock(bool enable) { m_mpc2000xl_divide_superblock_enabled = enable; }
+ 	static constexpr int IDLE_HEAD_COUNT = 3;
+@@ -53,7 +55,16 @@
+ 
+ 	// device_execute_interface overrides
+ 	virtual uint32_t execute_min_cycles() const noexcept override { return 1; }
+-	virtual uint32_t execute_max_cycles() const noexcept override { return m_mpc2000xl_brk88_hle_enabled ? 116 : (m_mpc2000xl_brkfd_hle_enabled ? 81 : 80); }
++	virtual uint32_t execute_max_cycles() const noexcept override
++	{
++		// Base 80, or the largest single-dispatch charge of any enabled
++		// firmware HLE (INT entry + handler lump + pushf).
++		uint32_t cycles = 80;
++		if (m_mpc2000xl_brk88_hle_enabled && (cycles < 116)) cycles = 116;
++		if (m_mpc2000xl_brkfd_hle_enabled && (cycles < 81)) cycles = 81;
++		if (m_mpc2000xl_brk92_hle_enabled && (cycles < 92)) cycles = 92;
++		return cycles;
++	}
+ 	virtual uint32_t execute_default_irq_vector(int inputnum) const noexcept override { return 0xff; }
+ 	virtual bool execute_input_edge_triggered(int inputnum) const noexcept override { return inputnum == INPUT_LINE_NMI; }
+ 	virtual void execute_run() override;
+@@ -131,12 +142,38 @@
+ 	bool m_mpc2000xl_brkfd_reported = false;
+ 	offs_t m_mpc2000xl_brkfd_cached_handler_start = 0;
+ 	memory_passthrough_handler m_mpc2000xl_brkfd_handler_tap;
++	bool m_mpc2000xl_brk92_hle_enabled = false;
++	bool m_mpc2000xl_brk92_handler_valid = false;
++	bool m_mpc2000xl_brk92_reported = false;
++	offs_t m_mpc2000xl_brk92_cached_handler_start = 0;
++	memory_passthrough_handler m_mpc2000xl_brk92_handler_tap;
++	bool m_mpc2000xl_brk77_hle_enabled = false;
++	bool m_mpc2000xl_brk77_handler_valid = false;
++	bool m_mpc2000xl_brk77_reported = false;
++	offs_t m_mpc2000xl_brk77_cached_handler_start = 0;
++	memory_passthrough_handler m_mpc2000xl_brk77_handler_tap;
+ 	bool m_mpc2000xl_divide_superblock_enabled = false;
+ 	bool m_mpc2000xl_divide_superblock_valid = false;
+ 	bool m_mpc2000xl_divide_superblock_reported = false;
+ 	offs_t m_mpc2000xl_divide_superblock_cached_start = 0;
+ 	memory_passthrough_handler m_mpc2000xl_divide_superblock_tap;
+ 
++	// Diagnostic: measure the interpreter's true cycle cost of the vector
++	// 0x23 sample-feed ISR (dispatch epilogue through IRET, including the
++	// prefetch stalls the timing tables omit). MAME_MPC_V53_ISR23_MEASURE.
++	bool m_isr23_measure = false;
++	bool m_isr23_meas_active = false;
++	uint64_t m_isr23_meas_entry = 0;
++	uint32_t m_isr23_meas_ret_pc = 0;
++	uint16_t m_isr23_meas_ret_sp = 0;
++	uint32_t m_isr23_meas_guard = 0;
++	uint8_t m_isr23_meas_key = 0;
++	uint64_t m_isr23_meas_samples = 0;
++	uint64_t m_isr23_meas_discards = 0;
++	uint32_t m_isr23_hist_delta[32] = {};
++	uint64_t m_isr23_hist_count[32] = {};
++	int m_isr23_hist_n = 0;
++
+ 	address_space *m_program;
+ 	memory_access<24, 0, 0, ENDIANNESS_LITTLE>::cache m_cache8;
+ 	memory_access<24, 1, 0, ENDIANNESS_LITTLE>::cache m_cache16;
+@@ -519,6 +556,14 @@
+ 	bool validate_mpc2000xl_brkfd_handler(offs_t handler_start);
+ 	void install_mpc2000xl_brkfd_write_tap(offs_t handler_start);
+ 	void invalidate_mpc2000xl_brkfd_handler();
++	bool mpc2000xl_brk92_hle(bool saved_tf);
++	bool validate_mpc2000xl_brk92_handler(offs_t handler_start);
++	void install_mpc2000xl_brk92_write_tap(offs_t handler_start);
++	void invalidate_mpc2000xl_brk92_handler();
++	bool mpc2000xl_brk77_hle(bool saved_tf);
++	bool validate_mpc2000xl_brk77_handler(offs_t handler_start);
++	void install_mpc2000xl_brk77_write_tap(offs_t handler_start);
++	void invalidate_mpc2000xl_brk77_handler();
+ 	bool mpc2000xl_divide_superblock();
+ 	bool validate_mpc2000xl_divide_superblock(offs_t code_start);
+ 	void install_mpc2000xl_divide_superblock_write_tap(offs_t code_start);
+--- a/src/devices/cpu/nec/nec.cpp
++++ b/src/devices/cpu/nec/nec.cpp
+@@ -399,6 +399,19 @@
+ 			fclose(out);
+ 		}
+ 	}
++
++	if (m_isr23_measure)
++	{
++		fprintf(stderr, "V53_ISR23_MEASURE samples=%llu discards=%llu\n",
++				(unsigned long long)m_isr23_meas_samples,
++				(unsigned long long)m_isr23_meas_discards);
++		static const char *const key_names[] = { "int23", "brk92-alz", "brk92-alnz", "brk77" };
++		for (int slot = 0; slot < m_isr23_hist_n; slot++)
++			fprintf(stderr, "V53_ISR23_MEASURE key=%s delta=%u count=%llu\n",
++					key_names[(m_isr23_hist_delta[slot] >> 24) & 3],
++					m_isr23_hist_delta[slot] & 0xffffff,
++					(unsigned long long)m_isr23_hist_count[slot]);
++	}
+ }
+ 
+ void nec_common_device::device_reset()
+@@ -430,6 +443,8 @@
+ 	m_rep_params = 0;
+ 	m_mpc2000xl_brk88_handler_valid = false;
+ 	m_mpc2000xl_brkfd_handler_valid = false;
++	m_mpc2000xl_brk92_handler_valid = false;
++	m_mpc2000xl_brk77_handler_valid = false;
+ 	m_mpc2000xl_divide_superblock_valid = false;
+ 
+ 	if (m_chip_type == V33_TYPE)
+@@ -461,12 +476,31 @@
+ 	dest_off = read_mem_word(int_num*4);
+ 	dest_seg = read_mem_word(int_num*4+2);
+ 
++	const uint16_t ret_ip = m_ip;
++	const uint16_t ret_ps = Sreg(PS);
+ 	PUSH(Sreg(PS));
+ 	PUSH(m_ip);
+ 	m_prev_ip = m_ip = (WORD)dest_off;
+ 	Sreg(PS) = (WORD)dest_seg;
+ 	CHANGE_PC;
+ 
++	if (UNEXPECTED(m_isr23_measure) &&
++		(((source == INT_IRQ) && (int_num == 0x23)) ||
++		 ((source == BRK) && ((int_num == 0x92) || (int_num == 0x77)))))
++	{
++		// Window opens after the architectural interrupt frame exists and the
++		// handler vector is loaded - exactly what an HLE would leave in place.
++		// For BRK sources the window also swallows the calling INT's 24-cycle
++		// charge (i_int runs CLK after nec_interrupt returns).
++		m_isr23_meas_active = true;
++		m_isr23_meas_entry = total_cycles();
++		m_isr23_meas_ret_pc = (uint32_t(ret_ps) << 4) + ret_ip;
++		m_isr23_meas_ret_sp = uint16_t(Wreg(SP) + 6);
++		m_isr23_meas_guard = 0;
++		m_isr23_meas_key = uint8_t(int_num == 0x23 ? 0 :
++				(int_num == 0x77 ? 3 : ((Breg(AL) == 0) ? 1 : 2)));
++	}
++
+ 	// Start the firmware-specific shortcut only after normal BRK entry has
+ 	// created the architectural interrupt frame and loaded the validated
+ 	// handler vector. The calling INT instruction still charges its 24-cycle
+@@ -477,6 +511,10 @@
+ 			mpc2000xl_brk88_hle(saved_tf);
+ 		else if (m_mpc2000xl_brkfd_hle_enabled && (int_num == 0xfd))
+ 			mpc2000xl_brkfd_hle(saved_tf);
++		else if (m_mpc2000xl_brk92_hle_enabled && (int_num == 0x92))
++			mpc2000xl_brk92_hle(saved_tf);
++		else if (m_mpc2000xl_brk77_hle_enabled && (int_num == 0x77))
++			mpc2000xl_brk77_hle(saved_tf);
+ 	}
+ }
+ 
+@@ -728,6 +766,212 @@
+ 	return true;
+ }
+ 
++bool nec_common_device::validate_mpc2000xl_brk92_handler(offs_t handler_start)
++{
++	static constexpr u8 expected_handler[] =
++	{
++		0x1e, 0x55, 0xbd, 0xe7, 0x0f, 0x8e, 0xdd, 0x3c,
++		0x00, 0x75, 0x05, 0xc6, 0x06, 0xaf, 0x11, 0x00,
++		0xa0, 0xaf, 0x11, 0x5d, 0x1f, 0xcf
++	};
++
++	for (unsigned index = 0; index < std::size(expected_handler); ++index)
++		if (read_mem_byte(0x0fe3 + index) != expected_handler[index])
++			return false;
++
++	m_mpc2000xl_brk92_cached_handler_start = handler_start;
++	m_mpc2000xl_brk92_handler_valid = true;
++	install_mpc2000xl_brk92_write_tap(handler_start);
++	if (!m_mpc2000xl_brk92_reported)
++	{
++		osd_printf_info("%s: MPC2000XL BRK 92 feed-flag service HLE active\n", tag());
++		m_mpc2000xl_brk92_reported = true;
++	}
++	return true;
++}
++
++void nec_common_device::install_mpc2000xl_brk92_write_tap(offs_t handler_start)
++{
++	// The handler starts on an odd address; the tap must be bus-aligned, so
++	// widen to word bounds. A boundary-byte write only forces revalidation.
++	m_mpc2000xl_brk92_handler_tap.remove();
++	m_mpc2000xl_brk92_handler_tap = m_program->install_write_tap(
++		handler_start & ~offs_t(1), (handler_start + 0x15) | 1,
++		"mpc2000xl_brk92_handler",
++		[this](offs_t, u16 &, u16) { invalidate_mpc2000xl_brk92_handler(); },
++		&m_mpc2000xl_brk92_handler_tap);
++}
++
++void nec_common_device::invalidate_mpc2000xl_brk92_handler()
++{
++	m_mpc2000xl_brk92_handler_valid = false;
++}
++
++bool nec_common_device::mpc2000xl_brk92_hle(bool saved_tf)
++{
++	static constexpr u32 flag_address = (0x0fe7U << 4) + 0x11af;
++
++	if (!m_mpc2000xl_brk92_hle_enabled || !m_mpc2000xl_rom_valid ||
++		(m_chip_type != V33_TYPE) || (Sreg(PS) != 0x0000) || (m_ip != 0x0fe3) ||
++		m_rep_params || m_seg_prefix || m_no_interrupt || m_halted ||
++		(m_pending_irq & NMI_IRQ) ||
++		(machine().debug_flags & (DEBUG_FLAG_ENABLED | DEBUG_FLAG_CALL_HOOK)) || saved_tf)
++		return false;
++	if (m_icount < (24 + 65))
++		return false;
++
++	const offs_t address_mask = m_program->addrmask();
++	const offs_t handler_start = v33_translate(0x0fe3) & address_mask;
++	if (handler_start > (address_mask - 0x15))
++		return false;
++	const offs_t handler_end = handler_start + 0x15;
++	const offs_t stack_start = v33_translate(
++		(u32(Sreg(SS)) << 4) + u16(Wreg(SP) - 4)) & address_mask;
++	const offs_t stack_end = v33_translate(
++		(u32(Sreg(SS)) << 4) + u16(Wreg(SP) - 1)) & address_mask;
++	const offs_t flag_start = v33_translate(flag_address) & address_mask;
++	if (((stack_start >= handler_start) && (stack_start <= handler_end)) ||
++		((stack_end >= handler_start) && (stack_end <= handler_end)) ||
++		((flag_start >= handler_start) && (flag_start <= handler_end)))
++		return false;
++
++	if (m_mpc2000xl_brk92_handler_valid &&
++		(handler_start != m_mpc2000xl_brk92_cached_handler_start))
++		invalidate_mpc2000xl_brk92_handler();
++
++	if (!m_mpc2000xl_brk92_handler_valid && !validate_mpc2000xl_brk92_handler(handler_start))
++		return false;
++
++	// Preserve every architecturally visible side effect of 0000:0fe3-0ff8:
++	// the transient saved-DS/BP stack writes, the conditional flag clear
++	// when called with AL=0, and the flag readback into AL.
++	PUSH(Sreg(DS0));
++	PUSH(Wreg(BP));
++	Wreg(BP) = 0x0fe7;
++	Sreg(DS0) = 0x0fe7;
++	const bool consume = (Breg(AL) == 0);
++	if (consume)
++		write_mem_byte(flag_address, 0);
++	Breg(AL) = read_mem_byte(flag_address);
++
++	POP(Wreg(BP));
++	POP(Sreg(DS0));
++	POP(m_ip);
++	POP(Sreg(PS));
++	i_popf();
++	CHANGE_PC;
++
++	// Empirically measured on the interpreter (V53_ISR23_MEASURE): 65
++	// cycles on the clearing path, 54 on the peek path, both exclusive of
++	// the calling INT's 24-cycle charge and equal to the plain table sums
++	// (this handler has no prefetch stalls). i_popf() charged five.
++	const int handler_cycles = consume ? 65 : 54;
++	CLK(handler_cycles - 5);
++	m_prev_ip = 0x0ff8;
++	m_no_interrupt = 0;
++	m_prefetch_count = 0;
++	m_prefetch_reset = 1;
++	return true;
++}
++
++bool nec_common_device::validate_mpc2000xl_brk77_handler(offs_t handler_start)
++{
++	static constexpr u8 expected_handler[] =
++	{
++		0x1e, 0xbd, 0xe7, 0x0f, 0x8e, 0xdd, 0xa1, 0x8a,
++		0x0b, 0x1f, 0xcf
++	};
++
++	for (unsigned index = 0; index < std::size(expected_handler); ++index)
++		if (read_mem_byte(0x169b + index) != expected_handler[index])
++			return false;
++
++	m_mpc2000xl_brk77_cached_handler_start = handler_start;
++	m_mpc2000xl_brk77_handler_valid = true;
++	install_mpc2000xl_brk77_write_tap(handler_start);
++	if (!m_mpc2000xl_brk77_reported)
++	{
++		osd_printf_info("%s: MPC2000XL BRK 77 tick-read service HLE active\n", tag());
++		m_mpc2000xl_brk77_reported = true;
++	}
++	return true;
++}
++
++void nec_common_device::install_mpc2000xl_brk77_write_tap(offs_t handler_start)
++{
++	// The handler starts on an odd address; the tap must be bus-aligned, so
++	// widen to word bounds. A boundary-byte write only forces revalidation.
++	m_mpc2000xl_brk77_handler_tap.remove();
++	m_mpc2000xl_brk77_handler_tap = m_program->install_write_tap(
++		handler_start & ~offs_t(1), (handler_start + 0x0a) | 1,
++		"mpc2000xl_brk77_handler",
++		[this](offs_t, u16 &, u16) { invalidate_mpc2000xl_brk77_handler(); },
++		&m_mpc2000xl_brk77_handler_tap);
++}
++
++void nec_common_device::invalidate_mpc2000xl_brk77_handler()
++{
++	m_mpc2000xl_brk77_handler_valid = false;
++}
++
++bool nec_common_device::mpc2000xl_brk77_hle(bool saved_tf)
++{
++	static constexpr u32 tick_address = (0x0fe7U << 4) + 0x0b8a;
++
++	if (!m_mpc2000xl_brk77_hle_enabled || !m_mpc2000xl_rom_valid ||
++		(m_chip_type != V33_TYPE) || (Sreg(PS) != 0x0000) || (m_ip != 0x169b) ||
++		m_rep_params || m_seg_prefix || m_no_interrupt || m_halted ||
++		(m_pending_irq & NMI_IRQ) ||
++		(machine().debug_flags & (DEBUG_FLAG_ENABLED | DEBUG_FLAG_CALL_HOOK)) || saved_tf)
++		return false;
++	if (m_icount < (24 + 41))
++		return false;
++
++	const offs_t address_mask = m_program->addrmask();
++	const offs_t handler_start = v33_translate(0x169b) & address_mask;
++	if (handler_start > (address_mask - 0x0a))
++		return false;
++	const offs_t handler_end = handler_start + 0x0a;
++	const offs_t stack_start = v33_translate(
++		(u32(Sreg(SS)) << 4) + u16(Wreg(SP) - 2)) & address_mask;
++	const offs_t stack_end = v33_translate(
++		(u32(Sreg(SS)) << 4) + u16(Wreg(SP) - 1)) & address_mask;
++	if (((stack_start >= handler_start) && (stack_start <= handler_end)) ||
++		((stack_end >= handler_start) && (stack_end <= handler_end)))
++		return false;
++
++	if (m_mpc2000xl_brk77_handler_valid &&
++		(handler_start != m_mpc2000xl_brk77_cached_handler_start))
++		invalidate_mpc2000xl_brk77_handler();
++
++	if (!m_mpc2000xl_brk77_handler_valid && !validate_mpc2000xl_brk77_handler(handler_start))
++		return false;
++
++	// Preserve every architecturally visible side effect of 0000:169b-16a5.
++	// The firmware handler deliberately leaves BP loaded with its data
++	// segment and returns the tick counter in AW.
++	PUSH(Sreg(DS0));
++	Wreg(BP) = 0x0fe7;
++	Sreg(DS0) = 0x0fe7;
++	Wreg(AW) = read_mem_word(tick_address);
++
++	POP(Sreg(DS0));
++	POP(m_ip);
++	POP(Sreg(PS));
++	i_popf();
++	CHANGE_PC;
++
++	// Empirically measured 41 cycles (V53_ISR23_MEASURE), exclusive of the
++	// calling INT's 24-cycle charge and equal to the plain table sum.
++	// i_popf() charged five.
++	CLK(41 - 5);
++	m_prev_ip = 0x16a5;
++	m_no_interrupt = 0;
++	m_prefetch_count = 0;
++	m_prefetch_reset = 1;
++	return true;
++}
++
+ bool nec_common_device::validate_mpc2000xl_divide_superblock(offs_t code_start)
+ {
+ 	static constexpr u8 expected_code[] =
+@@ -1371,6 +1615,8 @@
+ 	m_idle_wseq_remaining = std::getenv("MAME_MPC_V53_WSEQ") ? 400 : 0;
+ 	m_data_window_enable = (m_chip_type == V33_TYPE)
+ 			&& (std::getenv("MAME_MPC_V53_DATA_WINDOW") != nullptr);
++	m_isr23_measure = (m_chip_type == V33_TYPE)
++			&& (std::getenv("MAME_MPC_V53_ISR23_MEASURE") != nullptr);
+ 	if (const char *const histogram_path = std::getenv("MAME_MPC_V53_PC_HISTOGRAM"))
+ 	{
+ 		m_pc_histogram_path = histogram_path;
+@@ -1392,6 +1638,7 @@
+ 		osd_printf_info("%s: MPC2000XL V53 direct opcode dispatch active\n", tag());
+ 	}
+ 	if (m_mpc2000xl_brk88_hle_enabled || m_mpc2000xl_brkfd_hle_enabled ||
++		m_mpc2000xl_brk92_hle_enabled || m_mpc2000xl_brk77_hle_enabled ||
+ 		m_mpc2000xl_divide_superblock_enabled)
+ 	{
+ 		util::sha1_t expected_rom_sha1;
+@@ -1408,6 +1655,12 @@
+ 			if (m_mpc2000xl_brkfd_hle_enabled)
+ 				machine().save().register_postload(
+ 					save_prepost_delegate(FUNC(nec_common_device::invalidate_mpc2000xl_brkfd_handler), this));
++			if (m_mpc2000xl_brk92_hle_enabled)
++				machine().save().register_postload(
++					save_prepost_delegate(FUNC(nec_common_device::invalidate_mpc2000xl_brk92_handler), this));
++			if (m_mpc2000xl_brk77_hle_enabled)
++				machine().save().register_postload(
++					save_prepost_delegate(FUNC(nec_common_device::invalidate_mpc2000xl_brk77_handler), this));
+ 			if (m_mpc2000xl_divide_superblock_enabled)
+ 				machine().save().register_postload(
+ 					save_prepost_delegate(FUNC(nec_common_device::invalidate_mpc2000xl_divide_superblock), this));
+@@ -1562,6 +1815,30 @@
+ 	while(m_icount>0)
+ 	{
+ 		m_prev_ip = m_ip;
++		if (UNEXPECTED(m_isr23_meas_active))
++		{
++			// The previous instruction's do_prefetch has charged, so at the
++			// return PC/SP every ISR cycle (stalls included) is accounted.
++			if ((PC() == m_isr23_meas_ret_pc) && (Wreg(SP) == m_isr23_meas_ret_sp))
++			{
++				const uint32_t delta = uint32_t(total_cycles() - m_isr23_meas_entry)
++						| (uint32_t(m_isr23_meas_key) << 24);
++				int slot = 0;
++				while ((slot < m_isr23_hist_n) && (m_isr23_hist_delta[slot] != delta))
++					slot++;
++				if (slot == m_isr23_hist_n && m_isr23_hist_n < 32)
++					m_isr23_hist_delta[m_isr23_hist_n++] = delta;
++				if (slot < 32)
++					m_isr23_hist_count[slot]++;
++				m_isr23_meas_samples++;
++				m_isr23_meas_active = false;
++			}
++			else if (++m_isr23_meas_guard > 64)
++			{
++				m_isr23_meas_discards++;
++				m_isr23_meas_active = false;
++			}
++		}
+ 		if (UNEXPECTED(m_pc_histogram != nullptr))
+ 			m_pc_histogram[((u32(Sreg(PS)) << 4) + m_ip) & 0xfffff]++;
+ 		if (UNEXPECTED(m_idle_skip_enabled))
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -807,6 +807,10 @@
+ 	const bool brk88_hle = brk88_hle_mode && std::strcmp(brk88_hle_mode, "0");
+ 	const char *const brkfd_hle_mode = osd_getenv("MAME_MPC_V53_BRKFD_HLE");
+ 	const bool brkfd_hle = brkfd_hle_mode && std::strcmp(brkfd_hle_mode, "0");
++	const char *const brk92_hle_mode = osd_getenv("MAME_MPC_V53_BRK92_HLE");
++	const bool brk92_hle = brk92_hle_mode && std::strcmp(brk92_hle_mode, "0");
++	const char *const brk77_hle_mode = osd_getenv("MAME_MPC_V53_BRK77_HLE");
++	const bool brk77_hle = brk77_hle_mode && std::strcmp(brk77_hle_mode, "0");
+ 	const char *const direct_dispatch_mode = osd_getenv("MAME_MPC_V53_DIRECT_DISPATCH");
+ 	const bool direct_dispatch = direct_dispatch_mode && std::strcmp(direct_dispatch_mode, "0");
+ 	const char *const divide_superblock_mode = osd_getenv("MAME_MPC_V53_DIVIDE_SUPERBLOCK");
+@@ -821,6 +825,8 @@
+ 	V53A(config, m_maincpu, 32_MHz_XTAL);
+ 	m_maincpu->set_mpc2000xl_brk88_hle(brk88_hle);
+ 	m_maincpu->set_mpc2000xl_brkfd_hle(brkfd_hle);
++	m_maincpu->set_mpc2000xl_brk92_hle(brk92_hle);
++	m_maincpu->set_mpc2000xl_brk77_hle(brk77_hle);
+ 	m_maincpu->set_mpc2000xl_direct_dispatch(direct_dispatch);
+ 	m_maincpu->set_mpc2000xl_divide_superblock(divide_superblock);
+ 	// OS v1.20 main scheduler loop head (RAM-resident); the skip is
