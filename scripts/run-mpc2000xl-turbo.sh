@@ -51,6 +51,14 @@ fi
 export MAME_MPC_MIDI_POLL_HZ=${MAME_MPC_MIDI_POLL_HZ:-8000}
 export MAME_MPC_DSP_DMA_TURBO=${MAME_MPC_DSP_DMA_TURBO:-8}
 
+# One host sound update per quarter quantum: 8 frames at 44.1 kHz/q32. The
+# PipeWire margin is one quantum plus one producer update, so this trims it
+# from 48 to 40 frames, 1.09 ms to 0.91 ms. Playback stayed free of underruns
+# on both the deployment cores and the marginal-deadline arm, but the boot
+# window degraded there (294 -> 360), so on a slower target revert to 2 at the
+# first sign of playback underruns.
+export MPC_SOUND_UPDATES_PER_QUANTUM=${MPC_SOUND_UPDATES_PER_QUANTUM:-4}
+
 # Deep CPU idle states cost more wake-up latency than anything left in the
 # emulator: C6 exits in ~140 us and C10 in ~310 us on a Core Ultra. Holding
 # /dev/cpu_dma_latency at 0 keeps the cores out of them for this session.

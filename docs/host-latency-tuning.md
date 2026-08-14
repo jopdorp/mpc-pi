@@ -18,8 +18,39 @@ A pad hit on an external controller reaches the speakers through these stages.
 | Firmware pad handling | emulated, compressed by emulation speed | - |
 | DSP DMA pacing | **not in the play path** (loading/sampling only) | `MAME_MPC_DSP_DMA_TURBO` (patch 0043) |
 | Sound update cadence | 0.36 ms at 16 frames | `MPC_SOUND_UPDATES_PER_QUANTUM` (patch 0034) |
-| PipeWire quantum plus margin | ~1.1 ms at 32/44100 | launcher forces the graph |
+| PipeWire quantum plus margin | 0.91 ms at 32/44100 with a 4x cadence | `MPC_SOUND_UPDATES_PER_QUANTUM` (patch 0034) |
 | DAC | ~1 ms | hardware |
+
+## Output margin and the resampler
+
+Two things in the output path are already as short as they usefully go.
+
+**No resampling happens.** The L7A1045 stream runs at `clock() / 768`, which
+with the verified 33.8688 MHz crystal is exactly 44,100 Hz, and the launcher
+forces the PipeWire graph to 44,100 as well. Rate conversion would add both
+filter delay and CPU; at the preset's own rate there is none. Running the
+graph at 48 kHz instead reintroduces a resampler, which is why the profiling
+runs in this project show `audio_resampler_lofi` and a live session does not.
+
+**The margin is one quantum plus one producer update.** With a 32-frame
+quantum, a 2x cadence gives 16-frame updates and a 48-frame margin (1.09 ms);
+a 4x cadence gives 8-frame updates and 40 frames (0.91 ms). The turbo preset
+uses 4x. Measured with the live PipeWire counters, splitting at the
+`realtime audio-clock pacing started` marker as the project's live gate
+requires:
+
+| Arm | Boot underruns | Playback underruns |
+|---|---|---|
+| Deployment cores, 2x | 2 | 0 |
+| Deployment cores, 4x | 0 | 0 |
+| Marginal deadline, 2x | 294 | 0 |
+| Marginal deadline, 4x | 360 | 0 |
+
+Playback is clean on every arm, so the shorter margin is safe here. The boot
+window degrading on the marginal arm is the warning sign for slower hardware:
+on a Cortex-A53 target, revert to `MPC_SOUND_UPDATES_PER_QUANTUM=2` at the
+first playback underrun. The boot figures themselves are not a fault - the
+accelerated boot is deliberately unpaced.
 
 ## The DSP DMA divider is not a latency fix
 
