@@ -123,3 +123,45 @@ so it doubles as the panel's keep-alive. A ramp of AN4 across `00`-`fe`
 produced `86 1d`, `86 29`, `86 36`, ... `86 7f` and wrapped with the sweep.
 The idle stream reads `86 00` only because the slider rests at zero, which is
 what made it look like a heartbeat in the first capture.
+
+## Pad velocity response, and the curve option
+
+The firmware's velocity-to-level mapping is heavily compressed at the top.
+Measured on the loaded `LT-KIT` program by injecting MIDI velocities and
+recording the stereo peak of each hit:
+
+| Velocity | Peak | Share of full scale | A linear response would give |
+|---|---|---|---|
+| 16 | 5,197 | 29.6% | 12.6% |
+| 48 | 13,854 | 79.0% | 37.8% |
+| 80 | 15,661 | 89.3% | 63.0% |
+| 112 | 17,226 | 98.2% | 88.2% |
+| 127 | 17,544 | 100% | 100% |
+
+Velocities 48 to 127 - most of the range anyone plays in - span only about
+two decibels, which is why hits feel indistinguishable above a light tap.
+
+This is not a program setting and not an artifact of the injection path.
+Parsing `LT-KIT.PGM` from the project image shows all three assigned pads at
+`VeloLevel = 100`, the maximum and the documented default, and the injection
+passes MIDI velocity through unchanged. The compression is the MPC2000XL's
+own response.
+
+`MAME_MPC_VELOCITY_CURVE` therefore offers deviation from the hardware rather
+than a correction of it:
+
+| Curve | Effect |
+|---|---|
+| `linear` | identity, the authentic response, and the default |
+| `soft` | gamma 0.6, louder soft hits, suits ghost notes |
+| `hard` | gamma 1.7, quieter soft hits, suits heavy hitters |
+| `compensated` | inverts the measured response so amplitude tracks velocity |
+| `fixed` | always full velocity, like the panel's Full Level key |
+
+`MAME_MPC_VELOCITY_GAMMA` sets an explicit exponent between 0.1 and 4.0.
+Measured with `compensated` active, the same ramp produced 12.2%, 38.3%,
+66.4%, 87.3% and 100%, within about three points of linear throughout, and
+widened the 48-to-127 span from two decibels to roughly eight.
+
+The curve applies to injected pad hits, so it affects MIDI controllers and
+the emulated pads, not the panel's own analog pad path.
