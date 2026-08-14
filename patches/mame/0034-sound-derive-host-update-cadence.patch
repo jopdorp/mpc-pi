@@ -1,0 +1,93 @@
+From: mpc-pi
+Subject: [PATCH] sound: derive the host update cadence from frames and rate
+
+STREAMS_UPDATE_FREQUENCY is a fixed rate, so the frames carried by one host
+sound update are whatever the output rate divided by that constant happens to
+be.  At 48 kHz the 3 kHz cadence yields exactly 16 frames, but at the
+MPC2000XL's native 44.1 kHz it yields 14.7, so updates alternate between 14 and
+15 frames and never divide the PipeWire graph quantum.
+
+MAME_SOUND_UPDATE_FRAMES and MAME_SOUND_UPDATE_RATE invert that dependency: the
+caller states how many frames one update carries at a given rate, and the
+cadence follows.  attotime::from_ticks builds the period from an exact tick
+ratio, so a cadence that is not a whole number of hertz (44100 / 16 = 2756.25)
+carries no rounding drift.  Choosing frames as an exact divisor of the quantum
+makes one callback consume a whole number of producer updates, which makes the
+"one quantum plus one producer update" margin exact instead of a maximum over
+an alternating update size.
+
+Both variables must be set; either absent leaves the historical cadence, so the
+default behaviour is unchanged.
+
+diff --git a/src/emu/sound.cpp b/src/emu/sound.cpp
+--- a/src/emu/sound.cpp
++++ b/src/emu/sound.cpp
+@@ -28,6 +28,7 @@
+ #include "util/language.h"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ 
+ //**************************************************************************
+ //  DEBUGGING
+@@ -48,6 +49,50 @@
+ 
+ const attotime sound_manager::STREAMS_UPDATE_ATTOTIME = attotime::from_hz(STREAMS_UPDATE_FREQUENCY);
+ 
++namespace {
++
++// Host sound-update cadence.
++//
++// STREAMS_UPDATE_FREQUENCY is a fixed rate, so the number of frames carried by
++// each host update is whatever the output rate divided by that constant happens
++// to be.  At 48 kHz the historical 3 kHz cadence yields exactly 16 frames, but
++// at the MPC2000XL's native 44.1 kHz it yields 14.7, so updates alternate
++// between 14 and 15 frames and never line up with the graph quantum.
++//
++// MAME_SOUND_UPDATE_FRAMES/MAME_SOUND_UPDATE_RATE invert that dependency: the
++// caller states how many frames one update should carry at a given rate, and
++// the cadence is derived from it.  attotime::from_ticks builds the period from
++// an exact tick ratio, so a cadence that is not an integer number of hertz
++// (44100 / 16 = 2756.25 Hz) is still represented without rounding drift.
++//
++// Choosing frames as an exact divisor of the PipeWire quantum makes one
++// callback consume a whole number of producer updates, which in turn makes the
++// "one quantum plus one producer update" margin exact rather than a maximum
++// over an alternating update size.
++attotime streams_update_period(const attotime &fallback)
++{
++	char const *const frames = std::getenv("MAME_SOUND_UPDATE_FRAMES");
++	char const *const rate = std::getenv("MAME_SOUND_UPDATE_RATE");
++	if (frames && rate)
++	{
++		const long frame_count = std::strtol(frames, nullptr, 10);
++		const long frame_rate = std::strtol(rate, nullptr, 10);
++		if ((frame_count > 0) && (frame_rate > 0))
++		{
++			osd_printf_verbose(
++					"Sound: host update cadence derived from %ld frames at %ld Hz\n",
++					frame_count,
++					frame_rate);
++			return attotime::from_ticks(u64(frame_count), u32(frame_rate));
++		}
++		osd_printf_warning(
++				"Sound: ignoring invalid MAME_SOUND_UPDATE_FRAMES/MAME_SOUND_UPDATE_RATE\n");
++	}
++	return fallback;
++}
++
++} // anonymous namespace
++
+ 
+ // Not inline because with the unique_ptr it would require audio_effect in emu.h
+ 
+@@ -90,7 +135,8 @@ sound_manager::sound_manager(running_machine &machine) :
+ 
+ 	// start the periodic update flushing timer
+ 	m_update_timer = machine.scheduler().timer_alloc(timer_expired_delegate(FUNC(sound_manager::update), this));
+-	m_update_timer->adjust(STREAMS_UPDATE_ATTOTIME, 0, STREAMS_UPDATE_ATTOTIME);
++	const attotime update_period = streams_update_period(STREAMS_UPDATE_ATTOTIME);
++	m_update_timer->adjust(update_period, 0, update_period);
+ 
+ 	// mark the generation as "just starting, waiting for config loading"
+ 	m_osd_info.m_generation = 0xffff0000;

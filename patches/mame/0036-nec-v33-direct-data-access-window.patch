@@ -1,0 +1,230 @@
+From: mpc-pi
+Subject: [PATCH] nec: optional direct-pointer V33 data access window
+
+Every V33/V53 data access runs v33_translate and then a full address_space
+dispatch (address_space_specific::read_word_unaligned into
+handler_entry_read_memory::read, and the write equivalents), two indirect
+calls per access. After the opcode fetch window those symbols still held about
+10% of MPC2000XL emulation cycles.
+
+MAME_MPC_V53_DATA_WINDOW inlines the translation and keeps a 64-entry
+direct-mapped table of translated 16 KiB pages, separate for reads and writes
+so ROM is never writable outside the handler path. A page is adopted only when
+get_read_ptr()/get_write_ptr() resolve both ends to one contiguous host block;
+a page that does not resolve is negative-cached with a null base and always
+takes the handler path. Word accesses that would cross a page boundary fall
+back to the handler path. DMA and other bus masters share the same host
+memory, so direct pointers stay coherent for memory-backed pages.
+
+Frozen 48 kHz all-output PCM is bit-identical with the window off and on
+(a65077eb...), and the redirected access macros alone are inert for the other
+NEC cores. On desktop x86 the measured wall-clock effect is null (+0.10%
+across sixteen interleaved runs) while retired instructions drop 2.59% and
+branch misses 2.32%, both deterministic across repeats: the out-of-order host
+hides the removed work. It is therefore default-off everywhere and retained as
+a Cortex-A53 candidate, where in-order execution and weaker indirect-branch
+prediction make removed dispatch work count.
+
+diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
+--- a/src/devices/cpu/nec/nec.h
++++ b/src/devices/cpu/nec/nec.h
+@@ -176,6 +176,125 @@
+ 	offs_t m_opcode_start = 1;
+ 	offs_t m_opcode_end = 0;
+ 
++	// Matches the V33_TYPE macro in necpriv.ipp, which is not visible here.
++	static constexpr uint32_t CHIP_TYPE_V33 = 0;
++
++	// Direct-pointer data window (MAME_MPC_V53_DATA_WINDOW). A small
++	// direct-mapped table of translated 16 KiB pages, separate for reads and
++	// writes so ROM stays writable only through the handler path. A page that
++	// does not resolve to plain contiguous memory is negative-cached with a
++	// null base so it never re-probes on the hot path.
++	static constexpr int DATA_WINDOW_COUNT = 64;
++	struct data_window { offs_t page = ~offs_t(0); u8 *base = nullptr; };
++	bool m_data_window_enable = false;
++	data_window m_data_read_window[DATA_WINDOW_COUNT];
++	data_window m_data_write_window[DATA_WINDOW_COUNT];
++	void invalidate_data_windows();
++	u8 *fill_data_window(offs_t phys, bool is_write);
++
++	inline offs_t v33_translate_fast(offs_t addr)
++	{
++		return m_xa
++			? (offs_t(m_v33_transtable[(addr >> 14) & 63]) << 14) | (addr & V33_PAGE_MASK)
++			: (addr & 0xfffff);
++	}
++
++	inline u8 data_read_byte(offs_t a)
++	{
++		if (m_chip_type != CHIP_TYPE_V33)
++			return m_program->read_byte(a);
++		const offs_t phys = v33_translate_fast(a);
++		if (m_data_window_enable)
++		{
++			data_window &w = m_data_read_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
++			if (EXPECTED(w.page == (phys >> 14)))
++			{
++				if (EXPECTED(w.base != nullptr))
++					return w.base[phys & V33_PAGE_MASK];
++			}
++			else if (u8 *const base = fill_data_window(phys, false))
++				return base[phys & V33_PAGE_MASK];
++		}
++		return m_program->read_byte(phys);
++	}
++
++	inline u16 data_read_word(offs_t a)
++	{
++		if (m_chip_type != CHIP_TYPE_V33)
++			return m_program->read_word_unaligned(a);
++		const offs_t phys = v33_translate_fast(a);
++		if (m_data_window_enable && EXPECTED((phys & V33_PAGE_MASK) != V33_PAGE_MASK))
++		{
++			data_window &w = m_data_read_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
++			u8 *base = nullptr;
++			if (EXPECTED(w.page == (phys >> 14)))
++				base = w.base;
++			else
++				base = fill_data_window(phys, false);
++			if (EXPECTED(base != nullptr))
++			{
++				const offs_t off = phys & V33_PAGE_MASK;
++				return u16(base[off]) | (u16(base[off + 1]) << 8);
++			}
++		}
++		return m_program->read_word_unaligned(phys);
++	}
++
++	inline void data_write_byte(offs_t a, u8 d)
++	{
++		if (m_chip_type != CHIP_TYPE_V33)
++		{
++			m_program->write_byte(a, d);
++			return;
++		}
++		const offs_t phys = v33_translate_fast(a);
++		if (m_data_window_enable)
++		{
++			data_window &w = m_data_write_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
++			if (EXPECTED(w.page == (phys >> 14)))
++			{
++				if (EXPECTED(w.base != nullptr))
++				{
++					w.base[phys & V33_PAGE_MASK] = d;
++					return;
++				}
++			}
++			else if (u8 *const base = fill_data_window(phys, true))
++			{
++				base[phys & V33_PAGE_MASK] = d;
++				return;
++			}
++		}
++		m_program->write_byte(phys, d);
++	}
++
++	inline void data_write_word(offs_t a, u16 d)
++	{
++		if (m_chip_type != CHIP_TYPE_V33)
++		{
++			m_program->write_word_unaligned(a, d);
++			return;
++		}
++		const offs_t phys = v33_translate_fast(a);
++		if (m_data_window_enable && EXPECTED((phys & V33_PAGE_MASK) != V33_PAGE_MASK))
++		{
++			data_window &w = m_data_write_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
++			u8 *base = nullptr;
++			if (EXPECTED(w.page == (phys >> 14)))
++				base = w.base;
++			else
++				base = fill_data_window(phys, true);
++			if (EXPECTED(base != nullptr))
++			{
++				const offs_t off = phys & V33_PAGE_MASK;
++				base[off] = u8(d);
++				base[off + 1] = u8(d >> 8);
++				return;
++			}
++		}
++		m_program->write_word_unaligned(phys, d);
++	}
++
+ private:
+ 	inline u8 read_opcode_byte(offs_t address);
+ 	template <bool DirectDispatch> void execute_run_mode();
+diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
+--- a/src/devices/cpu/nec/nec.cpp
++++ b/src/devices/cpu/nec/nec.cpp
+@@ -258,6 +258,34 @@
+ 	}
+ }
+ 
++void nec_common_device::invalidate_data_windows()
++{
++	for (auto &w : m_data_read_window)
++		w = data_window();
++	for (auto &w : m_data_write_window)
++		w = data_window();
++}
++
++u8 *nec_common_device::fill_data_window(offs_t phys, bool is_write)
++{
++	// Same adoption rule as the opcode window: both ends of the 16 KiB page
++	// must resolve to one contiguous host block. get_ptr() returns null for
++	// anything handler-backed, so ROM never enters the write table and a
++	// failed page is negative-cached with a null base.
++	const offs_t start = phys & ~offs_t(V33_PAGE_MASK);
++	const offs_t end = start | (V33_PAGE_MASK & ~offs_t(1));
++	void *const lo = is_write ? m_program->get_write_ptr(start) : m_program->get_read_ptr(start);
++	void *const hi = is_write ? m_program->get_write_ptr(end) : m_program->get_read_ptr(end);
++	data_window &w = (is_write ? m_data_write_window : m_data_read_window)
++			[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
++	w.page = phys >> 14;
++	if (lo && hi && (static_cast<u16 *>(hi) == static_cast<u16 *>(lo) + ((end - start) >> 1)))
++		w.base = static_cast<u8 *>(lo);
++	else
++		w.base = nullptr;
++	return w.base;
++}
++
+ void nec_common_device::invalidate_fetch_window()
+ {
+ 	// An empty window: no address can satisfy start <= phys <= end.
+@@ -351,6 +379,7 @@
+ void nec_common_device::device_reset()
+ {
+ 	invalidate_fetch_window();
++	invalidate_data_windows();
+ 
+ 	memset( &m_regs.w, 0, sizeof(m_regs.w));
+ 
+@@ -974,6 +1003,9 @@
+ 	m_fetch_window = (m_chip_type == V33_TYPE)
+ 			&& (std::getenv("MAME_MPC_V53_FETCH_WINDOW") != nullptr);
+ 	invalidate_fetch_window();
++	m_data_window_enable = (m_chip_type == V33_TYPE)
++			&& (std::getenv("MAME_MPC_V53_DATA_WINDOW") != nullptr);
++	invalidate_data_windows();
+ 
+ 	m_program = &space(AS_PROGRAM);
+ 	if (m_mpc2000xl_direct_dispatch)
+diff --git a/src/devices/cpu/nec/necpriv.ipp b/src/devices/cpu/nec/necpriv.ipp
+--- a/src/devices/cpu/nec/necpriv.ipp
++++ b/src/devices/cpu/nec/necpriv.ipp
+@@ -57,10 +57,10 @@
+ 
+ /************************************************************************/
+ 
+-#define read_mem_byte(a)        m_program->read_byte(m_chip_type == V33_TYPE ? v33_translate(a) : (a))
+-#define read_mem_word(a)        m_program->read_word_unaligned(m_chip_type == V33_TYPE ? v33_translate(a) : (a))
+-#define write_mem_byte(a,d)     m_program->write_byte(m_chip_type == V33_TYPE ? v33_translate(a) : (a), (d))
+-#define write_mem_word(a,d)     m_program->write_word_unaligned(m_chip_type == V33_TYPE ? v33_translate(a) : (a), (d))
++#define read_mem_byte(a)        data_read_byte(a)
++#define read_mem_word(a)        data_read_word(a)
++#define write_mem_byte(a,d)     data_write_byte((a), (d))
++#define write_mem_word(a,d)     data_write_word((a), (d))
+ 
+ #define read_port_byte(a)       io_read_byte(a)
+ #define read_port_word(a)       io_read_word(a)

@@ -1,0 +1,38 @@
+#!/usr/bin/env bpftrace
+
+BEGIN
+{
+	printf("Tracing MPC/PipeWire wakeup-to-run latency; press Ctrl-C to finish.\n");
+}
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+/args->prio < 100/
+{
+	if (!@wakeup_ns[args->pid])
+	{
+		@wakeup_ns[args->pid] = nsecs;
+	}
+}
+
+tracepoint:sched:sched_switch
+/@wakeup_ns[args->next_pid]/
+{
+	$latency_us = (nsecs - @wakeup_ns[args->next_pid]) / 1000;
+	@latency_us[args->next_pid, str(args->next_comm)] = hist($latency_us);
+	@maximum_us[args->next_pid, str(args->next_comm)] = max($latency_us);
+	@wakeups[args->next_pid, str(args->next_comm)] = count();
+	delete(@wakeup_ns[args->next_pid]);
+}
+
+interval:s:10
+{
+	print(@latency_us);
+	print(@maximum_us);
+	print(@wakeups);
+}
+
+END
+{
+	clear(@wakeup_ns);
+}

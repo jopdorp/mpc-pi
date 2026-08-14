@@ -1,0 +1,142 @@
+From: mpc-pi
+Subject: [PATCH] nec: optional direct-pointer V33 opcode fetch window
+
+Every opcode byte fetched by the V33/V53 core is translated by v33_translate
+and then read through the memory cache, which dispatches into
+handler_entry_read_memory. Profiling the MPC2000XL fast stack put 8.09% of
+emulation cycles in the out-of-line translation and 8.27% in that read handler,
+and a V33 instruction is one to six bytes.
+
+MAME_MPC_V53_FETCH_WINDOW inlines the translation and caches a direct host
+pointer to the containing 16 KiB translation page, so a fetch inside the window
+is a bounds check and an array load. The window is keyed on the translated
+physical address, so a write to the translation table simply moves the next
+fetch outside the window and refills it; no invalidation hook is required.
+The page is only adopted when read_ptr() resolves both ends to a plain
+contiguous RAM/ROM block, which rejects banked, mirrored-with-holes or
+handler-backed regions.
+
+This is safe only where the program map is static. The MPC2000XL V53 map is
+entirely .ram()/.rom() in blocks of at least 512 KiB with no membank or
+bankdev, and 16 KiB pages divide those blocks evenly, so a page never straddles
+two regions. It is therefore opt-in rather than unconditional.
+
+Frozen 48 kHz all-output PCM is bit-identical with the window off and on
+(a65077eb...). A matched interleaved ABBA on the deployment CPUs measured
+482.3% against 531.6% average speed, a 10.2% throughput gain with no overlap
+between arms.
+
+diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
+--- a/src/devices/cpu/nec/nec.h
++++ b/src/devices/cpu/nec/nec.h
+@@ -167,6 +167,15 @@
+ 
+ 	offs_t v33_translate(offs_t addr);
+ 
++	// Direct-pointer opcode fetch window (MAME_MPC_V53_FETCH_WINDOW).
++	static constexpr offs_t V33_PAGE_MASK = 0x3fff;
++	void invalidate_fetch_window();
++	u8 fill_fetch_window(offs_t phys);
++	bool m_fetch_window = false;
++	u8 *m_opcode_base = nullptr;
++	offs_t m_opcode_start = 1;
++	offs_t m_opcode_end = 0;
++
+ private:
+ 	inline u8 read_opcode_byte(offs_t address);
+ 	template <bool DirectDispatch> void execute_run_mode();
+diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
+--- a/src/devices/cpu/nec/nec.cpp
++++ b/src/devices/cpu/nec/nec.cpp
+@@ -108,6 +108,8 @@
+ #include "nec.h"
+ #include "necdasm.h"
+ 
++#include <cstdlib>
++
+ #include "util/hashing.h"
+ 
+ #define LOG_BUSLOCK (1 << 1)
+@@ -256,10 +258,61 @@
+ 	}
+ }
+ 
++void nec_common_device::invalidate_fetch_window()
++{
++	// An empty window: no address can satisfy start <= phys <= end.
++	m_opcode_base = nullptr;
++	m_opcode_start = 1;
++	m_opcode_end = 0;
++}
++
++u8 nec_common_device::fill_fetch_window(offs_t phys)
++{
++	// Window one V33 translation page. The page is 16 KiB and every region in
++	// the supported program map is at least 512 KiB and 16 KiB aligned, so a
++	// page cannot straddle two regions.
++	const offs_t start = phys & ~offs_t(V33_PAGE_MASK);
++	const offs_t end = start | V33_PAGE_MASK;
++
++	// get_ptr() returns a pointer to the native (16-bit) unit containing the
++	// byte, so a direct-mapped page yields host pointers whose difference
++	// matches the address difference shifted by the native width. Requiring
++	// that rejects anything that is not a plain contiguous RAM/ROM block.
++	auto *const lo = static_cast<u16 *>(m_cache16.read_ptr(start));
++	auto *const hi = static_cast<u16 *>(m_cache16.read_ptr(end));
++	if (lo && hi && (hi == lo + ((end - start) >> 1)))
++	{
++		// start is 16 KiB aligned and therefore even, so on a little-endian
++		// space the byte for address A is at host byte offset A - start.
++		m_opcode_base = reinterpret_cast<u8 *>(lo);
++		m_opcode_start = start;
++		m_opcode_end = end;
++		return m_opcode_base[phys - start];
++	}
++
++	invalidate_fetch_window();
++	return m_cache16.read_byte(phys);
++}
++
+ u8 nec_common_device::read_opcode_byte(offs_t address)
+ {
+ 	if (m_chip_type == V33_TYPE)
+-		return m_cache16.read_byte(v33_translate(address));
++	{
++		// Inlined translation: the out-of-line call was a measurable share of
++		// the fetch path, and the arithmetic is a load, a shift and an or.
++		const offs_t phys = m_xa
++			? (offs_t(m_v33_transtable[(address >> 14) & 63]) << 14) | (address & V33_PAGE_MASK)
++			: (address & 0xfffff);
++		if (m_fetch_window)
++		{
++			// Keyed on the translated address, so a translation-table write
++			// simply moves the next fetch outside the window and refills it.
++			if (EXPECTED(phys >= m_opcode_start && phys <= m_opcode_end))
++				return m_opcode_base[phys - m_opcode_start];
++			return fill_fetch_window(phys);
++		}
++		return m_cache16.read_byte(phys);
++	}
+ 	if (m_program_config.data_width() == 8)
+ 		return m_cache8.read_byte(address);
+ 	return m_cache16.read_byte(address);
+@@ -297,6 +350,8 @@
+ 
+ void nec_common_device::device_reset()
+ {
++	invalidate_fetch_window();
++
+ 	memset( &m_regs.w, 0, sizeof(m_regs.w));
+ 
+ 	m_ip = 0;
+@@ -916,6 +971,10 @@
+ 	save_item(NAME(m_prefetch_count));
+ 	save_item(NAME(m_prefetch_reset));
+ 
++	m_fetch_window = (m_chip_type == V33_TYPE)
++			&& (std::getenv("MAME_MPC_V53_FETCH_WINDOW") != nullptr);
++	invalidate_fetch_window();
++
+ 	m_program = &space(AS_PROGRAM);
+ 	if (m_mpc2000xl_direct_dispatch)
+ 	{

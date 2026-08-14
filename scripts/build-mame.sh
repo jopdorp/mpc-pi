@@ -4,6 +4,12 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 mame_source_dir=${MAME_SOURCE_DIR:-"$repo_root/.cache/mame"}
 mame_jobs=${MAME_JOBS:-4}
+# Optional performance build configuration. MAME_ARCHOPTS feeds compiler and
+# linker flags (genie applies it to both); MAME_LTO enables link-time
+# optimization. Genie makefiles do not track flag changes, so a stamp file
+# forces a clean object tree whenever the configuration differs.
+mame_archopts=${MAME_ARCHOPTS:-}
+mame_lto=${MAME_LTO:-0}
 mame_sources=src/mame/akai/mpc60.cpp,src/mame/akai/mpc2000.cpp,src/mame/akai/mpc3000.cpp
 mame_patches=(
     "$repo_root/patches/mame/0001-hd61830-guard-unconfigured-text-pitch.patch"
@@ -36,6 +42,14 @@ mame_patches=(
     "$repo_root/patches/mame/0028-sound-cache-device-interfaces.patch"
     "$repo_root/patches/mame/0029-sdl-generate-primitives-on-emulation-thread.patch"
     "$repo_root/patches/mame/0030-render-fixed-artwork-resolution.patch"
+    "$repo_root/patches/mame/0031-mpc2000xl-optional-stereo-output.patch"
+    "$repo_root/patches/mame/0032-mpc2000xl-v53-divide-superblock.patch"
+    "$repo_root/patches/mame/0033-mpc2000xl-skip-unchanged-lcd-frames.patch"
+    "$repo_root/patches/mame/0034-sound-derive-host-update-cadence.patch"
+    "$repo_root/patches/mame/0035-nec-v33-direct-opcode-fetch-window.patch"
+    "$repo_root/patches/mame/0036-nec-v33-direct-data-access-window.patch"
+    "$repo_root/patches/mame/0037-nec-v33-idle-iteration-skip.patch"
+    "$repo_root/patches/mame/0038-l7a1045-direct-wave-ram-window.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then
@@ -51,6 +65,15 @@ fi
 if [[ -n "$(git -C "$mame_source_dir" status --porcelain --untracked-files=no)" ]]; then
     printf 'error: refusing to build from a dirty MAME checkout at %s\n' "$mame_source_dir" >&2
     exit 1
+fi
+
+flags_stamp="$mame_source_dir/build/.mpc-flags"
+flags_now="archopts=$mame_archopts lto=$mame_lto"
+if [[ ! -f "$flags_stamp" || "$(cat "$flags_stamp" 2>/dev/null)" != "$flags_now" ]]; then
+    printf 'Build flags changed; clearing object tree for a clean rebuild\n'
+    rm -rf "$mame_source_dir/build/linux_gcc/obj" "$mame_source_dir/build/linux_gcc/bin"
+    mkdir -p "$mame_source_dir/build"
+    printf '%s' "$flags_now" >"$flags_stamp"
 fi
 
 patches_applied=0
@@ -76,14 +99,17 @@ for mame_patch in "${mame_patches[@]}"; do
     (( patches_applied += 1 ))
 done
 
-make -C "$mame_source_dir" \
-    SUBTARGET=mpc \
-    SOURCES="$mame_sources" \
-    USE_QTDEBUG=0 \
-    DEBUG=0 \
-    SYMBOLS=0 \
-    REGENIE=1 \
-    -j"$mame_jobs"
+make_arguments=(
+    SUBTARGET=mpc
+    SOURCES="$mame_sources"
+    USE_QTDEBUG=0
+    DEBUG=0
+    SYMBOLS=0
+    REGENIE=1
+)
+[[ -z "$mame_archopts" ]] || make_arguments+=(ARCHOPTS="$mame_archopts")
+[[ "$mame_lto" != 1 ]] || make_arguments+=(LTO=1)
+make -C "$mame_source_dir" "${make_arguments[@]}" -j"$mame_jobs"
 
 test -x "$mame_source_dir/mpc"
 "$mame_source_dir/mpc" -help | sed -n '1p'

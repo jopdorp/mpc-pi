@@ -1,0 +1,101 @@
+From: mpc-pi
+Subject: [PATCH] l7a1045: optional direct-pointer wave-RAM window
+
+The DSP mix loop reads one sample per voice per output frame through the
+memory cache, which dispatches into a handler entry. The MPC2000XL wave RAM
+is one flat .ram() region, so MAME_MPC_DSP_WINDOW caches a direct host
+pointer to the containing 64 KiB page with the same both-ends contiguity
+check as the V33 windows; flash-backed pages do not resolve and keep the
+handler path.
+
+Frozen 48 kHz all-output PCM is bit-identical off and on. Desktop wall-clock
+effect is inside run-to-run noise (median +0.9% over eight interleaved
+runs); retained default-off as a Cortex-A53 candidate alongside the V33 data
+window.
+
+diff --git a/src/devices/sound/l7a1045_l6028_dsp_a.h b/src/devices/sound/l7a1045_l6028_dsp_a.h
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.h
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.h
+@@ -96,6 +96,27 @@
+ 	memory_access<25, 1, 0, ENDIANNESS_LITTLE>::cache m_cache;
+ 	memory_access<25, 1, 0, ENDIANNESS_LITTLE>::cache m_rom_cache;
+ 
++	// MAME_MPC_DSP_WINDOW: direct-pointer window over contiguous wave RAM.
++	static constexpr offs_t DSP_PAGE_MASK = 0xffff;
++	bool m_dsp_window_enable = false;
++	u8 *m_window_base = nullptr;
++	offs_t m_window_start = 1;
++	offs_t m_window_end = 0;
++	u8 *fill_dsp_window(offs_t address);
++	inline u16 window_read_word(offs_t address)
++	{
++		if (m_dsp_window_enable && EXPECTED((address & DSP_PAGE_MASK) != DSP_PAGE_MASK))
++		{
++			if (EXPECTED(address >= m_window_start && address <= m_window_end))
++				return u16(m_window_base[address - m_window_start])
++					| (u16(m_window_base[address - m_window_start + 1]) << 8);
++			if (u8 *const base = fill_dsp_window(address))
++				return u16(base[address - m_window_start])
++					| (u16(base[address - m_window_start + 1]) << 8);
++		}
++		return m_cache.read_word(address);
++	}
++
+ 	void voice_select_w(offs_t offset, uint16_t data, uint16_t mem_mask = ~0);
+ 	uint16_t voiceregs_r(offs_t offset);
+ 	void voiceregs_w(offs_t offset, uint16_t data);
+diff --git a/src/devices/sound/l7a1045_l6028_dsp_a.cpp b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -140,6 +140,8 @@
+ **************************************************************************************************/
+ 
+ #include "emu.h"
++
++#include <cstdlib>
+ #include "l7a1045_l6028_dsp_a.h"
+ #include "debugger.h"
+ 
+@@ -216,6 +218,7 @@
+ 
+ 	// Allocate the stream
+ 	m_sample_rate = clock() / 768.0f;
++	m_dsp_window_enable = (std::getenv("MAME_MPC_DSP_WINDOW") != nullptr);
+ 	m_stream = stream_alloc(0, 10, m_sample_rate);
+ 
+ 	m_dma_timer = timer_alloc(FUNC(l7a1045_sound_device::dma_timer_callback), this);
+@@ -253,6 +256,25 @@
+ 	m_key = 0;
+ }
+ 
++u8 *l7a1045_sound_device::fill_dsp_window(offs_t address)
++{
++	const offs_t start = address & ~offs_t(DSP_PAGE_MASK);
++	const offs_t end = start | DSP_PAGE_MASK;
++	auto *const lo = static_cast<u16 *>(m_cache.read_ptr(start));
++	auto *const hi = static_cast<u16 *>(m_cache.read_ptr(end & ~offs_t(1)));
++	if (lo && hi && (hi == lo + ((end & ~offs_t(1)) - start) / 2))
++	{
++		m_window_base = reinterpret_cast<u8 *>(lo);
++		m_window_start = start;
++		m_window_end = end;
++		return m_window_base;
++	}
++	m_window_base = nullptr;
++	m_window_start = 1;
++	m_window_end = 0;
++	return nullptr;
++}
++
+ void l7a1045_sound_device::sound_stream_update(sound_stream &stream)
+ {
+ 	for (int i = 0; i < NUM_VOICES; i++)
+@@ -286,7 +308,7 @@
+ 				{
+ 					case 0: // 16-bit linear, little-endian
+ 						address = ((start << 1) + (pos << 1));
+-						sample = (int16_t)m_cache.read_word(address);
++						sample = (int16_t)window_read_word(address);
+ 						break;
+ 
+ 					case 1: // 12-bit non-linear, encoded into 8 bits

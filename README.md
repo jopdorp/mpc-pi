@@ -12,7 +12,33 @@ Phase 1 now has reproducible tooling for a focused MAME build and ROM audit:
 ./scripts/test-mame.sh
 ```
 
-See [Phase 1: MAME baseline](docs/phase-1.md) for firmware placement, exact test scope, and the native PipeWire latency launcher.
+See [Phase 1: MAME baseline](docs/phase-1.md) for firmware placement and test
+scope, [the complete MAME patch and flag index](docs/mame-patch-stack.md) for
+every optimization and fallback, and
+[the MPC2000XL low-latency guide](docs/mpc2000xl-low-latency.md) for the native
+PipeWire launcher.
+
+Launch the fastest accepted MPC2000XL configuration with:
+
+```bash
+scripts/run-mpc2000xl-fast.sh -flop /path/to/project.img
+```
+
+This preset selects native 44.1 kHz audio, a 32-frame PipeWire quantum,
+LCD-only video with `MPC_LCD_UPDATE_MODE=changed`, stereo host output, and
+every accepted CPU fast path. The normal launcher defaults the LCD mode to
+`accurate`. Settings remain overrideable: use `MPC_OUTPUT_MODE=all` for all 11
+hardware outputs or `PIPEWIRE_RATE_HZ=48000` for a 48 kHz DAC. Rejected V53
+replay/hotblock and experimental OpenGL client-coordinate paths are
+intentionally excluded. The launcher fails before starting MAME if the selected
+stereo, divide, or LCD mode is missing from the binary; run
+`scripts/build-mame.sh` after changing the ordered patch stack. The fast
+wrapper takes an exclusive per-user graph lease, temporarily forces and
+verifies the PipeWire graph rate/quantum, then restores the previous global
+settings when MAME exits. A concurrent graph-forcing fast launch is rejected.
+Set
+`MPC_FORCE_PIPEWIRE_GRAPH=0` only when the host already provides the desired
+graph configuration.
 
 The selected MPC3000 listening default is MIDI Mark Demo Disk 1, sequence
 `96BPM-SNOOPBLAK`. With the downloaded disk in place, launch it at the default
@@ -153,15 +179,18 @@ window to 48 samples (1 ms). The extra producer update lets one late 16-sample
 tick recover without immediately starving the next PipeWire callback.
 
 The default desktop video path is the complete MPC panel, rendered with
-OpenGL in a maximized window. MPC2000XL panel artwork is rasterized at stable
-1280x720-derived dimensions and linearly scaled by OpenGL, while the LCD, UI,
-window geometry and input mapping retain the actual output resolution. This
-avoids rerasterizing hundreds of SVG and text elements at every intermediate
-window size. The optional `MPC_GL_VBO=0` path uses client-memory OpenGL texture
-coordinates instead of issuing a 32-byte VBO update for every panel quad. Set
-`MPC_ARTWORK_RESOLUTION=auto` for stock target-sized artwork; the stock VBO
-path remains the default while the client-memory path awaits a clean live
-32-frame audio gate. The OpenGL path hands completed primitive lists to a
+OpenGL in a maximized window. Stock target-sized panel artwork is the default.
+The opt-in `MPC_ARTWORK_RESOLUTION=1280x720` path rasterizes MPC2000XL artwork
+at stable 1280x720-derived dimensions and linearly scales it with OpenGL,
+while the LCD, UI, window geometry and input mapping retain the actual output
+resolution. This avoids rerasterizing hundreds of SVG and text elements at
+every intermediate window size. The optional `MPC_GL_VBO=0` path uses
+client-memory OpenGL texture coordinates instead of issuing a 32-byte VBO
+update for every panel quad. Set
+`MPC_ARTWORK_RESOLUTION=1280x720` explicitly for the fixed-artwork experiment;
+the stock artwork and VBO paths remain the defaults while the optional paths
+await a clean live 32-frame audio gate. The OpenGL path hands completed
+primitive lists to a
 low-priority presenter thread without waiting and drops a visual frame if the
 presenter is busy. The SDL software path keeps SDL texture upload and
 presentation on the main thread, as required by SDL, while a low-priority
@@ -265,14 +294,26 @@ For a compact LCD-only view (for example on a Raspberry Pi display or for
 diagnostics), use:
 
 ```bash
-MPC_VIEW_NAME='Screen 0' MPC_WINDOW_RESOLUTION=1240x300 scripts/run-mpc.sh
+MPC_VIEW_NAME='Screen 0' MPC_WINDOW_RESOLUTION=1240x300 \
+  MPC_LCD_UPDATE_MODE=changed scripts/run-mpc.sh
 ```
+
+Ordered patch 0033 still copies the full 248x60 LCD bitmap on every screen
+callback, but marks the frame unchanged when no LCD RAM byte changed so the
+renderer can avoid a redundant texture commit. Frozen PCM and five raw/PNG
+checkpoints matched the accurate mode exactly. On the official ordered-stack
+binary, a live 44.1 kHz/q32 ABBA reduced task CPU by 3.27%, host cycles by
+3.82%, instructions by 1.69%, and branches by 1.90%; both chronological pairs
+improved every metric. All sampled PipeWire nodes remained at `ERR=0` inside
+the measured windows. The pre-marker startup interval was not sampled, so this
+is not yet a complete xrun-free launch result.
 
 Override `MPC_VIEW_NAME`, `MPC_WINDOW_RESOLUTION`,
 `MPC_ARTWORK_RESOLUTION`, `MPC_FILTER_MODE`, `MPC_VIDEO_MODE`,
-`MPC_GL_VBO`, `MPC_ASYNC_PRESENT`, `MPC_MAXIMIZE`, or `MPC_ALSA_HEADROOM` as
-needed. Set `MPC_MAXIMIZE=0 MPC_WINDOW_RESOLUTION=1240x894` for a fixed-size
-desktop window.
+`MPC_GL_VBO`, `MPC_LCD_UPDATE_MODE`, `MPC_ASYNC_PRESENT`, `MPC_MAXIMIZE`, or
+`MPC_ALSA_HEADROOM` as needed. Set
+`MPC_MAXIMIZE=0 MPC_WINDOW_RESOLUTION=1240x894` for a fixed-size desktop
+window.
 
 Run the deterministic offline and full live MPC2000XL timing regressions with:
 
@@ -290,6 +331,23 @@ The live test captures exactly what the PipeWire callback delivered, requires
 zero buffer corrections during playback, rejects inserted or removed whole
 samples, and removes one fitted constant fractional offset before requiring a
 maximum residual below 0.01 sample.
+
+Measure emulation throughput with sound and the LCD active, and compare live
+delivery across CPU sets and real-time priorities, with:
+
+```bash
+./scripts/diagnostics/test-mpc2000xl-headroom.sh
+./scripts/diagnostics/test-mpc2000xl-scheduling-abba.sh
+```
+
+Both take the CPU set, nice level and `SCHED_RR` priority as the only variable
+between arms. That matters on a hybrid host: on a Core Ultra 7 155H, CPUs
+`0-11` are 4.5 GHz P-cores, `12-19` are 3.8 GHz E-cores and `20-21` are 2.5 GHz
+low-power E-cores, so a result measured on `20-21` says nothing about the
+launcher default of `0-11` at nice `-10` and RR `20`. With the fast preset on
+the deployment CPUs the emulator sustains about 700% of real time with sound
+and the OpenGL LCD active, and the paced 44.1 kHz/q32 playback window records
+zero PipeWire underruns.
 
 For every setting record:
 

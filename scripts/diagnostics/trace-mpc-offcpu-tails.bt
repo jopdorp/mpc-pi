@@ -1,0 +1,68 @@
+#!/usr/bin/env bpftrace
+
+/*
+ * Measure time that MPC/PipeWire realtime threads spend off-CPU.
+ * Separate runnable preemption (prev_state == 0) from voluntary blocking.
+ */
+
+tracepoint:sched:sched_switch
+/args->prev_pid != 0 &&
+ (str(args->prev_comm) == "mpc" ||
+  str(args->prev_comm) == "thread-loop" ||
+  str(args->prev_comm) == "data-loop.0")/
+{
+	@off_ns[args->prev_pid] = nsecs;
+	@off_kind[args->prev_pid] = args->prev_state == 0 ? 1 : 2;
+	@name[args->prev_pid] = str(args->prev_comm);
+	@preemptor_pid[args->prev_pid] = args->next_pid;
+	@preemptor_name[args->prev_pid] = str(args->next_comm);
+	@off_cpu[args->prev_pid] = cpu;
+}
+
+tracepoint:sched:sched_switch
+/@off_ns[args->next_pid]/
+{
+	$us = (nsecs - @off_ns[args->next_pid]) / 1000;
+	if (@off_kind[args->next_pid] == 1) {
+		@preempt_us[args->next_pid, @name[args->next_pid]] = hist($us);
+		@preempt_max_us[args->next_pid, @name[args->next_pid]] = max($us);
+		@preempt_count[args->next_pid, @name[args->next_pid]] = count();
+		@preemptor_us[args->next_pid, @name[args->next_pid],
+			@preemptor_pid[args->next_pid], @preemptor_name[args->next_pid],
+			@off_cpu[args->next_pid]] = hist($us);
+	} else {
+		@blocked_us[args->next_pid, @name[args->next_pid]] = hist($us);
+		@blocked_max_us[args->next_pid, @name[args->next_pid]] = max($us);
+	}
+	delete(@off_ns[args->next_pid]);
+	delete(@off_kind[args->next_pid]);
+	delete(@name[args->next_pid]);
+	delete(@preemptor_pid[args->next_pid]);
+	delete(@preemptor_name[args->next_pid]);
+	delete(@off_cpu[args->next_pid]);
+}
+
+interval:s:10
+{
+	print(@preempt_us);
+	print(@preempt_max_us);
+	print(@preempt_count);
+	print(@preemptor_us);
+	print(@blocked_max_us);
+}
+
+END
+{
+	print(@preempt_us);
+	print(@preempt_max_us);
+	print(@preempt_count);
+	print(@preemptor_us);
+	print(@blocked_us);
+	print(@blocked_max_us);
+	clear(@off_ns);
+	clear(@off_kind);
+	clear(@name);
+	clear(@preemptor_pid);
+	clear(@preemptor_name);
+	clear(@off_cpu);
+}

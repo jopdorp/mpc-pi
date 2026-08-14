@@ -25,7 +25,10 @@ MAME_JOBS=8 ./scripts/build-mame.sh
 
 The scripts explicitly set `DEBUG=0`. This matters on shells that already export a variable named `DEBUG`, because MAME otherwise silently builds a debug binary named `mpcd` rather than the release binary `mpc`.
 
-The build temporarily applies the repository's MAME compatibility patches and removes them after compilation, keeping the pinned checkout clean. They cover the HD61830 startup guard, Akai DSP voice-state reset, PipeWire audio-clock pacing, and startup-warning automation.
+The build temporarily applies the repository's ordered MAME patch stack and
+removes it after compilation, keeping the pinned checkout clean. The complete
+patch-to-flag and fallback matrix is in
+[MAME patch stack and launch modes](mame-patch-stack.md).
 
 ## ROM audit
 
@@ -40,10 +43,11 @@ The first command validates the binary and writes exact ROM manifests under `res
 
 ## First boot and latency settings
 
-After the audit passes, launch the MPC2000XL with a 48-frame native PipeWire period:
+After the audit passes, launch the MPC2000XL with the default 32-frame native
+PipeWire period:
 
 ```bash
-./scripts/run-mpc.sh mpc2000xl 48
+./scripts/run-mpc.sh mpc2000xl 32
 ```
 
 The launcher selects native PipeWire at 48 kHz. The period sweep is:
@@ -55,8 +59,11 @@ The launcher selects native PipeWire at 48 kHz. The period sweep is:
 | `48` | 1.00 ms |
 | `32` | 0.67 ms |
 
-The patched PipeWire path uses a 4 ms prebuffer and makes the audio consumer
-the master clock at normal playback speed. Validate it with:
+The patched PipeWire path makes the audio consumer the master clock at normal
+playback speed. MAME produces 16-sample blocks and intentionally stays one
+graph quantum plus one producer block ahead. With the default 32-frame quantum
+at 48 kHz, that is a 48-frame/1.000 ms internal host-audio window, not a 4 ms
+prebuffer. Validate it with:
 
 ```bash
 ./scripts/diagnostics/test-mpc2000xl-timing.sh

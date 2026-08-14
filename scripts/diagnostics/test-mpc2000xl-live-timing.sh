@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 pipewire_frames=${MPC_PIPEWIRE_FRAMES:-48}
+pipewire_rate=${PIPEWIRE_RATE_HZ:-48000}
 timing_master=${MAME_TIMING_MASTER:-video}
 video_mode=${MPC_VIDEO_MODE:-auto}
 bgfx_backend=${MPC_BGFX_BACKEND:-opengl}
@@ -56,6 +57,7 @@ cleanup() {
 trap cleanup EXIT
 
 MAME_RUNTIME_DIR="$runtime_dir" MAME_PIPEWIRE_STATS=1 MAME_TIMING_MASTER="$timing_master" \
+PIPEWIRE_RATE_HZ="$pipewire_rate" \
 MAME_ASYNC_PRESENT="$async_present" \
 MAME_PIPEWIRE_CAPTURE_WAV="$delivered_capture" \
     "$repo_root/scripts/run-mpc.sh" mpc2000xl "$pipewire_frames" \
@@ -94,7 +96,7 @@ if [[ "$speaker_ready" != true ]]; then
 fi
 
 if [[ "$external_capture" == 1 ]]; then
-    pw-record --target ':speaker' --rate 48000 --channels 2 --format s16 "$live_capture" \
+    pw-record --target ':speaker' --rate "$pipewire_rate" --channels 2 --format s16 "$live_capture" \
         >"$record_log" 2>&1 &
     record_pid=$!
 elif [[ "$external_capture" != 0 ]]; then

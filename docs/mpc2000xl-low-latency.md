@@ -12,8 +12,13 @@ The known-good full-panel desktop path is:
 - one quantum plus one producer update of internal margin (48 samples);
 - audio-master pacing with MAME video throttling disabled;
 - OpenGL full-panel rendering, bilinear filtering, and a maximized window;
-- a fixed 1280x720 CPU artwork raster, with actual-resolution LCD, UI, window
-  geometry and input mapping;
+- all MPC main and assignable host outputs exposed by default, with an
+  optional stereo topology for a two-channel DAC or headphones;
+- stock target-sized artwork by default, with an optional fixed 1280x720 CPU
+  artwork raster experiment that leaves the LCD, UI, window geometry and input
+  mapping at actual resolution;
+- accurate LCD frame commits by default, with an exact unchanged-frame skip
+  for the LCD-only deployment preset;
 - machine-state primitive generation on the emulation thread, with OpenGL
   drawing and presentation on a low-priority asynchronous worker;
 - SDL event pumping isolated on the low-priority process main thread;
@@ -25,6 +30,23 @@ The known-good full-panel desktop path is:
   retained as the default; and
 - an independently selectable V53 event-service HLE, also defaulting to the
   interpreter.
+
+The compact deployment preset intentionally differs in two host settings: it
+uses native 44.1 kHz and the LCD-only `Screen 0` view. At the unchanged 3 kHz
+sound-update cadence, producer batches contain 14 or 15 frames;
+with q32, the largest internal quantum-plus-update window is 47 frames, about
+1.066 ms. No optimization in this guide raises the quantum or lowers the
+producer cadence.
+
+The fast wrapper makes 44.1 kHz native by temporarily setting PipeWire's
+global `clock.force-rate` and `clock.force-quantum`, verifying both values,
+and restoring the prior settings on exit or a signal. This affects the shared
+graph while MAME is running, so a per-user lock rejects a second graph-forcing
+fast launch until the first has restored its lease. In this wrapper,
+`MPC_PIPEWIRE_FRAMES` and `PIPEWIRE_RATE_HZ` are authoritative: it replaces
+inherited `PIPEWIRE_QUANTUM` and `PIPEWIRE_LATENCY` with the matching
+`<frames>/<rate>` client request. Use `MPC_FORCE_PIPEWIRE_GRAPH=0` only when
+the host already enforces the desired graph rate and quantum.
 
 The SDL library is not patched or replaced. These video changes are confined
 to MAME's render core and SDL OSD/backend source, which use the stock system
@@ -50,12 +72,16 @@ PipeWire node after MAME exits.
 These settings are not compiled into MAME. They are launcher defaults or
 host-level commands and must remain documented whenever they change.
 
+For the authoritative patch-by-patch map, raw switch names, compatibility
+fallbacks and reproducible presets, see
+[MAME patch stack and launch modes](mame-patch-stack.md).
+
 | Setting | Default | Effect |
 |---|---|---|
 | Second launcher argument | `32` | PipeWire client latency and quantum request in frames |
 | `PIPEWIRE_RATE_HZ` | `48000` | Host sample rate |
-| `PIPEWIRE_QUANTUM` | `32/48000` | Override the client quantum request |
-| `PIPEWIRE_LATENCY` | `32/48000` | Override the client latency request |
+| `PIPEWIRE_QUANTUM` | derived | Defaults to `<second argument>/<PIPEWIRE_RATE_HZ>`; override the client quantum request |
+| `PIPEWIRE_LATENCY` | derived | Defaults to `<second argument>/<PIPEWIRE_RATE_HZ>`; override the client latency request |
 | `MPC_ALSA_HEADROOM` | `keep` | Leave device-side ALSA headroom unchanged, or set a frame count |
 | `MAME_TIMING_MASTER` | `audio` | PipeWire output paces emulation and MAME runs `-nothrottle` |
 | `MAME_CPUSET` | `0-11` | CPU affinity for the MAME process and its workers |
@@ -68,8 +94,11 @@ host-level commands and must remain documented whenever they change.
 | `MPC_FILTER_MODE` | `1` | Enable bilinear filtering |
 | `MPC_MAXIMIZE` | `1` | Start maximized |
 | `MPC_WINDOW_RESOLUTION` | `auto` | Let MAME size the render target |
-| `MPC_ARTWORK_RESOLUTION` | `1280x720` | Fix MPC2000XL CPU-side panel-art raster dimensions; use `auto` for stock target-sized artwork |
+| `MPC_ARTWORK_RESOLUTION` | `auto` | Stock target-sized artwork; use `1280x720` for the fixed-raster resize experiment |
 | `MPC_GL_VBO` | `1` | Keep MAME's stock per-texture VBO path; set `0` for the faster experimental client-memory path |
+| `MPC_OUTPUT_MODE` | `all` | Expose all outputs, or use `stereo` for only floppy and main L/R host channels |
+| `MPC_LCD_UPDATE_MODE` | `accurate` | Commit every LCD frame, or use `changed` to suppress commits when LCD RAM is unchanged |
+| `MPC_FORCE_PIPEWIRE_GRAPH` | fast wrapper: `1` | Temporarily force/verify the requested graph rate and quantum, then restore the previous global settings at exit |
 | `MPC_PANEL_MODE` | `event` | Event-driven MPC2000XL panel UART |
 | `MPC_PANEL_TIMER_MODE` | `accurate` | Choose per-transition or cycle-equivalent coalesced panel timer output |
 | `MPC_MIDI_INPUT_MODE` | `accurate` | Choose accurate wire timing, fast external MIDI, or direct internal-pad events |
@@ -77,6 +106,104 @@ host-level commands and must remain documented whenever they change.
 | `MPC_V53_STATUS_MODE` | `accurate` | Choose interpreted or ROM-gated HLE execution for one hot V53 firmware service |
 | `MPC_V53_EVENT_SERVICE_MODE` | `accurate` | Choose interpreted or ROM-gated HLE execution for the bounded BRK FD event service |
 | `MPC_V53_DISPATCH_MODE` | `accurate` | Choose canonical or MPC-profiled direct dispatch for eight hot V53 opcodes |
+| `MPC_V53_DIVIDE_MODE` | `accurate` | Choose canonical execution or the ROM-gated 32-bit divide superblock |
+| `MPC_V53_FETCH_MODE` | `accurate` | Choose handler-dispatch opcode fetch or the direct-pointer 16 KiB fetch window (`window`, fast preset default) |
+| `MPC_V53_DATA_MODE` | `accurate` | Choose handler-dispatch data access or the direct-pointer data window (`window`; x86-null, Cortex-A53 candidate) |
+| `MPC_SOUND_UPDATES_PER_QUANTUM` | unset | Derive the sound-update cadence from the quantum (`2` in the fast preset); unset keeps the fixed 3 kHz cadence |
+
+## DAC and host-output topology
+
+The default `MPC_OUTPUT_MODE=all` exposes the floppy channel, main stereo pair
+and all eight assignable MPC outputs. Use it with a multichannel audio
+interface, or with any project that routes voices to the assignable outputs.
+
+For a two-channel DAC or headphones, use:
+
+```bash
+MPC_OUTPUT_MODE=stereo scripts/run-mpc.sh mpc2000xl 32
+```
+
+This exposes only the floppy and main left/right host channels. It does not
+downmix the eight assignable outputs: voices routed exclusively to one of
+those outputs are intentionally inaudible. The launcher stores stereo-mode
+configuration in `cfg-stereo` and falls back to the normal `cfg` directory for
+reads, so using a stereo DAC does not overwrite the saved mapping for a later
+multichannel run.
+
+The option is retained for the simpler physical output topology and as an
+independently removable cumulative small win. A fresh matched ABBA measured
+about 1.39% less task clock, 1.72% fewer cycles, 1.93% fewer retired
+instructions and 1.62% higher reported speed. The full-output reference and
+stereo capture retained identical floppy/main L/R samples. Reproduce the
+topology, PCM and configuration checks with:
+
+```bash
+MAME_BIN="$PWD/.cache/mame/mpc" \
+  scripts/diagnostics/test-mpc2000xl-stereo-output.sh
+```
+
+## Cumulative small-win paths
+
+Patches 0024 and 0032 retain two independent, default-off MPC2000XL OS v1.20
+CPU fast paths. Patch 0031's stereo topology is also retained under the
+cumulative-small-wins policy. For a two-channel DAC, enable the complete
+through-0032 measured candidate with:
+
+```bash
+MAME_BIOS=default \
+MPC_V53_DIVIDE_MODE=superblock \
+MPC_V53_EVENT_SERVICE_MODE=hle \
+MPC_OUTPUT_MODE=stereo \
+scripts/run-mpc.sh mpc2000xl 32
+```
+
+In the comprehensive LCD matrix, divide independently reduced cycles by 1.52%
+and BRK FD HLE reduced them by 2.46%; stereo output reduced them by 2.18%. A
+separate fixed-work ABBA on the official through-0032 build-script binary
+measured 6.36% less task CPU, 6.19% fewer cycles, 4.73% fewer instructions and
+6.97% higher emulation speed. The paths
+also passed repeated frozen PCM composition gates. Use `MPC_OUTPUT_MODE=all`
+if the project needs assignable outputs.
+
+The repaired V53 hotblock experiment is not part of the ordered stack. It is
+pixel/PCM exact, but the comprehensive matrix measured 1.31% more cycles alone
+and 2.48% more with divide. It remains preserved under `patches/experiments`
+for future block-design work, not as a launcher option. Evidence is in
+`results/diagnostics/cumulative-0033-gate-20260813` and
+`results/diagnostics/official-0032-winning-stack-abba-20260813`.
+
+The `0033` embedded in the first artifact name is an optimization-campaign
+candidate number. It predates and is unrelated to ordered patch 0033 below.
+
+The recorded artifacts are
+`results/diagnostics/stereo-output-pyexS7` and
+`results/diagnostics/current-stack-stereo-perf-VntjgN`.
+
+## LCD unchanged-frame mode
+
+Ordered patch 0033 adds `MPC_LCD_UPDATE_MODE=changed` for MPC2000XL LCD-only
+deployment. The normal launcher and raw MAME behavior remain `accurate`; the
+fast preset selects `changed`. Both modes still copy the complete 248x60 LCD
+bitmap on every screen callback so the working render target and hidden
+snapshot paths stay current. Changed mode returns MAME's unchanged-frame flag
+only when no LCD RAM byte changed, avoiding the redundant texture commit and
+presentation work.
+
+The frozen PCM remained byte-exact, and five raw-pixel plus five PNG
+checkpoints matched accurate mode exactly and repeated deterministically. The
+same gates passed again on the ordered-stack binary. In its live Screen 0 ABBA
+with active PipeWire at native 44.1 kHz and q32, changed mode reduced task CPU
+by 3.27%, cycles by 3.82%, retired instructions by 1.69%, and branches by
+1.90%. Both chronological pairs improved every metric. Every sampled
+marker-window PipeWire node remained at `ERR=0`; because monitoring began at
+the marker, startup before that point and the full end-to-end xrun gate remain
+unresolved.
+
+The packaged-binary evidence is in
+`results/diagnostics/ordered-0033-correctness-20260813-uOi97M` and
+`results/diagnostics/official-0033-lcd-live-abba-20260813`. The earlier
+prototype evidence remains in
+`results/diagnostics/lcd-dirty-r2-pixels-20260813-Peyu3B`.
 
 ## MPD18 input modes
 
@@ -338,6 +465,291 @@ that fails at `nice` or `chrt` is not equivalent to the validated run; either
 restore the host permissions or explicitly choose documented fallback values,
 for example `MAME_NICE=0 MAME_RT_PRIORITY=1`.
 
+## 44.1 kHz/q32 sound-tail diagnosis
+
+The live LCD-only path is not limited by average sound throughput. The effects
+worker accounts for about 2.96% of sampled cycles, the in-process PipeWire
+loop 2.05%, and the external event-loop thread 1.80%. Linux wakeup-to-run
+histograms put the relevant p95 wake delay in the low single-digit
+microseconds. In the default-affinity capture, representative MAME and
+PipeWire maxima were about 400 us; a CPU-targeted follow-up reduced the
+PipeWire data-loop maximum to 19 us and the observed MAME maxima to 217 us,
+although that follow-up workload exited unsuccessfully and is diagnostic only.
+
+The stricter delivered-audio tests found a different tail inside MAME's 3 kHz
+producer/effects handoff. A predicate-only wake fix still allowed old speaker
+batches to be overwritten. A one-slot generation handshake eliminated those
+drops exactly (`discarded_updates=0`, `discarded_frames=0`) without adding a
+queue or changing q32, but exposed producer stalls: 24 waits with a 407 us
+maximum. Raising the actual effects worker from RR1 to RR2 reduced the maximum
+only to 347 us, still longer than the 333.33 us producer period; both runs
+continued to underrun and failed the delivered-sample timeline comparator.
+The in-emulator WAV stayed byte-identical throughout.
+
+Consequently neither experimental sound flag is shipped or enabled by the
+fast launcher. The evidence points to rare worker-availability or lock tails
+before it can claim the next generation; average effects-worker CPU is only
+about 6 us per generation. The current producer-wait counter also begins at
+the following 3 kHz tick and after acquiring the data mutex, so it understates
+the full notify-to-snapshot tail.
+
+A subsequent synchronous-inline experiment removed the worker handoff without
+changing q32, cadence, buffering, PCM arithmetic, or the PipeWire sink. Its
+48 kHz all-output control and candidate WAVs both matched the frozen reference
+exactly. Live q32 still failed: the threaded control added 14 underruns and the
+inline candidate added 12, with delivered-audio timeline steps at 0, 300, 621,
+and 669 samples. Moving effects and the PipeWire push onto the producer shaved
+two events but did not solve the tail and removed useful worker overlap, so it
+is also rejected.
+
+### Correction: there was no sound tail
+
+Every experiment above was measured with `MAME_CPUSET=20-21`,
+`MAME_NICE=0` and `MAME_RT_PRIORITY=1`. On this host CPUs 20-21 are the two
+2.5 GHz low-power efficiency cores of a Core Ultra 7 155H, and RR1 is the
+lowest real-time priority. `scripts/run-mpc.sh` deploys on CPUs `0-11`
+(4.5 GHz P-cores) at nice `-10` and `SCHED_RR` priority `20`. The deployment
+configuration was therefore never measured, and the reported ~160% speed was a
+property of the measurement cores, not of the emulator.
+
+Direct instrumentation of the deployment configuration settles the question:
+
+| Quantity | Deployment (`0-11`, RR20) | Measurement config (`20-21`, RR1) |
+|---|---|---|
+| PipeWire callback gap, nominal 725 us | 716-737 us | 716-731 us |
+| Underruns during the muted 400% boot phase | 105 | 1531 |
+| **Underruns during paced 44.1 kHz/q32 playback** | **0** | **5** |
+
+Callback jitter is at most 12 us. There is no scheduling stall, no lost
+wakeup and no worker-availability tail; the paced playback window on the
+deployment configuration delivers every quantum. The predicate wake fix, the
+one-slot generation handshake, the RR2 worker boost, the batched output
+publication and the synchronous inline effects path were all aimed at a stall
+that does not exist, which is why each of them "failed" the same gate
+regardless of what it changed.
+
+The delivered-audio comparator is not a valid acceptance gate for this
+fixture. `live-logic-mpc2000xl.lua` boots for 24 emulated seconds at
+`speed_factor = 4000`, where `realtime_pacing` is disabled (it requires
+`speed_factor <= 1100`) and the output is muted. During that phase MAME
+free-runs and the `abuffer` overrun path discards most of the generated audio.
+How much it discards depends on how fast the host boots, so a faster host
+corrupts the comparator's alignment more. That is why the deployment
+configuration scored roughly twenty times worse on the comparator
+(`integer_timeline_lags` around -750 versus around +-40) while simultaneously
+producing *fewer* real underruns. The comparator ranks the arms in the
+opposite order to their actual audio quality.
+
+Raising the pacing high-water mark does not help the playback window, because
+it is already clean. Sweeping `requested + N * requested` at 44.1 kHz/q32
+reduced only the inaudible boot-phase burst, with no playback benefit:
+
+| Prebuffer target | Queued latency | Boot-phase underruns | Playback underruns |
+|---|---|---|---|
+| 47 frames (`quantum` + one producer update, shipped) | 1.066 ms | 105 | 0 |
+| 64 frames | 1.451 ms | 50 | 1 |
+| 96 frames | 2.177 ms | 36 | 0 |
+| 192 frames | 4.354 ms | 16 | 0 |
+
+The shipped 47-frame margin is retained. Note that at 44.1 kHz the producer
+update is 14 or 15 frames, not 16: patch `0010` fixes the cadence at 3 kHz
+(`48000 / 16`), so at 44.1 kHz each update carries `44100 / 3000 = 14.7`
+frames on average. The 48-frame figure applies at 48 kHz.
+
+No new sound patch is warranted. Evidence is in
+`results/diagnostics/prebuffer-ab-20260813` (underrun split and prebuffer
+sweep), `results/diagnostics/pacing-stats-20260813` (deployment callback
+gaps), `results/diagnostics/scheduling-abba-20260813` and
+`results/diagnostics/cpuset-width-20260813` (scheduling ABBA), with the
+earlier rejected candidates retained in
+`results/diagnostics/sound-effects-inline-0033-gate-20260813-215500`,
+`results/diagnostics/live-timing-S9qJfy` and
+`results/diagnostics/live-timing-sumMYs`.
+
+## V33 opcode fetch window
+
+Profiling the fast stack (`scripts/diagnostics/profile-mpc2000xl-throughput.sh`)
+put 63.5% of emulation cycles in the V53 core and its memory accesses. The
+fetch path was the concentrated part of that: every opcode byte went through
+`v33_translate`, emitted out of line and worth 8.09%, and then a memory-cache
+read that dispatched into `handler_entry_read_memory<1, 0>::read`, worth 8.27%.
+A V33 instruction is one to six bytes, so that chain runs several times per
+instruction.
+
+Patch `0035` inlines the translation and caches a host pointer to the
+containing 16 KiB translation page, so a fetch inside the window costs a bounds
+check and an array load. The window is keyed on the translated physical
+address, so a write to the translation table simply moves the next fetch
+outside the window and triggers a refill; no invalidation hook is needed. A
+page is adopted only when `read_ptr()` resolves both ends to one contiguous
+RAM/ROM block, which rejects handler-backed or discontiguous regions.
+
+It is opt-in because it assumes the program map never changes. That holds here:
+the MPC2000XL V53 map is entirely `.ram()`/`.rom()` in blocks of at least
+512 KiB with no `membank` or `bankdev` anywhere in the driver, and 16 KiB pages
+divide those blocks evenly, so a page cannot straddle two regions. A machine
+that banks its V33 program space must leave `MPC_V53_FETCH_MODE=accurate`.
+
+Frozen 48 kHz all-output PCM is bit-identical with the window off and on, and
+again on the official ordered binary with the window enabled
+(`a65077eb...`), so this is an exact fast path rather than a
+timing-preserving one.
+
+An interleaved ABBA on the deployment CPUs measured:
+
+An interleaved ABBA of eight runs per arm on an otherwise idle host measured:
+
+| Arm | Mean | Median | Range |
+|---|---|---|---|
+| `accurate` | 727.2% | 720.2% | 686-786 |
+| `window` | 803.4% | 816.5% | 721-845 |
+
+That is a 10.49% gain on means and 10.52% averaged over adjacent pairs, with
+all eight pairs positive. An earlier ABBA taken while an unrelated 4-vCPU
+libvirt guest was competing for the same P-cores measured 482.3% against
+531.6%, a 10.2% gain: the relative result is stable across both noise
+conditions, but only the idle-host figures should be quoted as absolute
+throughput.
+
+Re-profiling with the window enabled confirmed the mechanism:
+`handler_entry_read_memory<1, 0>::read` fell from 8.27% to 2.19% and
+out-of-line `v33_translate` from 8.09% to 2.79%, the residual being data
+accesses rather than instruction fetch. Artifacts are in
+`results/diagnostics/profile-20260814`,
+`results/diagnostics/profile-fetchwindow-20260814`,
+`results/diagnostics/fetchwindow-pcm-20260814` and
+`results/diagnostics/fetchwindow-speed-20260814`.
+
+## Sound-update cadence derived from the quantum
+
+`STREAMS_UPDATE_FREQUENCY` is a fixed rate, so the frames carried by one host
+sound update are whatever `output rate / 3000` happens to be. At 48 kHz that is
+exactly 16, but at the MPC2000XL's native 44.1 kHz it is 14.7, so updates
+alternate between 14 and 15 frames and a 32-frame callback consumes a drifting
+2.177 updates rather than a whole number. The 47-frame margin follows from that
+alternation: it is `quantum + max(update)`, not a chosen value.
+
+Patch `0034` inverts the dependency. `MPC_SOUND_UPDATES_PER_QUANTUM=k` makes one
+update carry `quantum / k` frames, and `attotime::from_ticks` builds the period
+from an exact tick ratio, so a cadence that is not a whole number of hertz
+(44100 / 16 = 2756.25 Hz) carries no rounding drift. Exactly 16 frames at
+44.1 kHz/q32 is unreachable with a fixed integer cadence, because 44100 has no
+power-of-two divisor above 4; expressing the period rather than the frequency
+removes that constraint entirely.
+
+At `k=2` the shipped 44.1 kHz/q32 path gets exactly 16-frame updates, a 32/16 =
+2 callback-to-update ratio, and a 48-frame margin (1.088 ms, 0.023 ms above the
+47-frame margin it replaces).
+
+The mechanism is exact. At 48 kHz, `16/48000` is the historical 3 kHz cadence,
+and it reproduced the frozen PCM `a65077eb...` bit-for-bit; with the option
+unset the ordered binary also still renders `a65077eb...`. The 44.1 kHz cadence
+does move stream chunk boundaries and renders `d2fc99d7...`, so it is
+timing-preserving rather than an exact fast path, and enabling it means the
+fast preset is not a canonical PCM control. That preset already carries panel
+and MIDI event modes and the HLE paths, so this is not a new category for it.
+
+The deployment CPUs cannot measure the benefit: both arms record zero playback
+underruns and throughput differences sit inside run-to-run spread (control
+716.4/742.6%, derived 718.7/722.1%). The 8.0% reduction in sound-manager
+updates is real but does not surface where per-update overhead is a small share
+of the work.
+
+A marginal deadline does show it. On CPUs `20-21` at `SCHED_RR` 1, a matched
+ABBA of eight runs measured:
+
+| Arm | Playback underruns | Mean | Average speed |
+|---|---|---|---|
+| Fixed 3 kHz | 4, 4, 4, 4 | 4.00 | 151.9% |
+| `k=2` (16 frames) | 1, 2, 2, 3 | 2.00 | 154.6% |
+
+The arms separate completely, and the control repeats exactly four underruns in
+every run, which is the signature of a deterministic beat rather than random
+jitter -- consistent with a callback-to-update ratio that drifts instead of
+dividing. The residual 1 to 3 in the derived arm is scattered, so what remains
+looks like ordinary scheduling noise. The preset therefore enables `k=2`, and
+the normal launcher keeps the fixed cadence so the canonical PCM control is
+unchanged. Artifacts are in
+`results/diagnostics/cadence-marginal-20260814`,
+`results/diagnostics/cadence-pcm-20260814`,
+`results/diagnostics/cadence-pcm-regression-20260814` and
+`results/diagnostics/cadence-ab-20260814`.
+
+## Profile-guided official build and the idle-iteration skip
+
+Two further layers moved the fastest stack well past the fetch window.
+
+The official binary is now built profile-guided: `scripts/build-mame-pgo.sh`
+builds instrumented (`-fprofile-generate`), runs the Logic playback fixture
+with the full deployment options to collect a profile, and rebuilds with
+`-fprofile-use`. The flags baseline is `-march=native -ffp-contract=off` plus
+`LTO=1`. `-ffp-contract=off` is mandatory: plain `-march=native` enables FMA
+contraction, which changes float rounding in the stream-mixing chain and
+breaks the frozen PCM (`d37a16c5...` instead of `a65077eb...`). LTO without
+PGO is a measured regression (-7.87%, binary bloat 80 MB to 200 MB), but with
+the profile it inverts: PGO+LTO measured +11.44% over the generic `-O3` build
+in a matched ABBA with complete separation, PCM bit-identical.
+`scripts/build-mame.sh` gained `MAME_ARCHOPTS`/`MAME_LTO` passthrough and a
+flags stamp that clears the object tree whenever the configuration changes,
+because genie-generated makefiles neither track flag changes nor apply new
+`ARCHOPTS` without `REGENIE=1`.
+
+On top of that, patch `0037` eliminates most idle guest work. A guest-PC
+histogram (`MAME_MPC_V53_PC_HISTOGRAM`) showed twenty 64-byte regions covering
+72.5% of all executed V53 instructions, led by the OS main scheduler loop at
+RAM linear `0x0077f`: eleven service calls polling task flags, then a jump
+back. The skip records one full iteration and arms only when it closes as a
+verified pure fixed point (details in the patch-stack table); whole idle
+iterations are then charged without executing while the read set stays
+unchanged and no interrupt is pending. The sub-iteration remainder always
+executes normally, so interrupts land mid-loop exactly as unskipped.
+
+Acceptance: frozen PCM bit-identical with 440,668 iterations skipped; the
+live 44.1 kHz/q32 preset recorded zero PipeWire underruns in both the boot
+and playback windows (the boot burst that previously produced about a hundred
+inaudible underruns disappears entirely, because the unpaced boot now outruns
+the producer margin); and a matched interleaved ABBA measured:
+
+| Arm | Mean | Range |
+|---|---|---|
+| skip off | 819.6% | 777-882 |
+| skip on | 1036.3% | 990-1070 |
+
++26.4% with complete separation. A second recorded head covering the
+tick-counter wait loop at linear `0x01691` raised the mean to 1062% (peak
+1119%) with 3,044,036 skipped iterations, still bit-exact and still zero
+playback underruns. The remaining guest work concentrates in the 31.4 kHz
+sample-feed service (V53 DMA programming toward the DSP) and the DMA-ready
+poll at `0x36115`, which are real work rather than idle and would need
+service-level HLE or device-cooperative completion hints. Artifacts:
+`results/diagnostics/idleskip-pcm2-20260814`,
+`results/diagnostics/idleskip-live-20260814`,
+`results/diagnostics/idleskip-abba-20260814`,
+`results/diagnostics/v53-pc-histogram-101531`,
+`results/diagnostics/pgo-abba-20260814`,
+`results/diagnostics/flags-abba-20260814`.
+
+## Throughput with sound and the LCD enabled
+
+`scripts/diagnostics/test-mpc2000xl-headroom.sh` runs the Logic fixture with
+MAME's own throttle far above real time, so the reported average speed is
+achieved throughput rather than a paced playback rate. Sound is fully
+processed and the OpenGL LCD is presented in every arm; only the CPU set, nice
+level and `SCHED_RR` priority differ. Two passes, ordered patch stack, fast
+preset options, `MPC_LCD_UPDATE_MODE=changed`, stereo host topology:
+
+| Arm | CPUs | Clock | Achieved speed |
+|---|---|---|---|
+| Deployment P-cores, nice -10, RR20 | `0-11` | 4.5 GHz | **706.6%, 698.3%** (through `0033`; ~803% with `0035`) |
+| E-cores, nice -10, RR20 | `12-19` | 3.8 GHz | 502.5%, 486.6% |
+| Earlier measurement config, nice 0, RR1 | `20-21` | 2.5 GHz | 283.8%, 299.8% |
+
+The deployment configuration sustains about 7x real time with sound and the
+LCD active, so a 450% target is met with roughly 55% margin, and even the
+E-cores clear it. A live 44.1 kHz device still consumes audio at 1.0x; this
+number is the headroom available to absorb spikes, not a playback rate.
+Artifacts are in `results/diagnostics/headroom-20260813`.
+
 ## Async rendering and resize regression
 
 Primitive-list generation reads live layout inputs, outputs, screen
@@ -391,13 +803,14 @@ accepted. The failed run is
 this resize cost without changing the validated 32-frame audio settings.
 
 Patch `0030-render-fixed-artwork-resolution.patch` separates physical output
-geometry from CPU-side layout-element rasterization. With the launcher default
-of `1280x720`, panel SVGs, labels and static artwork use one stable cache key
-through a resize; OpenGL linearly samples those textures at the actual window
-size. Primitive bounds, mouse/pad hit mapping, the emulated LCD, MAME UI and
-hidden snapshot targets retain their actual resolution. `auto` is MAME's core
-default and restores the original target-sized artwork path. Other machines
-also remain on `auto` unless explicitly overridden.
+geometry from CPU-side layout-element rasterization. With the opt-in
+`MPC_ARTWORK_RESOLUTION=1280x720`, panel SVGs, labels and static artwork use
+one stable cache key through a resize; OpenGL linearly samples those textures
+at the actual window size. Primitive bounds, mouse/pad hit mapping, the
+emulated LCD, MAME UI and hidden snapshot targets retain their actual
+resolution. `auto` is both MAME's core default and the launcher default, and
+restores the original target-sized artwork path. Other machines also remain on
+`auto` unless explicitly overridden.
 
 In the same 440-request 680-to-1920-pixel resize sweep, the fixed path reduced
 the emulation-thread primitive-generation maximum from 115.667 ms to 2.433 ms

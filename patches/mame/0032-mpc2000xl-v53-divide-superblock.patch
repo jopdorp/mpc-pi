@@ -1,0 +1,257 @@
+--- a/src/devices/cpu/nec/nec.cpp
++++ b/src/devices/cpu/nec/nec.cpp
+@@ -321,6 +321,7 @@ void nec_common_device::device_reset()
+ 	m_rep_params = 0;
+ 	m_mpc2000xl_brk88_handler_valid = false;
+ 	m_mpc2000xl_brkfd_handler_valid = false;
++	m_mpc2000xl_divide_superblock_valid = false;
+ 
+ 	if (m_chip_type == V33_TYPE)
+ 		m_xa = false;
+@@ -618,6 +619,163 @@ bool nec_common_device::mpc2000xl_brkfd_hle(bool saved_tf)
+ 	return true;
+ }
+ 
++bool nec_common_device::validate_mpc2000xl_divide_superblock(offs_t code_start)
++{
++	static constexpr u8 expected_code[] =
++	{
++		0x55, 0x52, 0x50, 0x2b, 0xc7, 0x1b, 0xd6, 0x72,
++		0x05, 0x5d, 0x5d, 0xf9, 0xeb, 0x03, 0x58, 0x5a,
++		0xf8, 0xd1, 0xd3, 0xd1, 0xd1, 0xd1, 0xee, 0xd1,
++		0xdf, 0x5d, 0x4d, 0x75, 0xe3
++	};
++
++	for (unsigned index = 0; index < std::size(expected_code); ++index)
++		if (read_mem_byte(0x150a + index) != expected_code[index])
++			return false;
++
++	m_mpc2000xl_divide_superblock_cached_start = code_start;
++	m_mpc2000xl_divide_superblock_valid = true;
++	install_mpc2000xl_divide_superblock_write_tap(code_start);
++	if (!m_mpc2000xl_divide_superblock_reported)
++	{
++		osd_printf_info("%s: MPC2000XL 32-bit divide firmware superblock active\n", tag());
++		m_mpc2000xl_divide_superblock_reported = true;
++	}
++	return true;
++}
++
++void nec_common_device::install_mpc2000xl_divide_superblock_write_tap(offs_t code_start)
++{
++	m_mpc2000xl_divide_superblock_tap.remove();
++	// This is a 16-bit program space, so passthrough-handler ranges must cover
++	// complete native words. The firmware block ends on an even byte; include
++	// the following byte conservatively so the tap has a valid inclusive end.
++	m_mpc2000xl_divide_superblock_tap = m_program->install_write_tap(
++		code_start, code_start + 0x1d, "mpc2000xl_divide_superblock",
++		[this](offs_t, u16 &, u16) { invalidate_mpc2000xl_divide_superblock(); },
++		&m_mpc2000xl_divide_superblock_tap);
++}
++
++void nec_common_device::invalidate_mpc2000xl_divide_superblock()
++{
++	m_mpc2000xl_divide_superblock_valid = false;
++}
++
++bool nec_common_device::mpc2000xl_divide_superblock()
++{
++	static constexpr u32 logical_start = 0x150a;
++	static constexpr u16 code_length = 0x1d;
++
++	if (!m_mpc2000xl_divide_superblock_enabled || !m_mpc2000xl_rom_valid ||
++		(m_chip_type != V33_TYPE) || ((u32(Sreg(PS)) << 4) + m_ip != logical_start) ||
++		m_rep_params || m_seg_prefix || m_no_interrupt || m_halted || m_TF ||
++		(m_pending_irq & NMI_IRQ) || !Wreg(BP) ||
++		(machine().debug_flags & (DEBUG_FLAG_ENABLED | DEBUG_FLAG_CALL_HOOK)))
++		return false;
++
++	const u32 dividend = (u32(Wreg(DW)) << 16) | Wreg(AW);
++	const u32 divisor = (u32(Wreg(IX)) << 16) | Wreg(IY);
++	const bool borrow = dividend < divisor;
++	const int block_cycles = borrow ? 47 : 59;
++	if (m_icount < block_cycles)
++		return false;
++
++	const offs_t address_mask = m_program->addrmask();
++	const offs_t code_start = v33_translate(logical_start) & address_mask;
++	// Leave room for the complete native word covered by the invalidation tap.
++	if (code_start > (address_mask - code_length))
++		return false;
++	const offs_t code_end = code_start + code_length - 1;
++	const u32 stack_base = u32(Sreg(SS)) << 4;
++	for (unsigned index = 1; index <= 6; ++index)
++	{
++		const offs_t address = v33_translate(stack_base + u16(Wreg(SP) - index)) & address_mask;
++		if (((address >= code_start) && (address <= code_end)) || (address & 0x080000))
++			return false;
++	}
++
++	if (m_mpc2000xl_divide_superblock_valid &&
++		(code_start != m_mpc2000xl_divide_superblock_cached_start))
++		invalidate_mpc2000xl_divide_superblock();
++	if (!m_mpc2000xl_divide_superblock_valid &&
++		!validate_mpc2000xl_divide_superblock(code_start))
++		return false;
++
++	const u16 entry_ip = m_ip;
++	const u16 saved_sp = Wreg(SP);
++	const u16 saved_bp = Wreg(BP);
++	const u16 saved_dx = Wreg(DW);
++	const u16 saved_ax = Wreg(AW);
++
++	// Preserve the three PUSH writes and their stack-pointer ordering. The
++	// matching POP reads are redundant for plain MPC2000XL RAM; the final RAM
++	// contents are exactly these three values.
++	Wreg(SP) -= 2;
++	write_mem_word(stack_base + Wreg(SP), saved_bp);
++	Wreg(SP) -= 2;
++	write_mem_word(stack_base + Wreg(SP), saved_dx);
++	Wreg(SP) -= 2;
++	write_mem_word(stack_base + Wreg(SP), saved_ax);
++
++	{
++		uint32_t src = Wreg(IY);
++		uint32_t dst = Wreg(AW);
++		SUBW;
++		Wreg(AW) = dst;
++	}
++	{
++		uint32_t src = Wreg(IX);
++		uint32_t dst = Wreg(DW);
++		SUBCW;
++		Wreg(DW) = dst;
++	}
++	if (borrow)
++	{
++		Wreg(AW) = saved_ax;
++		Wreg(DW) = saved_dx;
++		m_CarryVal = 0;
++	}
++	else
++	{
++		m_CarryVal = 1;
++	}
++
++	{
++		uint32_t dst = (u32(Wreg(BW)) << 1) + CF;
++		SetCFW(dst);
++		Wreg(BW) = dst;
++	}
++	{
++		uint32_t dst = (u32(Wreg(CW)) << 1) + CF;
++		SetCFW(dst);
++		Wreg(CW) = dst;
++	}
++	{
++		uint32_t dst = Wreg(IX);
++		m_CarryVal = dst & 1;
++		dst >>= 1;
++		SetSZPF_Word(dst);
++		Wreg(IX) = dst;
++	}
++	{
++		uint32_t dst = (u32(CF) << 16) | Wreg(IY);
++		m_CarryVal = dst & 1;
++		Wreg(IY) = dst >> 1;
++	}
++
++	Wreg(SP) = saved_sp;
++	Wreg(BP) = saved_bp;
++	{
++		DecWordReg(BP);
++	}
++	m_prev_ip = u16(entry_ip + 0x1b);
++	m_ip = Wreg(BP) ? entry_ip : u16(entry_ip + code_length);
++	m_prefetch_count = 0;
++	m_prefetch_reset = 0;
++	CLK(block_cycles);
++	return true;
++}
++
+ void nec_common_device::external_int()
+ {
+ 	if (m_pending_irq & NMI_IRQ)
+@@ -771,7 +929,8 @@ void nec_common_device::device_start()
+ 		assert(s_nec_instruction[0x3c] == &nec_common_device::i_cmp_ald8);
+ 		osd_printf_info("%s: MPC2000XL V53 direct opcode dispatch active\n", tag());
+ 	}
+-	if (m_mpc2000xl_brk88_hle_enabled || m_mpc2000xl_brkfd_hle_enabled)
++	if (m_mpc2000xl_brk88_hle_enabled || m_mpc2000xl_brkfd_hle_enabled ||
++		m_mpc2000xl_divide_superblock_enabled)
+ 	{
+ 		util::sha1_t expected_rom_sha1;
+ 		expected_rom_sha1.from_string("382be688972fe3d85caeca99abff4b6c391347fb");
+@@ -787,6 +946,9 @@ void nec_common_device::device_start()
+ 			if (m_mpc2000xl_brkfd_hle_enabled)
+ 				machine().save().register_postload(
+ 					save_prepost_delegate(FUNC(nec_common_device::invalidate_mpc2000xl_brkfd_handler), this));
++			if (m_mpc2000xl_divide_superblock_enabled)
++				machine().save().register_postload(
++					save_prepost_delegate(FUNC(nec_common_device::invalidate_mpc2000xl_divide_superblock), this));
+ 		}
+ 		else
+ 		{
+@@ -951,6 +1113,10 @@ void nec_common_device::execute_run_mode()
+ 
+ 		debugger_instruction_hook((Sreg(PS)<<4) + m_ip);
+ 		m_cur_cycles = 0;
++		if (m_mpc2000xl_divide_superblock_enabled &&
++			((u32(Sreg(PS)) << 4) + m_ip == 0x150a) &&
++			mpc2000xl_divide_superblock())
++			continue;
+ 
+ 		if (m_rep_params)
+ 			cont_rep();
+--- a/src/devices/cpu/nec/nec.h
++++ b/src/devices/cpu/nec/nec.h
+@@ -32,6 +32,7 @@ public:
+ 	void set_mpc2000xl_brk88_hle(bool enable) { m_mpc2000xl_brk88_hle_enabled = enable; }
+ 	void set_mpc2000xl_brkfd_hle(bool enable) { m_mpc2000xl_brkfd_hle_enabled = enable; }
+ 	void set_mpc2000xl_direct_dispatch(bool enable) { m_mpc2000xl_direct_dispatch = enable; }
++	void set_mpc2000xl_divide_superblock(bool enable) { m_mpc2000xl_divide_superblock_enabled = enable; }
+ 
+ protected:
+ 	// construction/destruction
+@@ -121,6 +122,11 @@ protected:
+ 	bool m_mpc2000xl_brkfd_reported = false;
+ 	offs_t m_mpc2000xl_brkfd_cached_handler_start = 0;
+ 	memory_passthrough_handler m_mpc2000xl_brkfd_handler_tap;
++	bool m_mpc2000xl_divide_superblock_enabled = false;
++	bool m_mpc2000xl_divide_superblock_valid = false;
++	bool m_mpc2000xl_divide_superblock_reported = false;
++	offs_t m_mpc2000xl_divide_superblock_cached_start = 0;
++	memory_passthrough_handler m_mpc2000xl_divide_superblock_tap;
+ 
+ 	address_space *m_program;
+ 	memory_access<24, 0, 0, ENDIANNESS_LITTLE>::cache m_cache8;
+@@ -181,6 +187,10 @@ protected:
+ 	bool validate_mpc2000xl_brkfd_handler(offs_t handler_start);
+ 	void install_mpc2000xl_brkfd_write_tap(offs_t handler_start);
+ 	void invalidate_mpc2000xl_brkfd_handler();
++	bool mpc2000xl_divide_superblock();
++	bool validate_mpc2000xl_divide_superblock(offs_t code_start);
++	void install_mpc2000xl_divide_superblock_write_tap(offs_t code_start);
++	void invalidate_mpc2000xl_divide_superblock();
+ 
+ 	uint8_t start_rep();
+ 	void cont_rep();
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -762,6 +762,8 @@ void mpc2000_state::mpc2000xl(machine_config &config)
+ 	const bool brkfd_hle = brkfd_hle_mode && std::strcmp(brkfd_hle_mode, "0");
+ 	const char *const direct_dispatch_mode = osd_getenv("MAME_MPC_V53_DIRECT_DISPATCH");
+ 	const bool direct_dispatch = direct_dispatch_mode && std::strcmp(direct_dispatch_mode, "0");
++	const char *const divide_superblock_mode = osd_getenv("MAME_MPC_V53_DIVIDE_SUPERBLOCK");
++	const bool divide_superblock = divide_superblock_mode && std::strcmp(divide_superblock_mode, "0");
+ 	const char *const stereo_only_mode = osd_getenv("MAME_MPC_STEREO_ONLY");
+ 	const bool stereo_only = stereo_only_mode && std::strcmp(stereo_only_mode, "0");
+ 	if (event_driven_panel)
+@@ -771,6 +773,7 @@ void mpc2000_state::mpc2000xl(machine_config &config)
+ 	m_maincpu->set_mpc2000xl_brk88_hle(brk88_hle);
+ 	m_maincpu->set_mpc2000xl_brkfd_hle(brkfd_hle);
+ 	m_maincpu->set_mpc2000xl_direct_dispatch(direct_dispatch);
++	m_maincpu->set_mpc2000xl_divide_superblock(divide_superblock);
+ 	m_maincpu->set_direct_brc_timer(event_driven_panel);
+ 	m_maincpu->set_addrmap(AS_PROGRAM, &mpc2000_state::mpc2000_map);
+ 	m_maincpu->set_addrmap(AS_IO, &mpc2000_state::mpc2000_io_map);

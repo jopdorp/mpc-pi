@@ -204,8 +204,9 @@ machine reads back to the presenter.
 Patch 0030 adds an independently selectable fixed artwork raster. It leaves
 the actual target, input geometry, LCD and UI resolution unchanged while using
 a canonical 1280x720 transform only for layout-element texture generation.
-The core option defaults to `auto`; the MPC2000XL launcher selects 1280x720 and
-can explicitly return to `auto`. In a matched 440-request resize storm, the
+The core and launcher default to `auto`; the opt-in
+`MPC_ARTWORK_RESOLUTION=1280x720` path uses the fixed raster. In a matched
+440-request resize storm, the
 emulation-thread primitive-generation maximum fell from 115.667 ms to 2.433 ms
 after warm-up, about 47.5x. The exact canonical-size fixed/auto image comparison
 had zero changed pixels. OpenGL linearly samples fixed artwork; extending the
@@ -369,7 +370,219 @@ less underlying emulation and sound work, but does not estimate a visible
 renderer. A new matched end-to-end run and native Cortex-A53 measurement are
 required before using either estimate as Raspberry Pi readiness evidence.
 
-### Rejected post-accessor cuts
+### Pristine-MAME cumulative candidate result
+
+A fresh fixed-work ABBA at
+`results/diagnostics/vanilla-vs-0033-headless-20260813` compares pristine MAME
+revision `f8c55f4cdad70fa5b7dfae9a26a15114aea70f9a` with the cumulative
+candidate including the repaired hotblock experiment. Both sides ran the same
+loaded-Logic fixture for 84 emulated seconds on CPU 20 with video, host audio
+and throttling disabled. The
+optimized side selected event panel/MIDI clocks, coalesced panel timing,
+BRK88 HLE, direct top-eight V53 dispatch, stereo host topology, the divide
+superblock and all three repaired hotblocks; BRK FD remained accurate.
+
+Here `0033` is the historical optimization-campaign candidate number in the
+artifact name. It predates and is unrelated to ordered patch 0033, the
+unchanged-LCD-frame path documented below.
+
+| Counter | Pristine mean | Candidate mean | Reduction / ratio |
+|---|---:|---:|---:|
+| Task clock | 79,296.40 ms | 18,521.20 ms | 76.64% / 4.28x |
+| Host cycles | 192.817 billion | 44.920 billion | 76.70% / 4.29x |
+| Retired instructions | 601.733 billion | 130.963 billion | 78.24% / 4.59x |
+| Retired branches | 139.491 billion | 25.831 billion | 81.48% / 5.40x |
+| Average emulation speed | 108.07% | 473.67% | 4.38x |
+
+The two runs on each side were tightly grouped: pristine cycles differed by
+0.005% and optimized cycles by 0.41%. This is the first direct pristine-MAME
+versus cumulative-stack measurement. It is headless, host-audio-inactive
+evidence and includes patch 0027's headless-only primitive skip, so it must not
+be presented as an LCD, full-panel, live-PipeWire or Raspberry Pi readiness
+result. The larger current-stack matrix subsequently rejected the hotblocks;
+the retained divide + stereo + BRK FD combination is measured separately
+below.
+
+### Post-accessor candidates
+
+Patch 0031 retains an optional stereo-only host topology for a two-channel DAC
+or headphones. The launcher default remains `MPC_OUTPUT_MODE=all` for a
+multichannel interface and for projects that use the eight assignable
+outputs. `MPC_OUTPUT_MODE=stereo` removes those eight host endpoints without
+downmixing them, so voices routed exclusively to an assignable output are
+intentionally inaudible. A separate `cfg-stereo` directory protects the saved
+all-output channel mapping.
+
+A clean current-stack ABBA measured only 1.39% less task CPU, 1.72% fewer
+cycles, 1.93% fewer instructions and 1.62% higher reported speed. The full and
+stereo captures preserved the floppy and main L/R channels sample-for-sample.
+It is retained for host-topology convenience and as an independently removable
+cumulative small win. The focused validation and performance evidence are in
+`results/diagnostics/stereo-output-pyexS7` and
+`results/diagnostics/current-stack-stereo-perf-VntjgN`.
+
+Patch 0032 retains the independently selectable, ROM-gated V53 32-bit divide
+superblock under the revised cumulative-small-wins policy. Its matched ABBA
+measured 1.88% less task CPU and 2.33% fewer cycles, and its 11-channel PCM
+matched the frozen reference exactly. The launcher keeps it off by default;
+`MPC_V53_DIVIDE_MODE=superblock` selects it.
+
+Patch 0033 adds the independently selectable LCD unchanged-frame path.
+`MPC_LCD_UPDATE_MODE=changed` still copies the full 248x60 bitmap on every
+screen callback, but returns MAME's unchanged-frame status when no LCD RAM byte
+changed so the renderer can suppress a redundant texture commit. The normal
+launcher and raw MAME default remain `accurate`; the fastest LCD-only preset
+selects `changed`.
+
+The frozen PCM was byte-exact. Five raw-pixel and five PNG checkpoints were
+exact between modes and across repeats, including the official ordered-stack
+binary. Its live Screen 0 ABBA with active PipeWire at native 44.1 kHz/q32
+measured 3.27% less task CPU, 3.82% fewer cycles, 1.69% fewer retired
+instructions, and 1.90% fewer branches. Both chronological pairs improved all
+four metrics. Every sampled marker-window PipeWire node stayed at `ERR=0`;
+monitoring began at the marker, so the pre-marker startup interval and the
+complete end-to-end xrun-free launch gate remain open. Evidence is in
+`results/diagnostics/ordered-0033-correctness-20260813-uOi97M` and
+`results/diagnostics/official-0033-lcd-live-abba-20260813`.
+
+The repaired hotblock experiment adds three independently selectable,
+ROM-gated firmware blocks
+while preserving the outer interrupt, debugger, cycle-budget and prefetch
+boundary after every guest instruction. An initial BLIT implementation missed
+braces around the multi-statement `SHR_WORD` macro: with a zero shift count,
+the macro performed undefined shifting and wrote zero to BX, visibly dropping
+LCD pixels. The repaired implementation is pixel-identical in repeated native
+LCD captures and composes with patch 0032. Two complete 11-channel captures
+with divide and all hotblocks active matched the frozen reference. An earlier
+narrow ABBA appeared positive, but the larger palindrome LCD matrix
+measured 1.31% more cycles for hotblocks alone and 2.48% more cycles with the
+divide patch. It is therefore preserved at
+`patches/experiments/mpc2000xl-v53-hotblocks-repaired.patch`, outside the
+ordered stack and launcher.
+
+The same comprehensive matrix resurrected BRK FD HLE: it measured 3.49% less
+task CPU, 2.46% fewer cycles and 2.06% fewer instructions, while two composed
+11-channel captures remained byte-exact. The final retained combination—divide
+superblock, BRK FD HLE and stereo host topology, with hotblocks absent—measured
+6.36% less task CPU, 6.19% fewer cycles, 4.73% fewer instructions and 6.97%
+higher emulation speed on the official through-0032 build-script binary in
+`results/diagnostics/official-0032-winning-stack-abba-20260813`.
+
+Using the preserved pristine means above with the identically pinned final
+candidate runs gives a cross-series estimate of 4.43x task throughput, 4.42x
+cycle throughput and 4.53x reported speed versus pristine MAME. The direct
+interleaved pristine comparison remains the more conservative 4.28x cycles /
+4.38x speed result because its candidate still included the later-rejected
+hotblocks.
+
+### Rejected-experiment resurrection policy
+
+Small positive cuts are no longer discarded merely for missing a standalone
+3% threshold. Retain them when both chronological pairs improve task CPU and
+cycles, correctness is exact, and the implementation remains independently
+removable. Under that rule, stereo topology, the divide superblock, and BRK FD
+HLE are cumulative candidates, as is the separately measured unchanged-LCD
+path. Correct-but-negative hotblocks remain research artifacts rather than
+shipped paths.
+
+Do not restore failed implementations unchanged:
+
+- The per-instruction replay cache was exact but added about 20% task CPU and
+  cycles because it translated, resolved and compared backing bytes at every
+  instruction. Its useful idea survives only as validation amortized across a
+  multi-instruction block.
+- The timing-atomic `3f76` wrapper moved first audio onset by about 895.8 us.
+  Only its scheduler-boundary-preserving split form is admissible, and that
+  form measured essentially neutral.
+- The panel `03d5` decoder shortcut saved about 0.08% instructions, and the
+  forced-inline V33 translation experiment regressed task CPU and cycles.
+  Neither has a concrete correctness or implementation bug that would recover
+  useful host time.
+- The old atomic bit-blit wrapper and OpenGL PBO experiment were genuine host
+  regressions. The bit-blit opportunity is superseded by the boundary-exact
+  repaired hotblock; the PBO path remains rejected.
+- Synchronous inline sound effects preserved the frozen all-output PCM but did
+  not resolve live q32 delivery: underruns changed only from 14 in the threaded
+  control to 12 inline, and the delivered stream still inserted whole-sample
+  timeline steps. It remains a diagnostic artifact, not a patch or launcher
+  mode.
+- Exact uPD78C10 panel timer batching is not achievable at reasonable cost and
+  was reverted after implementation and bisection. A deficit/flush design with
+  conservative event bounds covered timer 0/1 matches, the coalesced timer
+  F/F, the event counter (the panel runs ETMM=0x0c free-run ECNT), and the A/D
+  converter's per-conversion sampling instants, and was engaged 99% of the
+  time - but frozen PCM diverged for any window larger than two cycles.
+  Bisection showed the panel's serial engine is the blocker: with the timer
+  F/F feeding update_sio, a serial edge falls every machine cycle
+  (interval/2 = 1 at SMH=0x0c/SML settings), each transmit edge drives
+  txd_func toward the V53 mid-transfer, and while receive is enabled every
+  edge samples rxd_func hunting for a start bit. Deferring any of that
+  reorders panel-to-V53 serial traffic against TXB writes. Reducing panel
+  cost further therefore requires extending the 0019-style event-driven
+  serial path, not cycle batching. The uPD78C10 remains about 13% of host
+  cycles after the idle skip.
+- The idle-iteration recorder/skip (patch `0037`) is the largest single win in
+  the project so far: +26.4% average speed (819.6% to 1036.3%, complete
+  separation) with bit-identical frozen PCM while 440,668 iterations were
+  skipped, and zero live 44.1 kHz/q32 underruns in both boot and playback
+  windows. It descends from the rejected per-instruction replay cache: the
+  replay idea was sound but validated at every instruction (+20% overhead);
+  amortizing validation across a whole recorded loop iteration and verifying
+  the read set once per timeslice makes it profitable. The one non-obvious
+  implementation detail: net-zero write accounting must dedup by address on
+  the first write, because all eleven same-depth calls in the OS main loop
+  re-push the same stack slot, and per-event accounting misreads that as a
+  state change. Guest-PC histogram evidence:
+  `results/diagnostics/v53-pc-histogram-101531` (top twenty 64-byte regions
+  cover 72.5% of executed instructions).
+- Compiler-flag experiments on the 36-patch stack: `-march=native` alone
+  breaks the frozen PCM (`d37a16c5...` versus `a65077eb...`) because FMA
+  contraction changes float rounding in the stream-mixing chain;
+  `-ffp-contract=off` restores bit-exactness. With exactness restored,
+  `-march=native -ffp-contract=off` plus `LTO=1` measured 7.87% *slower* than
+  the generic `-O3` build (817.7% versus 753.4% mean over a matched ABBA), with
+  the binary growing from 80 MB to 200 MB: LTO's cross-TU inlining bloats the
+  interpreter past its cache-friendly layout. Note that genie-generated
+  makefiles do not track flag changes, so every flag experiment must wipe the
+  object directory or it silently reuses stale objects. Evidence:
+  `results/diagnostics/flags-abba-20260814`,
+  `results/diagnostics/nativelto-pcm-20260814` (PCM failure),
+  `results/diagnostics/nativefpoff-pcm-20260814` (PCM restored).
+- The V33 data-access window (patch `0036`) is the data-side sibling of the
+  fetch window. It is PCM-exact and deterministically removes 2.59% of retired
+  instructions and 2.32% of branch misses, but desktop wall clock is null
+  (+0.10% across sixteen interleaved runs): the out-of-order host hides the
+  removed dispatch work. It ships default-off everywhere and is a first-class
+  Cortex-A53 qualification candidate, where two indirect calls per data access
+  are not free. Evidence: `results/diagnostics/datawindow-speed-20260814` and
+  the `datawindow-perf-20260814-*` counter runs.
+- The direct-pointer opcode fetch window that won 10.2% on the V53 (patch
+  `0035`) does not transfer to the uPD78C10 panel MCU. Its program map is the
+  same static ROM shape and the window is PCM-exact there, but an interleaved
+  ABBA of eight runs per arm measured +0.23% with a pooled standard deviation
+  of 2.69% of the mean: the arms overlap almost completely. `execute_run`'s
+  3.20% is the whole panel interpreter, of which fetch is one slice, and the
+  MCU retires far fewer instructions than the V53. A prior hypothesis that its
+  halted branch was spinning per cycle was falsified by instrumentation
+  (`halt_cycles=0`, `run_instructions=17,971,042`); the MCU is never halted.
+  Reducing it further needs firmware HLE in the style of `0023`/`0024`, not a
+  fetch fast path. Evidence:
+  `results/diagnostics/panelwindow-speed-20260814`.
+- The whole sound-tail line of work is closed as a measurement error. It was
+  conducted on CPUs `20-21` at `SCHED_RR` priority 1; those are this host's
+  2.5 GHz low-power E-cores, and the launcher deploys on the 4.5 GHz P-cores
+  `0-11` at nice `-10` and RR `20`. Measured on the deployment configuration,
+  PipeWire callback gaps stay within 12 us of the 725 us nominal and the paced
+  44.1 kHz/q32 playback window records zero underruns, so there is no stall for
+  the handshake, RR2 boost, batched publication or inline path to remove. The
+  delivered-audio comparator that rejected them is invalid for this fixture:
+  its unpaced 400% boot phase discards audio in proportion to host speed, so it
+  scored the faster, cleaner deployment configuration roughly twenty times
+  worse. Details and the prebuffer sweep are in
+  [`mpc2000xl-low-latency.md`](mpc2000xl-low-latency.md).
+
+BRK FD HLE is now a retained default-off small win on this host. Native
+Cortex-A53 measurement is still required before enabling it by default.
 
 Forcing the existing V33 translation helper inline reduced generated fetch
 code and one matched pair retired 1.51% fewer instructions and 6.35% fewer
@@ -451,3 +664,13 @@ all rejected. The next code-sized opportunity must therefore be a separately
 scoped broader V53 dispatch/device-model change with a measured multi-percent
 ceiling; do not resume the panel decoder or generic scheduler work unless new
 evidence redirects the work.
+
+## Final-push plan
+
+The concrete implementation plan for the two remaining large levers - the
+31.4 kHz sample-feed superblock HLE (patch `0040`) and the panel serial event
+extension with timer-batch resurrection (patch `0039`) - is maintained in
+[`plan-sample-feed-hle-and-panel-serial.md`](plan-sample-feed-hle-and-panel-serial.md),
+including the interrupt-vector map extracted from the playback RAM dump, the
+disassembled service bodies, the shadow-validation methodology, sequencing,
+effort estimates and the acceptance battery.

@@ -1,0 +1,49 @@
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+index 01509c92..c99fb235 100644
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -762,6 +762,8 @@ void mpc2000_state::mpc2000(machine_config &config)
+ 	const bool brkfd_hle = brkfd_hle_mode && std::strcmp(brkfd_hle_mode, "0");
+ 	const char *const direct_dispatch_mode = osd_getenv("MAME_MPC_V53_DIRECT_DISPATCH");
+ 	const bool direct_dispatch = direct_dispatch_mode && std::strcmp(direct_dispatch_mode, "0");
++	const char *const stereo_only_mode = osd_getenv("MAME_MPC_STEREO_ONLY");
++	const bool stereo_only = stereo_only_mode && std::strcmp(stereo_only_mode, "0");
+ 	if (event_driven_panel)
+ 		add_panel(config, true, coalesced_panel_timer);
+ 
+@@ -873,7 +875,8 @@ void mpc2000_state::mpc2000(machine_config &config)
+ 	TIMER(config, "dialtimer").configure_periodic(FUNC(mpc2000_state::dial_timer_tick), attotime::from_hz(60.0));
+ 
+ 	SPEAKER(config, "speaker", 2).front();
+-	SPEAKER(config, "outputs", 8).unknown();
++	if (!stereo_only)
++		SPEAKER(config, "outputs", 8).unknown();
+ 
+ 	L7A1045(config, m_dsp, 33.8688_MHz_XTAL); // clock verified by schematic
+ 	m_dsp->set_addrmap(AS_DATA, &mpc2000_state::dsp_map);
+@@ -883,14 +886,17 @@ void mpc2000_state::mpc2000(machine_config &config)
+ 	m_dsp->add_route(l7a1045_sound_device::L6028_LEFT, "speaker", 1.0, 0);
+ 	m_dsp->add_route(l7a1045_sound_device::L6028_RIGHT, "speaker", 1.0, 1);
+ 
+-	m_dsp->add_route(l7a1045_sound_device::L6028_OUT0, "outputs", 1.0, 0);
+-	m_dsp->add_route(l7a1045_sound_device::L6028_OUT1, "outputs", 1.0, 1);
+-	m_dsp->add_route(l7a1045_sound_device::L6028_OUT2, "outputs", 1.0, 2);
+-	m_dsp->add_route(l7a1045_sound_device::L6028_OUT3, "outputs", 1.0, 3);
+-	m_dsp->add_route(l7a1045_sound_device::L6028_OUT4, "outputs", 1.0, 4);
+-	m_dsp->add_route(l7a1045_sound_device::L6028_OUT5, "outputs", 1.0, 5);
+-	m_dsp->add_route(l7a1045_sound_device::L6028_OUT6, "outputs", 1.0, 6);
+-	m_dsp->add_route(l7a1045_sound_device::L6028_OUT7, "outputs", 1.0, 7);
++	if (!stereo_only)
++	{
++		m_dsp->add_route(l7a1045_sound_device::L6028_OUT0, "outputs", 1.0, 0);
++		m_dsp->add_route(l7a1045_sound_device::L6028_OUT1, "outputs", 1.0, 1);
++		m_dsp->add_route(l7a1045_sound_device::L6028_OUT2, "outputs", 1.0, 2);
++		m_dsp->add_route(l7a1045_sound_device::L6028_OUT3, "outputs", 1.0, 3);
++		m_dsp->add_route(l7a1045_sound_device::L6028_OUT4, "outputs", 1.0, 4);
++		m_dsp->add_route(l7a1045_sound_device::L6028_OUT5, "outputs", 1.0, 5);
++		m_dsp->add_route(l7a1045_sound_device::L6028_OUT6, "outputs", 1.0, 6);
++		m_dsp->add_route(l7a1045_sound_device::L6028_OUT7, "outputs", 1.0, 7);
++	}
+ 
+ #if ENABLE_FLASH
+ 	INTEL_28F016SA_16BIT(config, m_flash[0]);

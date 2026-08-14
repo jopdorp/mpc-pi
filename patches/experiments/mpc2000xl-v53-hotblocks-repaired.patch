@@ -1,0 +1,892 @@
+# Repaired correctness experiment; not part of the accepted ordered stack.
+--- a/src/devices/cpu/nec/nec.cpp
++++ b/src/devices/cpu/nec/nec.cpp
+@@ -291,6 +291,576 @@
+ 	return read_opcode_byte((Sreg(PS)<<4) + m_ip++);
+ }
+ 
++void nec_common_device::consume_mpc2000xl_v53_hotblock_bytes(unsigned count)
++{
++	while (count--)
++	{
++		prefetch();
++		m_ip++;
++	}
++}
++
++void nec_common_device::clear_mpc2000xl_v53_hotblock(mpc2000xl_v53_hotblock_state &state)
++{
++	state.active = mpc2000xl_v53_hotblock_state::block::NONE;
++	state.index = 0;
++}
++
++bool nec_common_device::validate_mpc2000xl_v53_hotblock_code(
++	mpc2000xl_v53_hotblock_state &state, u16 ps, u16 ip, const u8 *bytes, unsigned length)
++{
++	if (!length || ((u32(ip) + length) > 0x10000U))
++		return false;
++
++	const u32 logical_start = (u32(ps) << 4) + ip;
++	const u32 logical_end = logical_start + length - 1;
++	if (m_xa && ((logical_start >> 14) != (logical_end >> 14)))
++		return false;
++
++	const offs_t address_mask = m_program->addrmask();
++	const offs_t physical_start = v33_translate(logical_start) & address_mask;
++	if ((physical_start >> 12) != ((physical_start + length - 1) >> 12))
++		return false;
++
++	memory_access<24, 1, 0, ENDIANNESS_LITTLE>::specific program;
++	m_program->specific(program);
++	u16 const *start_words = nullptr;
++	const offs_t physical_word_start = physical_start & ~offs_t(1);
++	for (unsigned index = 0; index < length; ++index)
++	{
++		const offs_t physical = v33_translate(logical_start + index) & address_mask;
++		if (physical != (physical_start + index))
++			return false;
++		if (program.lookup_read_byte_flags(physical) != 0)
++			return false;
++
++		u16 const *const words = reinterpret_cast<u16 const *>(
++			m_cache16.read_ptr(physical & ~offs_t(1)));
++		if (!words)
++			return false;
++		if (!start_words)
++			start_words = words;
++		if (words != (start_words + (((physical & ~offs_t(1)) - physical_word_start) >> 1)))
++			return false;
++	}
++
++	u8 const *const current = reinterpret_cast<u8 const *>(start_words);
++	for (unsigned index = 0; index < length; ++index)
++		if (current[BYTE_XOR_LE((physical_start & 1) + index)] != bytes[index])
++			return false;
++
++	state.code_start = physical_start;
++	state.code_end = physical_start + length - 1;
++	return true;
++}
++
++bool nec_common_device::validate_mpc2000xl_v53_blit_data(
++	const mpc2000xl_v53_hotblock_state &state)
++{
++	if (!Breg(CH) || (Breg(CH) > 7))
++		return false;
++
++	memory_access<24, 1, 0, ENDIANNESS_LITTLE>::specific program;
++	m_program->specific(program);
++	const offs_t address_mask = m_program->addrmask();
++	const u32 data_base = u32(Sreg(DS0)) << 4;
++
++	auto const direct_read = [this, &program, address_mask](u32 logical)
++	{
++		const offs_t physical = v33_translate(logical) & address_mask;
++		return !program.lookup_read_byte_flags(physical) &&
++			(m_cache16.read_ptr(physical & ~offs_t(1)) != nullptr);
++	};
++	auto const direct_nonoverlap_write = [this, &program, &state, address_mask](u32 logical)
++	{
++		const offs_t physical = v33_translate(logical) & address_mask;
++		return !program.lookup_write_byte_flags(physical) &&
++			(m_program->get_write_ptr(physical) != nullptr) &&
++			((physical < state.code_start) || (physical > state.code_end));
++	};
++
++	for (unsigned iteration = 0; iteration < Breg(CH); ++iteration)
++	{
++		const u16 si = u16(Wreg(IX) + iteration);
++		const u16 di = u16(Wreg(IY) + (iteration * 0x20));
++		if (!direct_read(data_base + si) ||
++			!direct_read(data_base + di) ||
++			!direct_read(data_base + u16(di + 1)) ||
++			!direct_nonoverlap_write(data_base + di) ||
++			!direct_nonoverlap_write(data_base + u16(di + 1)))
++			return false;
++	}
++	return true;
++}
++
++bool nec_common_device::validate_mpc2000xl_v53_lcd_data()
++{
++	if (!Wreg(CW) || (Wreg(CW) > 60))
++		return false;
++	const u16 column = u16(Wreg(BW) - (0x20 * (60 - Wreg(CW))));
++	if (column >= 0x14)
++		return false;
++
++	memory_access<24, 1, 0, ENDIANNESS_LITTLE>::specific program;
++	m_program->specific(program);
++	const offs_t address_mask = m_program->addrmask();
++	const u32 data_base = u32(Sreg(DS0)) << 4;
++	for (u16 const displacement : { u16(0x57a2), u16(0x5f22), u16(0x66a2) })
++	{
++		const u16 offset = u16(Wreg(BW) + displacement);
++		const offs_t physical = v33_translate(data_base + offset) & address_mask;
++		if (program.lookup_read_byte_flags(physical) ||
++			!m_cache16.read_ptr(physical & ~offs_t(1)))
++			return false;
++	}
++	return true;
++}
++
++bool nec_common_device::try_mpc2000xl_v53_hotblock_8a(
++	mpc2000xl_v53_hotblock_state &state, u16 ps, u16 ip)
++{
++	static constexpr u8 blit_code[] =
++	{
++		0x8a, 0x25, 0x8a, 0x45, 0x01, 0x23, 0xc2, 0x8a,
++		0x3c, 0x2a, 0xdb, 0xd3, 0xeb, 0x0b, 0xc3, 0x88,
++		0x25, 0x88, 0x45, 0x01, 0x46, 0x83, 0xc7, 0x20,
++		0xfe, 0xcd, 0x75, 0xe4
++	};
++	static constexpr u8 lcd_code[] =
++	{
++		0x8a, 0xa7, 0xa2, 0x57, 0x0a, 0xa7, 0x22, 0x5f,
++		0x32, 0xa7, 0xa2, 0x66, 0xba, 0x60, 0x00, 0xec,
++		0xd0, 0xe0, 0x74, 0x03, 0xe8, 0xd1, 0xfe, 0x8a,
++		0xc4, 0xba, 0x62, 0x00, 0xee, 0x83, 0xc3, 0x20,
++		0xe2, 0xde
++	};
++
++	if ((Sreg(PS) != ps) || (m_ip != u16(ip + 1)) || m_seg_prefix ||
++		m_TF ||
++		(machine().debug_flags & (DEBUG_FLAG_ENABLED | DEBUG_FLAG_CALL_HOOK)) ||
++		((((u32(ps) << 4) + ip) != 0x1b1a8U) &&
++			(((u32(ps) << 4) + ip) != 0x1acbdU)))
++		return false;
++
++	if (((u32(ps) << 4) + ip) == 0x1b1a8U)
++	{
++		if (!(m_mpc2000xl_v53_hotblock_mask & 0x01))
++			return false;
++		if (!validate_mpc2000xl_v53_hotblock_code(state, ps, ip, blit_code, std::size(blit_code)) ||
++			!validate_mpc2000xl_v53_blit_data(state))
++			return false;
++		state.active = mpc2000xl_v53_hotblock_state::block::BLIT_1B1A8;
++	}
++	else
++	{
++		if (!(m_mpc2000xl_v53_hotblock_mask & 0x04))
++			return false;
++		if (!validate_mpc2000xl_v53_hotblock_code(state, ps, ip, lcd_code, std::size(lcd_code)) ||
++			!validate_mpc2000xl_v53_lcd_data())
++			return false;
++		state.active = mpc2000xl_v53_hotblock_state::block::LCD_1ACBD;
++	}
++	state.index = 0;
++	state.ps = ps;
++	state.ip = ip;
++	return execute_mpc2000xl_v53_hotblock(state, true);
++}
++
++bool nec_common_device::try_mpc2000xl_v53_hotblock_d1(
++	mpc2000xl_v53_hotblock_state &state, u16 ps, u16 ip)
++{
++	static constexpr u8 shift_code[] =
++	{
++		0xd1, 0xe7, 0xd1, 0xd6, 0x72, 0x0b,
++		0x45, 0x83, 0xfd, 0x20, 0x75, 0xf4
++	};
++
++	if ((Sreg(PS) != ps) || (m_ip != u16(ip + 1)) ||
++		((u32(ps) << 4) + ip) != 0x014f1U || m_seg_prefix || m_TF ||
++		!Wreg(BP) || (Wreg(BP) > 31) ||
++		!(m_mpc2000xl_v53_hotblock_mask & 0x02) ||
++		(machine().debug_flags & (DEBUG_FLAG_ENABLED | DEBUG_FLAG_CALL_HOOK)) ||
++		!validate_mpc2000xl_v53_hotblock_code(state, ps, ip, shift_code, std::size(shift_code)))
++		return false;
++
++	state.active = mpc2000xl_v53_hotblock_state::block::SHIFT_014F1;
++	state.index = 0;
++	state.ps = ps;
++	state.ip = ip;
++	return execute_mpc2000xl_v53_hotblock(state, true);
++}
++
++bool nec_common_device::execute_mpc2000xl_v53_hotblock(
++	mpc2000xl_v53_hotblock_state &state, bool opcode_consumed)
++{
++	switch (state.active)
++	{
++	case mpc2000xl_v53_hotblock_state::block::BLIT_1B1A8:
++		return execute_mpc2000xl_v53_blit(state, opcode_consumed);
++	case mpc2000xl_v53_hotblock_state::block::SHIFT_014F1:
++		return execute_mpc2000xl_v53_shift(state, opcode_consumed);
++	case mpc2000xl_v53_hotblock_state::block::LCD_1ACBD:
++		return execute_mpc2000xl_v53_lcd(state, opcode_consumed);
++	default:
++		return false;
++	}
++}
++
++bool nec_common_device::execute_mpc2000xl_v53_blit(
++	mpc2000xl_v53_hotblock_state &state, bool opcode_consumed)
++{
++	static constexpr u8 offsets[] = { 0, 2, 5, 7, 9, 11, 13, 15, 17, 20, 21, 24, 26 };
++	static constexpr u8 lengths[] = { 2, 3, 2, 2, 2, 2, 2, 2, 3, 1, 3, 2, 2 };
++
++	if ((state.active != mpc2000xl_v53_hotblock_state::block::BLIT_1B1A8) ||
++		(state.index >= std::size(offsets)) ||
++		!m_mpc2000xl_v53_hotblocks_available || !m_MF || m_rep_params ||
++		m_seg_prefix || m_halted || m_TF || (Sreg(PS) != state.ps) ||
++		(m_ip != u16(state.ip + offsets[state.index] +
++			(opcode_consumed ? 1 : 0))) ||
++		(machine().debug_flags & (DEBUG_FLAG_ENABLED | DEBUG_FLAG_CALL_HOOK)))
++	{
++		clear_mpc2000xl_v53_hotblock(state);
++		return false;
++	}
++
++	const unsigned index = state.index;
++	if (index == 12)
++	{
++		consume_mpc2000xl_v53_hotblock_bytes(1);
++		EMPTY_PREfetch();
++		consume_mpc2000xl_v53_hotblock_bytes(1);
++	}
++	else
++		consume_mpc2000xl_v53_hotblock_bytes(lengths[index] - (opcode_consumed ? 1 : 0));
++	switch (index)
++	{
++	case 0:
++		m_EO = Wreg(IY);
++		m_EA = DefaultBase(DS0) + m_EO;
++		Breg(AH) = read_mem_byte(m_EA);
++		CLK(5);
++		break;
++	case 1:
++		m_EO = u16(Wreg(IY) + 1);
++		m_EA = DefaultBase(DS0) + m_EO;
++		Breg(AL) = read_mem_byte(m_EA);
++		CLK(5);
++		break;
++	case 2:
++	{
++		uint32_t dst = Wreg(AW), src = Wreg(DW);
++		ANDW;
++		Wreg(AW) = dst;
++		CLK(2);
++		break;
++	}
++	case 3:
++		m_EO = Wreg(IX);
++		m_EA = DefaultBase(DS0) + m_EO;
++		Breg(BH) = read_mem_byte(m_EA);
++		CLK(5);
++		break;
++	case 4:
++	{
++		uint32_t dst = Breg(BL), src = Breg(BL);
++		SUBB;
++		Breg(BL) = dst;
++		CLK(2);
++		break;
++	}
++	case 5:
++	{
++		uint32_t ModRM = 0xeb, dst = Wreg(BW);
++		u8 const count = Breg(CL);
++		CLK(2);
++		if (count)
++		{
++			SHR_WORD(count);
++		}
++		break;
++	}
++	case 6:
++	{
++		uint32_t dst = Wreg(AW), src = Wreg(BW);
++		ORW;
++		Wreg(AW) = dst;
++		CLK(2);
++		break;
++	}
++	case 7:
++		m_EO = Wreg(IY);
++		m_EA = DefaultBase(DS0) + m_EO;
++		write_mem_byte(m_EA, Breg(AH));
++		CLK(3);
++		break;
++	case 8:
++		m_EO = u16(Wreg(IY) + 1);
++		m_EA = DefaultBase(DS0) + m_EO;
++		write_mem_byte(m_EA, Breg(AL));
++		CLK(3);
++		break;
++	case 9:
++	{
++		IncWordReg(IX);
++		CLK(2);
++		break;
++	}
++	case 10:
++	{
++		uint32_t dst = Wreg(IY), src = 0x20;
++		CLK(2);
++		ADDW;
++		Wreg(IY) = dst;
++		break;
++	}
++	case 11:
++	{
++		const uint32_t tmp = Breg(CH);
++		const uint32_t tmp1 = tmp - 1;
++		m_OverVal = (tmp == 0x80);
++		SetAF(tmp1, tmp, 1);
++		SetSZPF_Byte(tmp1);
++		Breg(CH) = tmp1;
++		CLK(2);
++		break;
++	}
++	case 12:
++		if (!ZF)
++		{
++			CLK(3);
++			m_ip = u16(m_ip - 28);
++			CHANGE_PC;
++			state.index = 0;
++		}
++		else
++		{
++			CLK(3);
++			clear_mpc2000xl_v53_hotblock(state);
++		}
++		return true;
++	}
++
++	state.index++;
++	return true;
++}
++
++bool nec_common_device::execute_mpc2000xl_v53_shift(
++	mpc2000xl_v53_hotblock_state &state, bool opcode_consumed)
++{
++	static constexpr u8 offsets[] = { 0, 2, 4, 6, 7, 10 };
++	static constexpr u8 lengths[] = { 2, 2, 2, 1, 3, 2 };
++
++	if ((state.active != mpc2000xl_v53_hotblock_state::block::SHIFT_014F1) ||
++		(state.index >= std::size(offsets)) || !m_mpc2000xl_v53_hotblocks_available ||
++		!m_MF || m_rep_params || m_seg_prefix || m_halted || m_TF ||
++		(Sreg(PS) != state.ps) ||
++		(m_ip != u16(state.ip + offsets[state.index] + (opcode_consumed ? 1 : 0))) ||
++		(machine().debug_flags & (DEBUG_FLAG_ENABLED | DEBUG_FLAG_CALL_HOOK)))
++	{
++		clear_mpc2000xl_v53_hotblock(state);
++		return false;
++	}
++
++	const unsigned index = state.index;
++	if ((index == 2) || (index == 5))
++	{
++		consume_mpc2000xl_v53_hotblock_bytes(1);
++		EMPTY_PREfetch();
++		consume_mpc2000xl_v53_hotblock_bytes(1);
++	}
++	else
++		consume_mpc2000xl_v53_hotblock_bytes(lengths[index] - (opcode_consumed ? 1 : 0));
++
++	switch (index)
++	{
++	case 0:
++	{
++		uint32_t ModRM = 0xe7, src = Wreg(IY), dst = src;
++		CLK(2);
++		SHL_WORD(1);
++		m_OverVal = (src ^ dst) & 0x8000;
++		break;
++	}
++	case 1:
++	{
++		uint32_t src = Wreg(IX), dst = src;
++		CLK(2);
++		ROLC_WORD;
++		Wreg(IX) = dst;
++		m_OverVal = (src ^ dst) & 0x8000;
++		break;
++	}
++	case 2:
++		if (CF)
++		{
++			CLK(3);
++			m_ip = u16(m_ip + 0x0b);
++			CHANGE_PC;
++			clear_mpc2000xl_v53_hotblock(state);
++			return true;
++		}
++		CLK(3);
++		break;
++	case 3:
++	{
++		IncWordReg(BP);
++		CLK(2);
++		break;
++	}
++	case 4:
++	{
++		uint32_t dst = Wreg(BP), src = 0x20;
++		SUBW;
++		CLK(2);
++		break;
++	}
++	case 5:
++		if (!ZF)
++		{
++			CLK(3);
++			m_ip = u16(m_ip - 12);
++			CHANGE_PC;
++			state.index = 0;
++		}
++		else
++		{
++			CLK(3);
++			clear_mpc2000xl_v53_hotblock(state);
++		}
++		return true;
++	}
++	state.index++;
++	return true;
++}
++
++bool nec_common_device::execute_mpc2000xl_v53_lcd(
++	mpc2000xl_v53_hotblock_state &state, bool opcode_consumed)
++{
++	static constexpr u8 offsets[] = { 0, 4, 8, 12, 15, 16, 18, 23, 25, 28, 29, 32 };
++	static constexpr u8 lengths[] = { 4, 4, 4, 3, 1, 2, 2, 2, 3, 1, 3, 2 };
++
++	if ((state.active != mpc2000xl_v53_hotblock_state::block::LCD_1ACBD) ||
++		(state.index >= std::size(offsets)) || !m_mpc2000xl_v53_hotblocks_available ||
++		!m_MF || m_rep_params || m_seg_prefix || m_halted || m_TF ||
++		(Sreg(PS) != state.ps) ||
++		(m_ip != u16(state.ip + offsets[state.index] + (opcode_consumed ? 1 : 0))) ||
++		(machine().debug_flags & (DEBUG_FLAG_ENABLED | DEBUG_FLAG_CALL_HOOK)))
++	{
++		clear_mpc2000xl_v53_hotblock(state);
++		return false;
++	}
++
++	const unsigned index = state.index;
++	if (index == 6)
++	{
++		consume_mpc2000xl_v53_hotblock_bytes(1);
++		EMPTY_PREfetch();
++		consume_mpc2000xl_v53_hotblock_bytes(1);
++	}
++	else
++		consume_mpc2000xl_v53_hotblock_bytes(lengths[index] - (opcode_consumed ? 1 : 0));
++
++	switch (index)
++	{
++	case 0:
++	case 1:
++	case 2:
++	{
++		static constexpr u16 displacements[] = { 0x57a2, 0x5f22, 0x66a2 };
++		m_E16 = 0;
++		m_E16 = u8(displacements[index]);
++		m_E16 += u16(u8(displacements[index] >> 8)) << 8;
++		m_EO = u16(Wreg(BW) + (int16_t)m_E16);
++		m_EA = DefaultBase(DS0) + m_EO;
++		uint32_t src = read_mem_byte(m_EA);
++		uint32_t dst = Breg(AH);
++		if (index == 0)
++			dst = src;
++		else if (index == 1)
++		{
++			ORB;
++		}
++		else
++		{
++			XORB;
++		}
++		Breg(AH) = dst;
++		CLK(index ? 6 : 5);
++		break;
++	}
++	case 3:
++		Wreg(DW) = 0x0060;
++		CLK(2);
++		break;
++	case 4:
++		Breg(AL) = read_port_byte(Wreg(DW));
++		CLK(5);
++		clear_mpc2000xl_v53_hotblock(state);
++		break;
++	case 5:
++	{
++		uint32_t ModRM = 0xe0, src = Breg(AL), dst = src;
++		CLK(2);
++		SHL_BYTE(1);
++		m_OverVal = (src ^ dst) & 0x80;
++		break;
++	}
++	case 6:
++		if (ZF)
++		{
++			CLK(3);
++			m_ip = u16(m_ip + 3);
++			CHANGE_PC;
++			state.index = 7;
++		}
++		else
++		{
++			CLK(3);
++			clear_mpc2000xl_v53_hotblock(state);
++		}
++		return true;
++	case 7:
++		Breg(AL) = Breg(AH);
++		CLK(2);
++		break;
++	case 8:
++		Wreg(DW) = 0x0062;
++		CLK(2);
++		break;
++	case 9:
++		write_port_byte(Wreg(DW), Breg(AL));
++		CLK(3);
++		clear_mpc2000xl_v53_hotblock(state);
++		break;
++	case 10:
++	{
++		uint32_t dst = Wreg(BW), src = 0x20;
++		ADDW;
++		Wreg(BW) = dst;
++		CLK(2);
++		break;
++	}
++	case 11:
++		Wreg(CW)--;
++		if (Wreg(CW))
++		{
++			m_ip = u16(m_ip - 34);
++			CLK(6);
++			state.index = 0;
++		}
++		else
++		{
++			CLK(3);
++			clear_mpc2000xl_v53_hotblock(state);
++		}
++		return true;
++	}
++	if (state.active != mpc2000xl_v53_hotblock_state::block::NONE)
++		state.index++;
++	return true;
++}
++
+ 
+ 
+ /***************************************************************************/
+@@ -930,7 +1500,7 @@
+ 		osd_printf_info("%s: MPC2000XL V53 direct opcode dispatch active\n", tag());
+ 	}
+ 	if (m_mpc2000xl_brk88_hle_enabled || m_mpc2000xl_brkfd_hle_enabled ||
+-		m_mpc2000xl_divide_superblock_enabled)
++		m_mpc2000xl_divide_superblock_enabled || m_mpc2000xl_v53_hotblocks_requested)
+ 	{
+ 		util::sha1_t expected_rom_sha1;
+ 		expected_rom_sha1.from_string("382be688972fe3d85caeca99abff4b6c391347fb");
+@@ -952,7 +1522,12 @@
+ 		}
+ 		else
+ 		{
+-			osd_printf_warning("%s: MPC2000XL firmware HLE requested for an unsupported ROM; using accurate execution\n", tag());
++			if (m_mpc2000xl_brk88_hle_enabled || m_mpc2000xl_brkfd_hle_enabled)
++				osd_printf_warning("%s: MPC2000XL firmware HLE requested for an unsupported ROM; using accurate execution\n", tag());
++			if (m_mpc2000xl_v53_hotblocks_requested)
++				osd_printf_warning("%s: MPC2000XL V53 hotblocks requested for an unsupported ROM; using accurate execution\n", tag());
++			if (m_mpc2000xl_divide_superblock_enabled)
++				osd_printf_warning("%s: MPC2000XL divide superblock requested for an unsupported ROM; using accurate execution\n", tag());
+ 		}
+ 	}
+ 	if (m_program->data_width() == 8)
+@@ -970,6 +1545,12 @@
+ 	}
+ 
+ 	m_io = &space(AS_IO);
++	m_mpc2000xl_v53_hotblocks_available = m_mpc2000xl_v53_hotblocks_requested &&
++		m_mpc2000xl_rom_valid && (m_chip_type == V33_TYPE) &&
++		(m_program->data_width() == 16);
++	if (m_mpc2000xl_v53_hotblocks_available)
++		osd_printf_info("%s: MPC2000XL V53 hotblocks active (mask %u)\n",
++			tag(), m_mpc2000xl_v53_hotblock_mask);
+ 
+ 	state_add( NEC_PC,  "PC", m_ip).formatstr("%04X");
+ 	state_add( NEC_PSW, "PSW", m_debugger_temp).callimport().callexport().formatstr("%04X");
+@@ -1078,15 +1659,41 @@
+ 
+ void nec_common_device::execute_run()
+ {
+-	if (m_mpc2000xl_direct_dispatch)
+-		execute_run_mode<true>();
++	const bool divide_superblock_available = m_mpc2000xl_divide_superblock_enabled &&
++		m_mpc2000xl_rom_valid && (m_chip_type == V33_TYPE) &&
++		(m_program->data_width() == 16);
++	if (m_mpc2000xl_v53_hotblocks_available)
++	{
++		if (m_mpc2000xl_direct_dispatch)
++		{
++			if (divide_superblock_available)
++				execute_run_mode<true, true, true>();
++			else
++				execute_run_mode<true, true, false>();
++		}
++		else if (divide_superblock_available)
++			execute_run_mode<false, true, true>();
++		else
++			execute_run_mode<false, true, false>();
++	}
++	else if (m_mpc2000xl_direct_dispatch)
++	{
++		if (divide_superblock_available)
++			execute_run_mode<true, false, true>();
++		else
++			execute_run_mode<true, false, false>();
++	}
++	else if (divide_superblock_available)
++		execute_run_mode<false, false, true>();
+ 	else
+-		execute_run_mode<false>();
++		execute_run_mode<false, false, false>();
+ }
+ 
+-template <bool DirectDispatch>
++template <bool DirectDispatch, bool V53Hotblocks, bool DivideSuperblock>
+ void nec_common_device::execute_run_mode()
+ {
++	mpc2000xl_v53_hotblock_state hotblock;
++
+ 	if (m_halted)
+ 	{
+ 		debugger_wait_hook();
+@@ -1097,14 +1704,28 @@
+ 	while(m_icount>0)
+ 	{
+ 		m_prev_ip = m_ip;
++		if constexpr (V53Hotblocks)
++		{
++			if ((hotblock.active != mpc2000xl_v53_hotblock_state::block::NONE) &&
++				(machine().debug_flags & (DEBUG_FLAG_ENABLED | DEBUG_FLAG_CALL_HOOK)))
++				clear_mpc2000xl_v53_hotblock(hotblock);
++		}
+ 
+ 		// Dispatch IRQ
+ 		if (m_pending_irq && m_no_interrupt==0)
+ 		{
+ 			if (m_pending_irq & NMI_IRQ)
++			{
++				if constexpr (V53Hotblocks)
++					clear_mpc2000xl_v53_hotblock(hotblock);
+ 				external_int();
++			}
+ 			else if (m_IF)
++			{
++				if constexpr (V53Hotblocks)
++					clear_mpc2000xl_v53_hotblock(hotblock);
+ 				external_int();
++			}
+ 		}
+ 
+ 		// No interrupt allowed between last instruction and this one
+@@ -1113,10 +1734,22 @@
+ 
+ 		debugger_instruction_hook((Sreg(PS)<<4) + m_ip);
+ 		m_cur_cycles = 0;
+-		if (m_mpc2000xl_divide_superblock_enabled &&
+-			((u32(Sreg(PS)) << 4) + m_ip == 0x150a) &&
+-			mpc2000xl_divide_superblock())
+-			continue;
++		if constexpr (DivideSuperblock)
++		{
++			if (((u32(Sreg(PS)) << 4) + m_ip == 0x150a) &&
++				mpc2000xl_divide_superblock())
++			{
++				if constexpr (V53Hotblocks)
++					clear_mpc2000xl_v53_hotblock(hotblock);
++				continue;
++			}
++		}
++		if constexpr (V53Hotblocks)
++		{
++			if ((hotblock.active != mpc2000xl_v53_hotblock_state::block::NONE) &&
++				(m_rep_params || !m_MF))
++				clear_mpc2000xl_v53_hotblock(hotblock);
++		}
+ 
+ 		if (m_rep_params)
+ 			cont_rep();
+@@ -1124,24 +1757,54 @@
+ 		{
+ 			if (m_MF)
+ 			{
+-				const u8 opcode = fetchop();
+-				if constexpr (DirectDispatch)
++				bool handled = false;
++				if constexpr (V53Hotblocks)
+ 				{
+-					switch (opcode)
++					if (hotblock.active != mpc2000xl_v53_hotblock_state::block::NONE)
++						handled = execute_mpc2000xl_v53_hotblock(hotblock, false);
++				}
++				if (!handled)
++				{
++					const u16 opcode_ps = Sreg(PS);
++					const u16 opcode_ip = m_ip;
++					const u8 opcode = fetchop();
++					if constexpr (DirectDispatch)
++					{
++						switch (opcode)
++						{
++						case 0xc3: i_ret(); break;
++						case 0xe8: i_call_d16(); break;
++						case 0x75: i_jnz(); break;
++						case 0x8b: i_mov_r16w(); break;
++						case 0x8a:
++							if constexpr (V53Hotblocks)
++								if (try_mpc2000xl_v53_hotblock_8a(hotblock, opcode_ps, opcode_ip))
++									break;
++							i_mov_r8b();
++							break;
++						case 0x0b: i_or_r16w(); break;
++						case 0x74: i_jz(); break;
++						case 0x3c: i_cmp_ald8(); break;
++						default:
++							if constexpr (V53Hotblocks)
++								if ((opcode == 0xd1) && try_mpc2000xl_v53_hotblock_d1(hotblock, opcode_ps, opcode_ip))
++									break;
++							(this->*s_nec_instruction[opcode])();
++							break;
++						}
++					}
++					else
+ 					{
+-					case 0xc3: i_ret(); break;
+-					case 0xe8: i_call_d16(); break;
+-					case 0x75: i_jnz(); break;
+-					case 0x8b: i_mov_r16w(); break;
+-					case 0x8a: i_mov_r8b(); break;
+-					case 0x0b: i_or_r16w(); break;
+-					case 0x74: i_jz(); break;
+-					case 0x3c: i_cmp_ald8(); break;
+-					default: (this->*s_nec_instruction[opcode])(); break;
++						if constexpr (V53Hotblocks)
++						{
++							if (((opcode == 0x8a) && try_mpc2000xl_v53_hotblock_8a(hotblock, opcode_ps, opcode_ip)) ||
++								((opcode == 0xd1) && try_mpc2000xl_v53_hotblock_d1(hotblock, opcode_ps, opcode_ip)))
++								handled = true;
++						}
++						if (!handled)
++							(this->*s_nec_instruction[opcode])();
+ 					}
+ 				}
+-				else
+-					(this->*s_nec_instruction[opcode])();
+ 			}
+ 			else
+ 				(this->*s_nec80_instruction[fetchop()])();
+--- a/src/devices/cpu/nec/nec.h
++++ b/src/devices/cpu/nec/nec.h
+@@ -33,6 +33,11 @@
+ 	void set_mpc2000xl_brkfd_hle(bool enable) { m_mpc2000xl_brkfd_hle_enabled = enable; }
+ 	void set_mpc2000xl_direct_dispatch(bool enable) { m_mpc2000xl_direct_dispatch = enable; }
+ 	void set_mpc2000xl_divide_superblock(bool enable) { m_mpc2000xl_divide_superblock_enabled = enable; }
++	void set_mpc2000xl_v53_hotblocks(u8 mask)
++	{
++		m_mpc2000xl_v53_hotblock_mask = mask & 0x07;
++		m_mpc2000xl_v53_hotblocks_requested = bool(m_mpc2000xl_v53_hotblock_mask);
++	}
+ 
+ protected:
+ 	// construction/destruction
+@@ -113,6 +118,9 @@
+ 	bool m_mpc2000xl_brk88_hle_enabled = false;
+ 	bool m_mpc2000xl_brkfd_hle_enabled = false;
+ 	bool m_mpc2000xl_direct_dispatch = false;
++	bool m_mpc2000xl_v53_hotblocks_requested = false;
++	bool m_mpc2000xl_v53_hotblocks_available = false;
++	u8 m_mpc2000xl_v53_hotblock_mask = 0;
+ 	bool m_mpc2000xl_rom_valid = false;
+ 	bool m_mpc2000xl_brk88_handler_valid = false;
+ 	bool m_mpc2000xl_brk88_reported = false;
+@@ -154,6 +162,24 @@
+ 	uint32_t m_debugger_temp;
+ 	uint8_t m_em;
+ 
++	struct mpc2000xl_v53_hotblock_state
++	{
++		enum class block : u8
++		{
++			NONE,
++			BLIT_1B1A8,
++			SHIFT_014F1,
++			LCD_1ACBD
++		};
++
++		block active = block::NONE;
++		u8 index = 0;
++		u16 ps = 0;
++		u16 ip = 0;
++		offs_t code_start = 0;
++		offs_t code_end = 0;
++	};
++
+ 	typedef void (nec_common_device::*nec_ophandler)();
+ 	typedef uint32_t (nec_common_device::*nec_eahandler)();
+ 	static const nec_ophandler s_nec_instruction[256];
+@@ -169,12 +195,24 @@
+ 
+ private:
+ 	inline u8 read_opcode_byte(offs_t address);
+-	template <bool DirectDispatch> void execute_run_mode();
++	template <bool DirectDispatch, bool V53Hotblocks, bool DivideSuperblock> void execute_run_mode();
+ 	inline void prefetch();
+ 	void do_prefetch();
+ 	inline uint8_t fetch();
+ 	inline uint16_t fetchword();
+ 	uint8_t fetchop();
++	void consume_mpc2000xl_v53_hotblock_bytes(unsigned count);
++	void clear_mpc2000xl_v53_hotblock(mpc2000xl_v53_hotblock_state &state);
++	bool validate_mpc2000xl_v53_hotblock_code(mpc2000xl_v53_hotblock_state &state,
++		u16 ps, u16 ip, const u8 *bytes, unsigned length);
++	bool validate_mpc2000xl_v53_blit_data(const mpc2000xl_v53_hotblock_state &state);
++	bool validate_mpc2000xl_v53_lcd_data();
++	bool try_mpc2000xl_v53_hotblock_8a(mpc2000xl_v53_hotblock_state &state, u16 ps, u16 ip);
++	bool try_mpc2000xl_v53_hotblock_d1(mpc2000xl_v53_hotblock_state &state, u16 ps, u16 ip);
++	bool execute_mpc2000xl_v53_hotblock(mpc2000xl_v53_hotblock_state &state, bool opcode_consumed);
++	bool execute_mpc2000xl_v53_blit(mpc2000xl_v53_hotblock_state &state, bool opcode_consumed);
++	bool execute_mpc2000xl_v53_shift(mpc2000xl_v53_hotblock_state &state, bool opcode_consumed);
++	bool execute_mpc2000xl_v53_lcd(mpc2000xl_v53_hotblock_state &state, bool opcode_consumed);
+ 	void nec_interrupt(unsigned int_num, int source);
+ 	void nec_trap();
+ 	void nec_brk(unsigned int_num);
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -764,6 +764,19 @@
+ 	const bool direct_dispatch = direct_dispatch_mode && std::strcmp(direct_dispatch_mode, "0");
+ 	const char *const divide_superblock_mode = osd_getenv("MAME_MPC_V53_DIVIDE_SUPERBLOCK");
+ 	const bool divide_superblock = divide_superblock_mode && std::strcmp(divide_superblock_mode, "0");
++	const char *const hotblocks_mode = osd_getenv("MAME_MPC_V53_HOTBLOCKS");
++	u8 hotblocks = 0;
++	if (hotblocks_mode && std::strcmp(hotblocks_mode, "0"))
++	{
++		if (!std::strcmp(hotblocks_mode, "blit"))
++			hotblocks = 0x01;
++		else if (!std::strcmp(hotblocks_mode, "shift"))
++			hotblocks = 0x02;
++		else if (!std::strcmp(hotblocks_mode, "lcd"))
++			hotblocks = 0x04;
++		else
++			hotblocks = 0x07;
++	}
+ 	const char *const stereo_only_mode = osd_getenv("MAME_MPC_STEREO_ONLY");
+ 	const bool stereo_only = stereo_only_mode && std::strcmp(stereo_only_mode, "0");
+ 	if (event_driven_panel)
+@@ -774,6 +787,7 @@
+ 	m_maincpu->set_mpc2000xl_brkfd_hle(brkfd_hle);
+ 	m_maincpu->set_mpc2000xl_direct_dispatch(direct_dispatch);
+ 	m_maincpu->set_mpc2000xl_divide_superblock(divide_superblock);
++	m_maincpu->set_mpc2000xl_v53_hotblocks(hotblocks);
+ 	m_maincpu->set_direct_brc_timer(event_driven_panel);
+ 	m_maincpu->set_addrmap(AS_PROGRAM, &mpc2000_state::mpc2000_map);
+ 	m_maincpu->set_addrmap(AS_IO, &mpc2000_state::mpc2000_io_map);

@@ -1,0 +1,82 @@
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -104,6 +104,8 @@ public:
+ 		, m_lcdx{ 0, 0 }
+ 		, m_lcdy{ 0, 0 }
+ 		, m_lcdcmd{ 0, 0 }
++		, m_lcd_skip_unchanged(false)
++		, m_lcd_dirty(true)
+ 		, m_panel_txd_timer(nullptr)
+ 		, m_fast_pad_timer(nullptr)
+ 		, m_fast_pad_enabled(false)
+@@ -197,6 +199,8 @@ private:
+ 	uint16_t m_lcdx[2];
+ 	uint8_t m_lcdy[2], m_lcdcmd[2];
+ 	uint16_t m_vram[256*64];
++	bool m_lcd_skip_unchanged;
++	bool m_lcd_dirty;
+ 	emu_timer *m_panel_txd_timer;
+ 	emu_timer *m_fast_pad_timer;
+ 	bool m_fast_pad_enabled;
+@@ -210,6 +214,8 @@ void mpc2000_state::machine_start()
+ 	m_panel_txd_timer = timer_alloc(FUNC(mpc2000_state::panel_txd_sync), this);
+ 	m_fast_pad_timer = timer_alloc(FUNC(mpc2000_state::fast_pad_byte_tick), this);
+ 	m_fast_pad_enabled = bool(osd_getenv("MAME_MPC_MIDI_INTERNAL_PADS"));
++	char const *const lcd_skip_unchanged = osd_getenv("MAME_MPC_LCD_SKIP_UNCHANGED");
++	m_lcd_skip_unchanged = lcd_skip_unchanged && std::strcmp(lcd_skip_unchanged, "0");
+ 	save_item(NAME(m_key_scan_row));
+ 	save_item(NAME(m_drum_scan_row));
+ 	save_item(NAME(m_midi_status));
+@@ -228,6 +234,7 @@ void mpc2000_state::machine_reset()
+ 	m_fast_pad_head = 0;
+ 	m_fast_pad_count = 0;
+ 	m_fast_pad_timer->adjust(attotime::never);
++	m_lcd_dirty = true;
+ 
+ 	// all CTS lines are connected to GND
+ 	m_sio->write_cts<0>(CLEAR_LINE);
+@@ -336,6 +343,7 @@ void mpc2000_state::mpc2000_palette(palette_device &palette) const
+ 
+ u32 mpc2000_state::screen_update(screen_device &screen, bitmap_ind16 &bitmap, const rectangle &cliprect)
+ {
++	bool const changed = !m_lcd_skip_unchanged || m_lcd_dirty;
+ 	for (int y = 0; y < 60; y++)
+ 	{
+ 		uint16_t *scanline = &bitmap.pix(y);
+@@ -346,8 +354,9 @@ u32 mpc2000_state::screen_update(screen_device &screen, bitmap_ind16 &bitmap, co
+ 			*scanline++ = m_vram[yoffs + x];
+ 		}
+ 	}
++	m_lcd_dirty = false;
+ 
+-	return 0;
++	return changed ? 0 : UPDATE_HAS_NOT_CHANGED;
+ }
+ 
+ uint8_t mpc2000_state::lcd_csr()
+@@ -368,9 +377,22 @@ template <int cs> void mpc2000_state::lcd_csw(offs_t offset, uint8_t data)
+ 			case 0x20:
+ 				if ((m_lcdx[0] < 256) && (m_lcdy[cs] < 60))
+ 				{
+-					for (int i = 0; i < 8; i++)
++					if (m_lcd_skip_unchanged)
++					{
++						bool changed = false;
++						for (int i = 0; i < 8; i++)
++						{
++							uint16_t &pixel = m_vram[(m_lcdy[cs] * 256) + m_lcdx[cs] + i];
++							uint16_t const value = BIT(data, 7-i);
++							changed |= pixel != value;
++							pixel = value;
++						}
++						m_lcd_dirty |= changed;
++					}
++					else
+ 					{
+-						m_vram[(m_lcdy[cs] * 256) + m_lcdx[cs] + i] = BIT(data, 7-i);
++						for (int i = 0; i < 8; i++)
++							m_vram[(m_lcdy[cs] * 256) + m_lcdx[cs] + i] = BIT(data, 7-i);
+ 					}
+ 					m_lcdy[cs]++;
+ 				}

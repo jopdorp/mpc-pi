@@ -1,0 +1,681 @@
+From: mpc-pi
+Subject: [PATCH] nec: exact V33 idle-iteration recorder and skip
+
+The MPC2000XL OS spends most of its guest time in a RAM-resident main
+scheduler loop (linear 0x0077f under OS v1.20), a second recorded head covers the tick-counter wait loop at linear 0x01691,
+and a third head plus a one-port I/O read whitelist admits the DMA-ready poll
+at 0x36115. The whitelist records a side-effect-free status-port read into
+the verified set; the recorder correctly never arms that loop, because the
+V53's internal DMA advances synchronously with CPU execution, so the port is
+not slice-stable - the self-validation is the point: eleven service calls that
+poll task flags and queues, then jump back. A guest-PC histogram put the loop
+and its callees at the top of a profile in which twenty 64-byte regions cover
+72.5% of all executed instructions.
+
+MAME_MPC_V53_IDLE_SKIP records one full loop iteration: its live-in reads
+(reads not preceded by the iteration's own write to the same address), the
+value each written address held before the iteration's first write, and its
+cycle cost. The iteration closes as skippable only if the registers, segment
+registers, flags, prefetch count, mode bits and repeat state form a fixed
+point, every written address holds its pre-iteration value again at the loop
+head (the same stack slot re-pushed by each call satisfies this by
+first-write dedup), no I/O access occurred and no external interrupt was
+dispatched. While armed, and only when no interrupt is pending, whole
+iterations are charged against m_icount without executing; the remainder
+smaller than one iteration always executes normally, so a timeslice boundary
+or interrupt lands mid-loop exactly as it would have unskipped. Within one
+timeslice no other device runs, which is what makes the once-per-timeslice
+read-set verification exact; any change re-records from scratch.
+
+Software interrupts (BRK) inside the iteration are normal control flow and
+are recorded through the same hooked accessors, including the BRK88/BRKFD
+HLE paths. External interrupts abort a recording in progress.
+
+An env-gated per-instruction guest-PC histogram (MAME_MPC_V53_PC_HISTOGRAM)
+is included as the diagnostic that locates such loops; both switches default
+off and the added hot-path cost when disabled is one predicted-not-taken
+branch per instruction and per data access.
+
+Frozen 48 kHz all-output PCM is bit-identical with the skip off and on while
+440,668 iterations were skipped (a65077eb...). The live 44.1 kHz/q32 fast
+preset recorded zero PipeWire underruns in both the boot and playback
+windows with 444,477 iterations skipped. A matched interleaved ABBA measured
+819.6% against 1036.3% average speed, +26.4% with complete separation.
+
+The per-timeslice read-set verification resolves each live-in read to a
+direct host pointer at arm time, so steady-state verification is a flat
+compare loop with no handler dispatch; any entry that does not resolve to
+plain memory keeps the handler-path verification for the whole set.
+
+diff --git a/src/devices/cpu/nec/nec.h b/src/devices/cpu/nec/nec.h
+--- a/src/devices/cpu/nec/nec.h
++++ b/src/devices/cpu/nec/nec.h
+@@ -33,6 +33,15 @@
+ 	void set_mpc2000xl_brkfd_hle(bool enable) { m_mpc2000xl_brkfd_hle_enabled = enable; }
+ 	void set_mpc2000xl_direct_dispatch(bool enable) { m_mpc2000xl_direct_dispatch = enable; }
+ 	void set_mpc2000xl_divide_superblock(bool enable) { m_mpc2000xl_divide_superblock_enabled = enable; }
++	static constexpr int IDLE_HEAD_COUNT = 3;
++	void set_mpc2000xl_idle_skip(bool enable, u32 head_a, u32 head_b, u32 head_c, u16 status_port)
++	{
++		m_idle_skip_enabled = enable;
++		m_idle_heads[0] = head_a;
++		m_idle_heads[1] = head_b;
++		m_idle_heads[2] = head_c;
++		m_idle_status_port = status_port;
++	}
+ 
+ protected:
+ 	// construction/destruction
+@@ -179,6 +188,154 @@
+ 	// Matches the V33_TYPE macro in necpriv.ipp, which is not visible here.
+ 	static constexpr uint32_t CHIP_TYPE_V33 = 0;
+ 
++	// MAME_MPC_V53_IDLE_SKIP: exact main-loop idle-iteration skip. One loop
++	// iteration is recorded: its live-in reads (reads not preceded by the
++	// iteration's own write to the same address), its write set, and its cycle
++	// cost. If the iteration closes as a pure fixed point - registers, segment
++	// registers, flags, prefetch state and mode bits identical, every write
++	// net-zero by the time the loop head is reached again, no I/O access and
++	// no external interrupt - then while the live-in read set is unchanged and
++	// no interrupt is pending, whole iterations are charged without executing.
++	// The remainder smaller than one iteration is always executed normally, so
++	// a timeslice boundary or interrupt lands mid-loop exactly as it would
++	// have unskipped. Within one timeslice no other device can touch memory,
++	// which is what makes the once-per-timeslice verification exact.
++	enum class idle_phase : u8 { RECORD_PENDING, RECORDING, ARMED };
++	static constexpr int IDLE_MAX_READS = 1024;
++	static constexpr int IDLE_MAX_WRITES = 256;
++	struct idle_access { offs_t addr; u16 value; u8 size; };
++	struct idle_probe { const u8 *ptr; u16 value; u8 size; };
++	struct idle_snapshot
++	{
++		necbasicregs regs;
++		u16 sregs[4];
++		u16 ip;
++		s32 sign; u32 aux, over, zero, carry, parity;
++		u8 tf, iff, df, mf;
++		u8 no_interrupt;
++		u32 rep_params;
++		s32 prefetch_count;
++		bool xa;
++	};
++	bool m_idle_skip_enabled = false;
++	bool m_idle_recording = false;
++	u32 m_idle_heads[IDLE_HEAD_COUNT] = { 0, 0, 0 };
++	// One byte-wide I/O status port may join the recorded read set: reads of
++	// it must be side-effect-free, and its value cannot change inside the
++	// V33's own timeslice because the producing device only advances in its
++	// own slices - the same argument that makes memory verification exact.
++	u16 m_idle_status_port = 0;
++	static constexpr int IDLE_MAX_IO_READS = 8;
++	struct idle_io_read { u16 port; u8 value; };
++	idle_io_read m_idle_io_reads[IDLE_MAX_IO_READS];
++	int m_idle_io_read_count = 0;
++	int m_idle_active_head = -1;
++	idle_phase m_idle_phase = idle_phase::RECORD_PENDING;
++	bool m_idle_viable = true;
++	int m_idle_read_count = 0;
++	int m_idle_write_count = 0;
++	std::unique_ptr<idle_access[]> m_idle_reads;
++	std::unique_ptr<idle_access[]> m_idle_writes;
++	std::unique_ptr<u16[]> m_idle_write_old;
++	std::unique_ptr<idle_probe[]> m_idle_probes;
++	int m_idle_probe_count = 0;
++	bool m_idle_probes_valid = false;
++	idle_snapshot m_idle_snapshot;
++	s32 m_idle_slice_start = 0;
++	u32 m_idle_cycles_accum = 0;
++	u32 m_idle_iter_cycles = 0;
++	u64 m_idle_skipped = 0, m_idle_verify_fail = 0, m_idle_record_attempts = 0;
++	u64 m_idle_fail_io = 0, m_idle_fail_cycles = 0, m_idle_fail_snapshot = 0, m_idle_fail_netzero = 0;
++	u32 m_idle_netzero_dumps = 0;
++	void idle_capture_snapshot(idle_snapshot &into);
++	bool idle_snapshot_matches(const idle_snapshot &against);
++	void idle_begin_recording();
++	void idle_abort_recording();
++	void idle_close_recording();
++	void idle_head_event();
++	bool idle_address_written(offs_t addr, int size) const
++	{
++		for (int i = 0; i < m_idle_write_count; i++)
++		{
++			const idle_access &w = m_idle_writes[i];
++			if ((addr < w.addr + w.size) && (w.addr < addr + size))
++				return true;
++		}
++		return false;
++	}
++	void idle_note_read(offs_t addr, u16 value, u8 size)
++	{
++		if (!m_idle_viable)
++			return;
++		if (idle_address_written(addr, size))
++			return;
++		if (m_idle_read_count >= IDLE_MAX_READS)
++		{
++			m_idle_viable = false;
++			return;
++		}
++		m_idle_reads[m_idle_read_count++] = idle_access{ addr, value, size };
++	}
++	void idle_note_write(offs_t addr, u16 old_value, u8 size)
++	{
++		if (!m_idle_viable)
++			return;
++		// Net-zero is judged against the value before the iteration's FIRST
++		// write to an address, so an exact repeat (same slot re-pushed by
++		// every call in the loop) records once. A partial overlap would make
++		// per-entry accounting ambiguous, so it disqualifies the iteration.
++		for (int i = 0; i < m_idle_write_count; i++)
++		{
++			const idle_access &w = m_idle_writes[i];
++			if (w.addr == addr && w.size == size)
++				return;
++			if ((addr < w.addr + w.size) && (w.addr < addr + size))
++			{
++				m_idle_viable = false;
++				return;
++			}
++		}
++		if (m_idle_write_count >= IDLE_MAX_WRITES)
++		{
++			m_idle_viable = false;
++			return;
++		}
++		m_idle_write_old[m_idle_write_count] = old_value;
++		m_idle_writes[m_idle_write_count++] = idle_access{ addr, 0, size };
++	}
++	void idle_note_io() { m_idle_viable = false; }
++	void idle_io_guard()
++	{
++		if (UNEXPECTED(m_idle_recording))
++			idle_note_io();
++	}
++	u8 recorded_io_read_byte(offs_t port)
++	{
++		const u8 value = io_read_byte(port);
++		if (UNEXPECTED(m_idle_recording))
++			idle_note_io_read(u16(port), value);
++		return value;
++	}
++	void idle_note_io_read(u16 port, u8 value)
++	{
++		if (!m_idle_viable)
++			return;
++		if (m_idle_status_port == 0 || port != m_idle_status_port)
++		{
++			m_idle_viable = false;
++			return;
++		}
++		for (int i = 0; i < m_idle_io_read_count; i++)
++			if (m_idle_io_reads[i].port == port)
++				return;
++		if (m_idle_io_read_count >= IDLE_MAX_IO_READS)
++		{
++			m_idle_viable = false;
++			return;
++		}
++		m_idle_io_reads[m_idle_io_read_count++] = idle_io_read{ port, value };
++	}
++
+ 	// Direct-pointer data window (MAME_MPC_V53_DATA_WINDOW). A small
+ 	// direct-mapped table of translated 16 KiB pages, separate for reads and
+ 	// writes so ROM stays writable only through the handler path. A page that
+@@ -186,9 +343,15 @@
+ 	// null base so it never re-probes on the hot path.
+ 	static constexpr int DATA_WINDOW_COUNT = 64;
+ 	struct data_window { offs_t page = ~offs_t(0); u8 *base = nullptr; };
++	// MAME_MPC_V53_PC_HISTOGRAM=<path> (diagnostic): per-instruction linear-PC
++	// counters over the 20-bit space, dumped as binary u64[1M] at exit.
++	std::unique_ptr<u64[]> m_pc_histogram;
++	std::string m_pc_histogram_path;
++
+ 	bool m_data_window_enable = false;
+ 	data_window m_data_read_window[DATA_WINDOW_COUNT];
+ 	data_window m_data_write_window[DATA_WINDOW_COUNT];
++	virtual void device_stop() override;
+ 	void invalidate_data_windows();
+ 	u8 *fill_data_window(offs_t phys, bool is_write);
+ 
+@@ -204,6 +367,12 @@
+ 		if (m_chip_type != CHIP_TYPE_V33)
+ 			return m_program->read_byte(a);
+ 		const offs_t phys = v33_translate_fast(a);
++		if (UNEXPECTED(m_idle_recording))
++		{
++			const u8 v = m_program->read_byte(phys);
++			idle_note_read(phys, v, 1);
++			return v;
++		}
+ 		if (m_data_window_enable)
+ 		{
+ 			data_window &w = m_data_read_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
+@@ -223,6 +392,12 @@
+ 		if (m_chip_type != CHIP_TYPE_V33)
+ 			return m_program->read_word_unaligned(a);
+ 		const offs_t phys = v33_translate_fast(a);
++		if (UNEXPECTED(m_idle_recording))
++		{
++			const u16 v = m_program->read_word_unaligned(phys);
++			idle_note_read(phys, v, 2);
++			return v;
++		}
+ 		if (m_data_window_enable && EXPECTED((phys & V33_PAGE_MASK) != V33_PAGE_MASK))
+ 		{
+ 			data_window &w = m_data_read_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
+@@ -248,6 +423,8 @@
+ 			return;
+ 		}
+ 		const offs_t phys = v33_translate_fast(a);
++		if (UNEXPECTED(m_idle_recording))
++			idle_note_write(phys, m_program->read_byte(phys), 1);
+ 		if (m_data_window_enable)
+ 		{
+ 			data_window &w = m_data_write_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
+@@ -276,6 +453,8 @@
+ 			return;
+ 		}
+ 		const offs_t phys = v33_translate_fast(a);
++		if (UNEXPECTED(m_idle_recording))
++			idle_note_write(phys, m_program->read_word_unaligned(phys), 2);
+ 		if (m_data_window_enable && EXPECTED((phys & V33_PAGE_MASK) != V33_PAGE_MASK))
+ 		{
+ 			data_window &w = m_data_write_window[(phys >> 14) & (DATA_WINDOW_COUNT - 1)];
+diff --git a/src/devices/cpu/nec/nec.cpp b/src/devices/cpu/nec/nec.cpp
+--- a/src/devices/cpu/nec/nec.cpp
++++ b/src/devices/cpu/nec/nec.cpp
+@@ -109,6 +109,7 @@
+ #include "necdasm.h"
+ 
+ #include <cstdlib>
++#include <cstring>
+ 
+ #include "util/hashing.h"
+ 
+@@ -376,6 +377,30 @@
+ 
+ /***************************************************************************/
+ 
++void nec_common_device::device_stop()
++{
++	if (m_idle_skip_enabled)
++		fprintf(stderr, "V53_IDLE_SKIP skipped_iterations=%llu iter_cycles=%u reads=%d writes=%d verify_failures=%llu record_attempts=%llu fail_io=%llu fail_cycles=%llu fail_snapshot=%llu fail_netzero=%llu\n",
++				(unsigned long long)m_idle_skipped, m_idle_iter_cycles,
++				m_idle_read_count, m_idle_write_count,
++				(unsigned long long)m_idle_verify_fail,
++				(unsigned long long)m_idle_record_attempts,
++				(unsigned long long)m_idle_fail_io,
++				(unsigned long long)m_idle_fail_cycles,
++				(unsigned long long)m_idle_fail_snapshot,
++				(unsigned long long)m_idle_fail_netzero);
++
++	if (m_pc_histogram)
++	{
++		FILE *const out = fopen(m_pc_histogram_path.c_str(), "wb");
++		if (out)
++		{
++			fwrite(m_pc_histogram.get(), sizeof(u64), 1 << 20, out);
++			fclose(out);
++		}
++	}
++}
++
+ void nec_common_device::device_reset()
+ {
+ 	invalidate_fetch_window();
+@@ -860,8 +885,248 @@
+ 	return true;
+ }
+ 
++void nec_common_device::idle_capture_snapshot(idle_snapshot &into)
++{
++	into.regs = m_regs;
++	for (int i = 0; i < 4; i++)
++		into.sregs[i] = m_sregs[i];
++	into.ip = m_ip;
++	into.sign = m_SignVal;
++	into.aux = m_AuxVal;
++	into.over = m_OverVal;
++	into.zero = m_ZeroVal;
++	into.carry = m_CarryVal;
++	into.parity = m_ParityVal;
++	into.tf = m_TF;
++	into.iff = m_IF;
++	into.df = m_DF;
++	into.mf = m_MF;
++	into.no_interrupt = m_no_interrupt;
++	into.rep_params = m_rep_params;
++	into.prefetch_count = m_prefetch_count;
++	into.xa = m_xa;
++}
++
++bool nec_common_device::idle_snapshot_matches(const idle_snapshot &against)
++{
++	if (std::memcmp(against.regs.w, m_regs.w, sizeof(m_regs.w)))
++		return false;
++	for (int i = 0; i < 4; i++)
++		if (against.sregs[i] != m_sregs[i])
++			return false;
++	return against.ip == m_ip
++		&& against.sign == m_SignVal
++		&& against.aux == m_AuxVal
++		&& against.over == m_OverVal
++		&& against.zero == m_ZeroVal
++		&& against.carry == m_CarryVal
++		&& against.parity == m_ParityVal
++		&& against.tf == m_TF
++		&& against.iff == m_IF
++		&& against.df == m_DF
++		&& against.mf == m_MF
++		&& against.no_interrupt == m_no_interrupt
++		&& against.rep_params == m_rep_params
++		&& against.prefetch_count == m_prefetch_count
++		&& against.xa == m_xa;
++}
++
++void nec_common_device::idle_begin_recording()
++{
++	if (!m_idle_reads)
++	{
++		m_idle_reads = std::make_unique<idle_access[]>(IDLE_MAX_READS);
++		m_idle_writes = std::make_unique<idle_access[]>(IDLE_MAX_WRITES);
++		m_idle_write_old = std::make_unique<u16[]>(IDLE_MAX_WRITES);
++	}
++	m_idle_record_attempts++;
++	m_idle_read_count = 0;
++	m_idle_write_count = 0;
++	m_idle_io_read_count = 0;
++	m_idle_viable = true;
++	m_idle_cycles_accum = 0;
++	m_idle_slice_start = m_icount;
++	idle_capture_snapshot(m_idle_snapshot);
++	m_idle_recording = true;
++	m_idle_phase = idle_phase::RECORDING;
++}
++
++void nec_common_device::idle_abort_recording()
++{
++	m_idle_recording = false;
++	m_idle_phase = idle_phase::RECORD_PENDING;
++}
++
++void nec_common_device::idle_close_recording()
++{
++	m_idle_recording = false;
++	m_idle_cycles_accum += u32(m_idle_slice_start - m_icount);
++	const u32 iter_cycles = m_idle_cycles_accum;
++
++	if (!m_idle_viable)
++		m_idle_fail_io++;
++	else if (!(iter_cycles > 0 && iter_cycles < 65536))
++		m_idle_fail_cycles++;
++	else if (!idle_snapshot_matches(m_idle_snapshot))
++		m_idle_fail_snapshot++;
++
++	bool net_zero = m_idle_viable && (iter_cycles > 0) && (iter_cycles < 65536)
++			&& idle_snapshot_matches(m_idle_snapshot);
++	if (net_zero)
++	{
++		const bool was_candidate = true;
++		(void)was_candidate;
++		for (int i = 0; i < m_idle_write_count; i++)
++		{
++			const idle_access &w = m_idle_writes[i];
++			const u16 now = (w.size == 1)
++				? m_program->read_byte(w.addr)
++				: m_program->read_word_unaligned(w.addr);
++			if (now != m_idle_write_old[i])
++			{
++				if (m_idle_netzero_dumps < 24)
++				{
++					fprintf(stderr, "V53_IDLE_NETZERO addr=%05x size=%u old=%04x now=%04x\n",
++							w.addr, w.size, m_idle_write_old[i], now);
++					m_idle_netzero_dumps++;
++				}
++				net_zero = false;
++				break;
++			}
++		}
++	}
++	if (net_zero)
++	{
++		m_idle_iter_cycles = iter_cycles;
++		// Resolve each live-in read to a direct host pointer once, so the
++		// per-timeslice verification is a flat compare loop instead of a
++		// handler-dispatched read per entry. Pages are static RAM here, so a
++		// resolved pointer stays valid; any unresolvable entry keeps the
++		// handler-path verification for the whole set.
++		if (!m_idle_probes)
++			m_idle_probes = std::make_unique<idle_probe[]>(IDLE_MAX_READS);
++		m_idle_probes_valid = true;
++		m_idle_probe_count = 0;
++		for (int i = 0; i < m_idle_read_count && m_idle_probes_valid; i++)
++		{
++			const idle_access &r = m_idle_reads[i];
++			u16 *const lo = static_cast<u16 *>(m_program->get_read_ptr(r.addr));
++			if (!lo)
++			{
++				m_idle_probes_valid = false;
++				break;
++			}
++			const u8 *const lo_b = reinterpret_cast<const u8 *>(lo) + (r.addr & 1);
++			if (r.size == 2)
++			{
++				u16 *const hi = static_cast<u16 *>(m_program->get_read_ptr(r.addr + 1));
++				const u8 *const hi_b = hi
++					? reinterpret_cast<const u8 *>(hi) + ((r.addr + 1) & 1)
++					: nullptr;
++				if (!hi_b || (hi_b != lo_b + 1))
++				{
++					m_idle_probes_valid = false;
++					break;
++				}
++				m_idle_probes[m_idle_probe_count++] = idle_probe{ lo_b, r.value, 2 };
++			}
++			else
++				m_idle_probes[m_idle_probe_count++] = idle_probe{ lo_b, r.value, 1 };
++		}
++		m_idle_phase = idle_phase::ARMED;
++	}
++	else
++	{
++		if (m_idle_viable && (iter_cycles > 0) && (iter_cycles < 65536)
++				&& idle_snapshot_matches(m_idle_snapshot))
++			m_idle_fail_netzero++;
++		m_idle_phase = idle_phase::RECORD_PENDING;
++	}
++}
++
++void nec_common_device::idle_head_event()
++{
++	switch (m_idle_phase)
++	{
++	case idle_phase::ARMED:
++		if ((m_pending_irq == 0) && !m_halted && (m_icount > s32(m_idle_iter_cycles)))
++		{
++			bool unchanged = true;
++			for (int i = 0; i < m_idle_io_read_count; i++)
++			{
++				if (io_read_byte(m_idle_io_reads[i].port) != m_idle_io_reads[i].value)
++				{
++					unchanged = false;
++					break;
++				}
++			}
++			if (unchanged)
++			{
++			if (EXPECTED(m_idle_probes_valid))
++			{
++				for (int i = 0; i < m_idle_probe_count; i++)
++				{
++					const idle_probe &r = m_idle_probes[i];
++					const u16 now = (r.size == 1)
++						? r.ptr[0]
++						: (u16(r.ptr[0]) | (u16(r.ptr[1]) << 8));
++					if (now != r.value)
++					{
++						unchanged = false;
++						break;
++					}
++				}
++			}
++			else
++			{
++				for (int i = 0; i < m_idle_read_count; i++)
++				{
++					const idle_access &r = m_idle_reads[i];
++					const u16 now = (r.size == 1)
++						? m_program->read_byte(r.addr)
++						: m_program->read_word_unaligned(r.addr);
++					if (now != r.value)
++					{
++						unchanged = false;
++						break;
++					}
++				}
++			}
++			}
++			if (unchanged)
++			{
++				const u32 iterations = u32(m_icount - 1) / m_idle_iter_cycles;
++				if (iterations)
++				{
++					m_icount -= s32(iterations * m_idle_iter_cycles);
++					m_idle_skipped += iterations;
++				}
++			}
++			else
++			{
++				m_idle_verify_fail++;
++				idle_begin_recording();
++			}
++		}
++		break;
++	case idle_phase::RECORDING:
++		idle_close_recording();
++		if (m_idle_phase != idle_phase::ARMED)
++			break;
++		idle_head_event();
++		break;
++	case idle_phase::RECORD_PENDING:
++		if ((m_pending_irq == 0) && !m_halted)
++			idle_begin_recording();
++		break;
++	}
++}
++
+ void nec_common_device::external_int()
+ {
++	if (UNEXPECTED(m_idle_recording))
++		idle_abort_recording();
++
+ 	if (m_pending_irq & NMI_IRQ)
+ 	{
+ 		nec_interrupt(NEC_NMI_VECTOR, NMI_IRQ);
+@@ -1005,6 +1270,11 @@
+ 	invalidate_fetch_window();
+ 	m_data_window_enable = (m_chip_type == V33_TYPE)
+ 			&& (std::getenv("MAME_MPC_V53_DATA_WINDOW") != nullptr);
++	if (const char *const histogram_path = std::getenv("MAME_MPC_V53_PC_HISTOGRAM"))
++	{
++		m_pc_histogram_path = histogram_path;
++		m_pc_histogram = std::make_unique<u64[]>(1 << 20);
++	}
+ 	invalidate_data_windows();
+ 
+ 	m_program = &space(AS_PROGRAM);
+@@ -1185,9 +1455,37 @@
+ 		return;
+ 	}
+ 
++	if (UNEXPECTED(m_idle_recording))
++		m_idle_slice_start = m_icount;
++
+ 	while(m_icount>0)
+ 	{
+ 		m_prev_ip = m_ip;
++		if (UNEXPECTED(m_pc_histogram != nullptr))
++			m_pc_histogram[((u32(Sreg(PS)) << 4) + m_ip) & 0xfffff]++;
++		if (UNEXPECTED(m_idle_skip_enabled))
++		{
++			const u32 linear = ((u32(Sreg(PS)) << 4) + m_ip) & 0xfffff;
++			if (UNEXPECTED(linear == m_idle_heads[0]) || UNEXPECTED(linear == m_idle_heads[1]))
++			{
++				const int head = (linear == m_idle_heads[0]) ? 0 : 1;
++				if (m_idle_phase == idle_phase::RECORDING)
++				{
++					if (head == m_idle_active_head)
++						idle_head_event();
++				}
++				else
++				{
++					if (head != m_idle_active_head)
++					{
++						// Switching heads drops the other head's record.
++						m_idle_active_head = head;
++						m_idle_phase = idle_phase::RECORD_PENDING;
++					}
++					idle_head_event();
++				}
++			}
++		}
+ 
+ 		// Dispatch IRQ
+ 		if (m_pending_irq && m_no_interrupt==0)
+@@ -1239,4 +1537,10 @@
+ 		}
+ 		do_prefetch();
+ 	}
++
++	if (UNEXPECTED(m_idle_recording))
++	{
++		m_idle_cycles_accum += u32(m_idle_slice_start - m_icount);
++		m_idle_slice_start = m_icount;
++	}
+ }
+diff --git a/src/devices/cpu/nec/necpriv.ipp b/src/devices/cpu/nec/necpriv.ipp
+--- a/src/devices/cpu/nec/necpriv.ipp
++++ b/src/devices/cpu/nec/necpriv.ipp
+@@ -62,10 +62,10 @@
+ #define write_mem_byte(a,d)     data_write_byte((a), (d))
+ #define write_mem_word(a,d)     data_write_word((a), (d))
+ 
+-#define read_port_byte(a)       io_read_byte(a)
+-#define read_port_word(a)       io_read_word(a)
+-#define write_port_byte(a,d)    io_write_byte((a),(d))
+-#define write_port_word(a,d)    io_write_word((a),(d))
++#define read_port_byte(a)       recorded_io_read_byte(a)
++#define read_port_word(a)       (idle_io_guard(), io_read_word(a))
++#define write_port_byte(a,d)    do { idle_io_guard(); io_write_byte((a),(d)); } while (0)
++#define write_port_word(a,d)    do { idle_io_guard(); io_write_word((a),(d)); } while (0)
+ 
+ /************************************************************************/
+ 
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -786,6 +786,8 @@
+ 	const bool direct_dispatch = direct_dispatch_mode && std::strcmp(direct_dispatch_mode, "0");
+ 	const char *const divide_superblock_mode = osd_getenv("MAME_MPC_V53_DIVIDE_SUPERBLOCK");
+ 	const bool divide_superblock = divide_superblock_mode && std::strcmp(divide_superblock_mode, "0");
++	const char *const idle_skip_mode = osd_getenv("MAME_MPC_V53_IDLE_SKIP");
++	const bool idle_skip = idle_skip_mode && std::strcmp(idle_skip_mode, "0");
+ 	const char *const stereo_only_mode = osd_getenv("MAME_MPC_STEREO_ONLY");
+ 	const bool stereo_only = stereo_only_mode && std::strcmp(stereo_only_mode, "0");
+ 	if (event_driven_panel)
+@@ -796,6 +798,15 @@
+ 	m_maincpu->set_mpc2000xl_brkfd_hle(brkfd_hle);
+ 	m_maincpu->set_mpc2000xl_direct_dispatch(direct_dispatch);
+ 	m_maincpu->set_mpc2000xl_divide_superblock(divide_superblock);
++	// OS v1.20 main scheduler loop head (RAM-resident); the skip is
++	// self-validating against recorded memory, so the only gate needed is
++	// the explicit opt-in.
++	// OS v1.20 main scheduler loop head plus the tick-counter wait loop
++	// (RAM linear addresses); both are self-validating recorded fixed points.
++	// Heads: main scheduler loop, tick-counter wait, DMA-ready poll. The
++	// whitelisted status port is the polled DMA-ready register, whose read is
++	// side-effect-free and slice-stable.
++	m_maincpu->set_mpc2000xl_idle_skip(idle_skip, 0x0077f, 0x01691, 0x36115, 0xc03b);
+ 	m_maincpu->set_direct_brc_timer(event_driven_panel);
+ 	m_maincpu->set_addrmap(AS_PROGRAM, &mpc2000_state::mpc2000_map);
+ 	m_maincpu->set_addrmap(AS_IO, &mpc2000_state::mpc2000_io_map);

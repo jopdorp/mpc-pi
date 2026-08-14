@@ -11,5 +11,10 @@ nvram/
 snap/
 sta/
 
+# Profiling and tooling artifacts
+perf.data
+perf.data.old
+__pycache__/
+
 # Ignore VS Code AI rules
 .github/instructions/codacy.instructions.md
