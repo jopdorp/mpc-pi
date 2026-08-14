@@ -48,20 +48,29 @@ not. The device is root-only by default:
 crw------- 1 root root 10, 260 /dev/cpu_dma_latency
 ```
 
-Grant access once, persistently, with a udev rule:
+Grant access persistently with a udev rule that assigns the node to your
+user. Assigning an owner rather than a group avoids needing a fresh login,
+which group membership would require:
 
 ```bash
-sudo tee /etc/udev/rules.d/99-cpu-dma-latency.rules >/dev/null <<'EOF'
-KERNEL=="cpu_dma_latency", GROUP="audio", MODE="0660"
+sudo tee /etc/udev/rules.d/99-cpu-dma-latency.rules >/dev/null <<EOF
+KERNEL=="cpu_dma_latency", OWNER="$USER", MODE="0600"
 EOF
 sudo udevadm control --reload-rules
-sudo udevadm trigger /dev/cpu_dma_latency
-# make sure your user is in the audio group, then log out and back in
-sudo usermod -aG audio "$USER"
+sudo udevadm trigger --name-match=cpu_dma_latency
 ```
 
-Verify with `ls -l /dev/cpu_dma_latency` and by launching the turbo preset,
-which reports `CPU deep idle: held off through /dev/cpu_dma_latency`.
+This takes effect immediately and survives reboots. Verify with
+`ls -l /dev/cpu_dma_latency`, then launch the turbo preset and look for
+`CPU deep idle: held off through /dev/cpu_dma_latency`.
+
+For a single session without touching udev at all:
+
+```bash
+sudo setfacl -m "u:$USER:rw" /dev/cpu_dma_latency
+```
+
+That also applies immediately and is reverted by the next reboot.
 
 The blunt alternative disables the deep states globally until reboot:
 
