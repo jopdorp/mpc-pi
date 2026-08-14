@@ -14,7 +14,7 @@ BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
 BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_AARCH64_GLIBC_STABLE=y
 BR2_GLOBAL_PATCH_DIR="board/raspberrypi/patches"
 BR2_SYSTEM_DHCP="eth0"
-BR2_ROOTFS_POST_BUILD_SCRIPT="board/raspberrypi5/post-build.sh"
+BR2_ROOTFS_POST_BUILD_SCRIPT="board/raspberrypi5/post-build.sh $(BR2_EXTERNAL_MPC_PI_PATH)/board/rpi5/post-build.sh"
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,21b410140c47ffab5668399f6f143c7d7b935c8b)/linux-21b410140c47ffab5668399f6f143c7d7b935c8b.tar.gz"
@@ -67,7 +67,10 @@ BR2_PACKAGE_ALSA_UTILS_ARECORD=y
 BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
 BR2_PACKAGE_PIPEWIRE=y
 # PipeWire is only a graph; without a session manager no links are ever
-# created and the emulator's stream would connect to nothing.
+# created and the emulator's stream would connect to nothing. wireplumber
+# depends on Lua, and Kconfig drops symbols with unmet dependencies silently.
+BR2_PACKAGE_LUA=y
+BR2_PACKAGE_LUA_5_4=y
 BR2_PACKAGE_WIREPLUMBER=y
 # PipeWire installs its ALSA plugin whenever alsa-lib is present in 2025.11;
 # there is no separate _ALSA symbol.
@@ -79,6 +82,11 @@ BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VC4=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y
 BR2_PACKAGE_SDL2=y
+# MAME links these directly (font_sdl uses fontconfig/freetype, the UI uses
+# SDL2_ttf); its other 3rdparty libraries are bundled and built internally.
+BR2_PACKAGE_SDL2_TTF=y
+BR2_PACKAGE_FONTCONFIG=y
+BR2_PACKAGE_FREETYPE=y
 BR2_PACKAGE_SDL2_KMSDRM=y
 BR2_PACKAGE_SDL2_OPENGLES=y
 

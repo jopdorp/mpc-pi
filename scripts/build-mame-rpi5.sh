@@ -103,6 +103,8 @@ make -C "$mame_source_dir" \
     TARGETOS=linux \
     OSD=sdl \
     NO_X11=1 \
+    NO_USE_PULSEAUDIO=1 \
+    NO_OPENGL=1 \
     NO_USE_XINPUT=1 \
     USE_QTDEBUG=0 \
     DEBUG=0 \
