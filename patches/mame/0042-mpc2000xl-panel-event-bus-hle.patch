@@ -30,12 +30,36 @@
  		m_mpc_idle_stats = true;
 --- a/src/mame/akai/mpc2000.cpp
 +++ b/src/mame/akai/mpc2000.cpp
-@@ -178,6 +178,28 @@
+@@ -70,6 +70,12 @@
+ static constexpr uint8_t BIT4 = (1 << 4);
+ static constexpr uint8_t BIT5 = (1 << 5);
+ 
++// Cycle order of the live "Velocity Curve Select" input: authentic,
++// half-compensated, fully linear, beyond linear, the opposite direction, and
++// full level.
++char const *const s_velocity_curve_names[] =
++		{ "linear", "half", "compensated", "expanded", "soft", "fixed" };
++
+ class mpc2000_state : public driver_device
+ {
+ public:
+@@ -123,6 +129,8 @@
+ 	void init_mpc2000();
+ 
+ 	DECLARE_INPUT_CHANGED_MEMBER(variation_changed);
++	DECLARE_INPUT_CHANGED_MEMBER(velocity_curve_changed);
++	DECLARE_INPUT_CHANGED_MEMBER(velocity_amount_changed);
+ 
+ private:
+ 	required_device<v53a_device> m_maincpu;
+@@ -178,6 +186,30 @@
  	TIMER_CALLBACK_MEMBER(panel_txd_sync);
  	void midi_input_byte(uint8_t data);
  	void enqueue_fast_pad_byte(uint8_t data);
 +	void build_velocity_curve();
 +	uint8_t m_velocity_curve[128]{};
++	int m_velocity_curve_index = 0;
++	int m_velocity_amount = 100;
 +	void panel_hle_start();
 +	void panel_hle_emit(uint8_t status, uint8_t data);
 +	TIMER_CALLBACK_MEMBER(panel_hle_tick);
@@ -59,10 +83,16 @@
  	TIMER_CALLBACK_MEMBER(fast_pad_byte_tick);
  
  	void fdc_scsi_w(int state);
-@@ -216,6 +238,13 @@
+@@ -216,6 +248,19 @@
  	m_panel_txd_timer = timer_alloc(FUNC(mpc2000_state::panel_txd_sync), this);
  	m_fast_pad_timer = timer_alloc(FUNC(mpc2000_state::fast_pad_byte_tick), this);
  	m_fast_pad_enabled = bool(osd_getenv("MAME_MPC_MIDI_INTERNAL_PADS"));
++	if (char const *const name = osd_getenv("MAME_MPC_VELOCITY_CURVE"))
++		for (unsigned i = 0; i < std::size(s_velocity_curve_names); i++)
++			if (!std::strcmp(name, s_velocity_curve_names[i]))
++				m_velocity_curve_index = int(i);
++	if (char const *const amount = osd_getenv("MAME_MPC_VELOCITY_AMOUNT"))
++		m_velocity_amount = std::clamp(std::atoi(amount), 0, 100);
 +	build_velocity_curve();
 +	m_panel_hle_timer = timer_alloc(FUNC(mpc2000_state::panel_hle_tick), this);
 +	m_panel_hle_enabled = bool(osd_getenv("MAME_MPC_PANEL_HLE"));
@@ -73,7 +103,7 @@
  	char const *const lcd_skip_unchanged = osd_getenv("MAME_MPC_LCD_SKIP_UNCHANGED");
  	m_lcd_skip_unchanged = lcd_skip_unchanged && std::strcmp(lcd_skip_unchanged, "0");
  	if (char const *const lcd_export = osd_getenv("MAME_MPC_LCD_EXPORT"))
-@@ -603,6 +632,13 @@
+@@ -603,6 +648,13 @@
  
  uint8_t mpc2000_state::an4_r()
  {
@@ -87,7 +117,7 @@
  	return m_variation_slider;
  }
  
-@@ -667,8 +703,340 @@
+@@ -667,8 +719,376 @@
  	m_maincpu->rxd_w(param);
  }
  
@@ -335,6 +365,25 @@
 +	}
 +}
 +
++INPUT_CHANGED_MEMBER(mpc2000_state::velocity_curve_changed)
++{
++	if (!newval)
++		return;
++	m_velocity_curve_index =
++			(m_velocity_curve_index + 1) % int(std::size(s_velocity_curve_names));
++	build_velocity_curve();
++	machine().popmessage("Velocity curve: %s at %d%%",
++			s_velocity_curve_names[m_velocity_curve_index], m_velocity_amount);
++}
++
++INPUT_CHANGED_MEMBER(mpc2000_state::velocity_amount_changed)
++{
++	m_velocity_amount = std::clamp(int(newval), 0, 100);
++	build_velocity_curve();
++	machine().popmessage("Velocity curve: %s at %d%%",
++			s_velocity_curve_names[m_velocity_curve_index], m_velocity_amount);
++}
++
 +// Velocity curve for injected pad hits (MAME_MPC_VELOCITY_CURVE, and
 +// MAME_MPC_VELOCITY_GAMMA for an explicit exponent).
 +//
@@ -347,11 +396,17 @@
 +// program rather than the firmware.
 +//
 +//   linear       identity, the stock behaviour and the default
-+//   soft         gamma 0.6, louder soft hits, suits ghost notes
-+//   hard         gamma 1.7, quieter soft hits, suits heavy hitters
++//   half         the compensating curve at half strength
 +//   compensated  inverse of the measured response, so output amplitude
 +//                tracks velocity roughly linearly
++//   expanded     gamma 2.6, dynamics exaggerated beyond linear
++//   soft         gamma 0.6, louder soft hits; note this is the opposite
++//                direction and pushes velocities into the compressed region
 +//   fixed        always full velocity, like the panel's Full Level key
++//
++// MAME_MPC_VELOCITY_AMOUNT (0-100) blends any curve back toward stock, and
++// both the curve and the amount are adjustable at runtime through the
++// "Velocity Curve Select" input and the "Velocity Curve Amount" slider.
 +void mpc2000_state::build_velocity_curve()
 +{
 +	// Measured response of this machine: velocity against fraction of full
@@ -362,12 +417,17 @@
 +		{ 80.0, 0.892 }, { 112.0, 0.981 }, { 127.0, 1.000 }
 +	};
 +
-+	char const *const name = osd_getenv("MAME_MPC_VELOCITY_CURVE");
 +	char const *const gamma_text = osd_getenv("MAME_MPC_VELOCITY_GAMMA");
-+	std::string curve = name ? name : "linear";
++	std::string curve = s_velocity_curve_names[m_velocity_curve_index];
 +	double gamma = 1.0;
-+	if (curve == "soft") gamma = 0.6;
-+	else if (curve == "hard") gamma = 1.7;
++	// "half" is the compensating curve at half strength: it keeps some of the
++	// MPC's characteristic compression while restoring usable separation
++	// between a medium and a hard hit.
++	double preset_blend = 1.0;
++	if (curve == "half") { curve = "compensated"; preset_blend = 0.5; }
++	else if (curve == "soft") gamma = 0.6;
++	else if (curve == "expanded") gamma = 2.6;
++	const double blend = preset_blend * (double(m_velocity_amount) / 100.0);
 +	if (gamma_text)
 +	{
 +		const double requested = std::atof(gamma_text);
@@ -407,6 +467,11 @@
 +			out = 127.0 * std::pow(double(in) / 127.0, gamma);
 +		}
 +
++		// Blend back toward the stock response. 100 applies the curve in
++		// full, 50 goes half way, 0 leaves the hardware behaviour alone, so
++		// the authentic compression can be softened rather than removed.
++		out = double(in) + (blend * (out - double(in)));
++
 +		int value = int(out + 0.5);
 +		value = std::clamp(value, 0, 127);
 +		// Never turn an audible hit into a note-off.
@@ -416,7 +481,8 @@
 +	}
 +
 +	if (curve != "linear")
-+		osd_printf_info("MPC2000XL velocity curve: %s\n", curve.c_str());
++		osd_printf_info("MPC2000XL velocity curve: %s at %.0f%%\n",
++				curve.c_str(), blend * 100.0);
 +}
 +
  void mpc2000_state::enqueue_fast_pad_byte(uint8_t data)
@@ -428,7 +494,7 @@
  	if (m_fast_pad_count == m_fast_pad_queue.size())
  	{
  		osd_printf_warning("MPC fast-pad input queue overflow; dropping byte %02x\n", data);
-@@ -706,9 +1074,14 @@
+@@ -706,9 +1126,14 @@
  	// retry also lets authentic front-panel traffic share the V53 SCU safely.
  	if (m_maincpu->scu_rx_ready() || !m_maincpu->scu_line_idle())
  	{
@@ -444,7 +510,7 @@
  
  	const uint8_t data = m_fast_pad_queue[m_fast_pad_head];
  	m_fast_pad_head = (m_fast_pad_head + 1) % m_fast_pad_queue.size();
-@@ -747,11 +1120,26 @@
+@@ -747,11 +1172,26 @@
  	}
  
  	m_midi_data_pos = 0;
@@ -472,3 +538,16 @@
  	enqueue_fast_pad_byte(0x90 | pad);
  	enqueue_fast_pad_byte(velocity);
  }
+@@ -1085,6 +1525,12 @@
+ 	PORT_START("VARIATION")
+ 	PORT_ADJUSTER(100, "NOTE VARIATION") PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(mpc2000_state::variation_changed), 1)
+ 
++	PORT_START("VELCURVE")
++	PORT_ADJUSTER(100, "Velocity Curve Amount") PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(mpc2000_state::velocity_amount_changed), 0)
++
++	PORT_START("VELSELECT")
++	PORT_BIT( 0x01, IP_ACTIVE_HIGH, IPT_OTHER ) PORT_NAME("Velocity Curve Select") PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(mpc2000_state::velocity_curve_changed), 0)
++
+ 	PORT_START("DATAENTRY")
+ 	PORT_BIT( 0xff, 0x00, IPT_DIAL) PORT_SENSITIVITY(100) PORT_KEYDELTA(0) PORT_CODE_DEC(KEYCODE_F14) PORT_CODE_INC(KEYCODE_F15)
+ INPUT_PORTS_END

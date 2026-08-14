@@ -150,15 +150,33 @@ own response.
 `MAME_MPC_VELOCITY_CURVE` therefore offers deviation from the hardware rather
 than a correction of it:
 
-| Curve | Effect |
-|---|---|
-| `linear` | identity, the authentic response, and the default |
-| `soft` | gamma 0.6, louder soft hits, suits ghost notes |
-| `hard` | gamma 1.7, quieter soft hits, suits heavy hitters |
-| `compensated` | inverts the measured response so amplitude tracks velocity |
-| `fixed` | always full velocity, like the panel's Full Level key |
+The curves form a ladder along one axis, how much of the compression is
+undone, and that is also the cycle order of the live select input:
 
+| Curve | Velocity 48 lands at | 48-127 range | Notes |
+|---|---|---|---|
+| `linear` | 79.0% | 2.0 dB | identity, authentic, the default |
+| `half` | 61.4% | 4.2 dB | compensating curve at half strength |
+| `compensated` | 38.3% | 8.5 dB | amplitude tracks velocity |
+| `expanded` | 18.7% | 14.6 dB | dynamics beyond linear |
+| `soft` | 86.3% | 1.2 dB | opposite direction; pushes further into the compressed region |
+| `fixed` | - | - | always full velocity, like Full Level |
+
+All figures above are measured, except `expanded` and `soft`, which are
+computed against the measured response. Note that `soft` is named for the
+player rather than the effect: it suits a controller that cannot reach high
+velocities, and on this machine it makes the compression worse.
+
+An earlier `hard` preset (gamma 1.7) was dropped because it measured within a
+few percent of `compensated` and added nothing.
+
+`MAME_MPC_VELOCITY_AMOUNT` (0-100) blends any curve back toward the stock
+response, so `half` is equivalent to `compensated` at 50.
 `MAME_MPC_VELOCITY_GAMMA` sets an explicit exponent between 0.1 and 4.0.
+
+Both are adjustable while running: the "Velocity Curve Amount" slider appears
+under Slider Controls, and "Velocity Curve Select" can be mapped to a key in
+the input menu to cycle the ladder, with the current setting shown on screen.
 Measured with `compensated` active, the same ramp produced 12.2%, 38.3%,
 66.4%, 87.3% and 100%, within about three points of linear throughout, and
 widened the 48-to-127 span from two decibels to roughly eight.
