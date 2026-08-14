@@ -30,7 +30,7 @@
  		m_mpc_idle_stats = true;
 --- a/src/mame/akai/mpc2000.cpp
 +++ b/src/mame/akai/mpc2000.cpp
-@@ -178,6 +178,23 @@
+@@ -178,6 +178,24 @@
  	TIMER_CALLBACK_MEMBER(panel_txd_sync);
  	void midi_input_byte(uint8_t data);
  	void enqueue_fast_pad_byte(uint8_t data);
@@ -50,23 +50,25 @@
 +	bool m_panel_hle_banner_sent = false;
 +	bool m_panel_hle_primed = false;
 +	uint64_t m_panel_hle_drops = 0;
++	bool m_pad_latency_log = false;
 +	int m_fast_pad_retry_us = 4;
  	TIMER_CALLBACK_MEMBER(fast_pad_byte_tick);
  
  	void fdc_scsi_w(int state);
-@@ -216,6 +233,11 @@
+@@ -216,6 +234,12 @@
  	m_panel_txd_timer = timer_alloc(FUNC(mpc2000_state::panel_txd_sync), this);
  	m_fast_pad_timer = timer_alloc(FUNC(mpc2000_state::fast_pad_byte_tick), this);
  	m_fast_pad_enabled = bool(osd_getenv("MAME_MPC_MIDI_INTERNAL_PADS"));
 +	m_panel_hle_timer = timer_alloc(FUNC(mpc2000_state::panel_hle_tick), this);
 +	m_panel_hle_enabled = bool(osd_getenv("MAME_MPC_PANEL_HLE"));
++	m_pad_latency_log = bool(osd_getenv("MAME_MPC_PAD_LATENCY_LOG"));
 +	m_panel_slider_sweep = bool(osd_getenv("MAME_MPC_PANEL_SLIDER_SWEEP"));
 +	if (m_panel_hle_enabled)
 +		panel_hle_start();
  	char const *const lcd_skip_unchanged = osd_getenv("MAME_MPC_LCD_SKIP_UNCHANGED");
  	m_lcd_skip_unchanged = lcd_skip_unchanged && std::strcmp(lcd_skip_unchanged, "0");
  	if (char const *const lcd_export = osd_getenv("MAME_MPC_LCD_EXPORT"))
-@@ -603,6 +625,13 @@
+@@ -603,6 +627,13 @@
  
  uint8_t mpc2000_state::an4_r()
  {
@@ -80,7 +82,7 @@
  	return m_variation_slider;
  }
  
-@@ -667,6 +696,211 @@
+@@ -667,8 +698,220 @@
  	m_maincpu->rxd_w(param);
  }
  
@@ -190,8 +192,8 @@
 +	// takes the reference sample instead.
 +	m_panel_hle_primed = false;
 +
-+	// The panel CPU never runs; nothing else reads its ports.
-+	m_subcpu->suspend(SUSPEND_REASON_DISABLE, 1);
++	// Suspension applied here would be cleared by the reset that follows
++	// device start, so the first tick applies it instead.
 +	m_panel_hle_timer->adjust(attotime::from_usec(PANEL_HLE_TICK_US),
 +			0, attotime::from_usec(PANEL_HLE_TICK_US));
 +	osd_printf_info("MPC2000XL panel event-bus HLE active (%d keys bound)\n",
@@ -217,6 +219,9 @@
 +	if (!m_panel_hle_primed)
 +	{
 +		m_panel_hle_primed = true;
++		// Stop the panel CPU here rather than at device start: a suspension
++		// set before the machine reset does not survive it.
++		m_subcpu->suspend(SUSPEND_REASON_DISABLE, 1);
 +		// The suspended panel is the only thing that ever drove this line,
 +		// and the V53 SCU will not accept a byte while it reads low.
 +		m_maincpu->rxd_w(1);
@@ -291,8 +296,14 @@
 +
  void mpc2000_state::enqueue_fast_pad_byte(uint8_t data)
  {
++	if (UNEXPECTED(m_pad_latency_log) && ((data & 0xf0) == 0x90))
++		fprintf(stderr, "PAD_INJECT t=%.6f byte=%02x\n",
++				machine().time().as_double(), data);
++
  	if (m_fast_pad_count == m_fast_pad_queue.size())
-@@ -706,9 +940,14 @@
+ 	{
+ 		osd_printf_warning("MPC fast-pad input queue overflow; dropping byte %02x\n", data);
+@@ -706,9 +949,14 @@
  	// retry also lets authentic front-panel traffic share the V53 SCU safely.
  	if (m_maincpu->scu_rx_ready() || !m_maincpu->scu_line_idle())
  	{
@@ -308,7 +319,7 @@
  
  	const uint8_t data = m_fast_pad_queue[m_fast_pad_head];
  	m_fast_pad_head = (m_fast_pad_head + 1) % m_fast_pad_queue.size();
-@@ -747,6 +986,20 @@
+@@ -747,6 +995,20 @@
  	}
  
  	m_midi_data_pos = 0;

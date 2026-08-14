@@ -548,6 +548,24 @@ roughly double the hit rate: prove the serial line idle between bytes (no
 transmit in flight, receive callback unbound) and drop the SIO term from the
 horizon, letting the ADC's 144/192-cycle boundary bind instead.
 
+**Verification note that cost a false result.** The first working-looking
+version of the panel HLE called `suspend()` on the uPD78C10 from
+`machine_start()`. A suspension set there does not survive the machine reset
+that follows, so the panel CPU ran at its full 35.7M instructions per render
+while the synthesized stream was injected alongside it. Every functional
+signal still looked correct - the machine booted, the LCD matched the
+reference pixel count exactly, and the rendered audio matched to one decimal
+of RMS - precisely because the real panel was doing the work. A wall-clock
+pair that happened to differ by 14.8% was then read as the gain, when that
+harness varies by more than 20% between identical runs.
+
+What settled it was counting the instructions executed by the CPU the patch
+claimed to have stopped, using the `MAME_MPC_PANEL_PC_HISTOGRAM` diagnostic
+that already existed. Applying the suspension from the first timer tick
+instead brings the panel to 1,975 instructions and the real gain to -15.8%
+instructions and -23.2% cycles. **When a patch claims to remove work, measure
+the work, not the wall clock.**
+
 A separate idea recorded for the latency workstream, not throughput: an
 opt-in "instant write-DMA" hot-rod (0031-class, deliberately not
 accuracy-preserving, default off, validated by the live-timing harness
