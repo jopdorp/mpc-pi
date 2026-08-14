@@ -28,12 +28,24 @@ showed it does not shorten the pad-to-sound path: DMA channel 3 moves data
 between V53 memory and wave RAM, which is sample loading and sampling, while
 playback reads wave RAM directly. Striking a pad triggers no DMA.
 
-Keep it enabled anyway. At divider 4 it cuts bulk transfer time by sixteen -
-about 83 ms to 5 ms per second of 44.1 kHz audio loaded - and it is a net
-throughput gain of -2.01% instructions and -2.83% cycles, because the
-firmware's DMA-ready polling shortens by more than the extra timer callbacks
-cost. Divider 1 goes too far and regresses to +3.85% instructions against
-stock.
+Keep it enabled anyway: it cuts bulk transfer time by the same factor - at
+divider 8, roughly 83 ms to 10 ms per second of 44.1 kHz audio loaded - and
+it is a net throughput gain rather than a cost, because the firmware's
+DMA-ready polling shortens by more than the extra timer callbacks cost.
+
+The curve is not monotonic, so the divider was swept rather than guessed
+(instructions, two runs each, spread within 0.03%):
+
+| Divider | Relative instructions |
+|---|---|
+| 64 (stock) | baseline |
+| 16 | -1.65% against divider 8 |
+| **8** | **best measured** |
+| 4 | -1.05% worse than 8 |
+| 1 | far worse; regresses past stock |
+
+Divider 8 is the setting the turbo preset uses. Divider 1 floods the
+scheduler with DMA callbacks and should not be used despite being accepted.
 
 ## CPU idle states
 

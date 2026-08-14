@@ -49,7 +49,7 @@ fi
 # pure queueing before a note reaches the emulator) and stop the DSP DMA from
 # pacing transfers at one word per 64 clocks.
 export MAME_MPC_MIDI_POLL_HZ=${MAME_MPC_MIDI_POLL_HZ:-8000}
-export MAME_MPC_DSP_DMA_TURBO=${MAME_MPC_DSP_DMA_TURBO:-4}
+export MAME_MPC_DSP_DMA_TURBO=${MAME_MPC_DSP_DMA_TURBO:-8}
 
 # Deep CPU idle states cost more wake-up latency than anything left in the
 # emulator: C6 exits in ~140 us and C10 in ~310 us on a Core Ultra. Holding
