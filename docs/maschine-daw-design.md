@@ -260,7 +260,9 @@ recording recovery plus flush-on-stop.
 |---|---|
 | Design (this document) | done |
 | Phase 1 PoC | **passing 10/10** on desktop Ardour 9 with the JACK/PipeWire backend (`scripts/daw/phase1-run.sh`): backend, session, track, physical input connected, a-EQ insert, param set, record (region captured), playback, save |
-| Phases 2-5 | not started |
+| Phase 2 capture | **passing 7/7** (`scripts/daw/phase2-run.sh`): MAME playing the demo project and headless Ardour share one PipeWire graph; Ardour creates 4 tracks, connects the MPC track to the emulator's `:speaker` ports, records 5 s — verdict SIGNAL CAPTURED (RMS ≈ 15.8k both channels) |
+| Phase 2 sync | MIDI-clock slave harness (`scripts/daw/phase2-sync-run.sh` + `mclk.c` ALSA-seq clock sender); real MPC clock path pending |
+| Phases 3-5 | not started |
 
 ## Phase 1 findings (hard-won, do not rediscover)
 
@@ -291,3 +293,38 @@ recording recovery plus flush-on-stop.
   Diagnosed with a plain-JACK C probe (duplicates rejected, four distinct
   names fine) plus `PIPEWIRE_DEBUG=3` showing the two clients and the
   register-unregister-register race.
+
+## Phase 2 findings
+
+- MAME's native PipeWire module names its nodes after the emulated sound
+  device tag: the stereo output is **`:speaker`** (ports
+  `:speaker:output_FL/FR`), the floppy noise is `:fdc:0:35hd:flopsndout`.
+  Nothing contains "mame" or "mpc" — match on `speaker`.
+- Client (non-hardware) ports are enumerated from Lua with
+  `AudioEngine:get_backend_ports("", DataType("audio"), PortFlags.IsOutput,
+  C.StringVector())`; `get_physical_inputs` only sees hardware.
+- Session config accessor is `session:cfg()` (not `config()`);
+  `cfg():set_external_sync(true)` works from Lua.
+- **TransportMasterManager has no Lua bindings**, but none are needed: with
+  a fresh config dir (no `transport_masters` state file),
+  `set_default_configuration` adds masters in the order JACK Transport, MTC,
+  LTC, MIDI Clock and leaves **the last one — MIDI Clock — current**, and
+  `restart()` keeps defaults when there is no state file. To force a
+  specific master later, pre-seed `~/.config/ardour9/transport_masters`
+  (`<TransportMasters current="MIDI Clock"><TransportMaster type=... name=...
+  removeable=.../>...`) — its `current` property is applied after engine
+  start.
+- Ardour's MIDI Clock master **only rolls after it sees MIDI Start (0xFA) or
+  Continue** — bare 0xF8 clocks tune the DLL but never start the transport.
+  Link the port first, send Start after.
+- The MPC-side runner must `setsid` the run-mpc.sh wrapper and kill the
+  whole process group with SIGTERM→SIGKILL escalation: the autoboot
+  play-loop can swallow SIGTERM and `wait` hangs forever.
+- `scripts/diagnostics/benchmark-loaded-mpc2000xl.lua` self-exits after its
+  measurement window; Phase 2 uses `scripts/daw/phase2-autoboot.lua`, which
+  boots at 4x, prints `PHASE2_PLAYBACK_READY`, then re-presses PLAY START
+  every 15 s forever.
+- The desktop and RPi5 cross builds share `.cache/mame`; the cross build now
+  deletes its aarch64 `mpc` from the checkout after installing to the
+  overlay, otherwise every desktop harness dies with `Syntax error: "("
+  unexpected` (shell interpreting an ARM ELF).

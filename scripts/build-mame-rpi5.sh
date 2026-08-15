@@ -123,5 +123,10 @@ make -C "$mame_source_dir" \
     -j"$mame_jobs"
 
 install -D -m 0755 "$mame_source_dir/mpc" "$out_binary"
+# The checkout is shared with the desktop build: leaving the aarch64 binary
+# as .cache/mame/mpc silently breaks every desktop harness that runs it.
+rm -f "$mame_source_dir/mpc"
+echo "note: removed aarch64 mpc from the checkout; desktop harnesses need"
+echo "      scripts/build-mame.sh to restore the x86 binary"
 printf '\nbuilt %s\n' "$out_binary"
 file "$out_binary" | sed 's/^/  /'
