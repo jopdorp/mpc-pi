@@ -210,24 +210,60 @@ AMP_MODELS = [
      "for": "modern and heavier metal, djent, metalcore"},
 ]
 
-# The same three as Neural Amp Modeler captures. NAM is offered as an
-# ALTERNATIVE to guitarix rather than a replacement: it sounds closer to
-# a specific rig because it is a capture of one, but it costs neural
-# inference per instance and needs model files shipped with the image.
-# The panel's amp view is identical either way - it draws the voicing
-# name, the cab and the tone stack - so switching engines is invisible
-# to the player.
+# NAM as the alternative amp engine. Offered rather than substituted: a
+# capture sounds like one specific rig, at the cost of neural inference
+# per instance and model files in the image. The panel's amp view is
+# identical either way, so the engine is invisible to the player.
+#
+# Verified facts that shaped this (see docs for sources):
+#   * A2 (June 2026) is still WaveNet-family but uses leaky ReLU, a
+#     convolutional head and a ~132 ms receptive field. A2-Full is 30-40%
+#     cheaper than A1-Standard at better accuracy.
+#   * A2 has exactly TWO tiers, Full and Lite. "nano" and "feather" are
+#     *A1* tier names - an easy and expensive thing to conflate. Both
+#     tiers live in ONE .nam file ("slimmable"), chosen at runtime by the
+#     plugin's quality_scale port: <0.5 selects Lite, >=0.5 Full.
+#   * mikeoliphant/neural-amp-modeler-lv2 v0.2.0+ supports A2 and ships a
+#     PREBUILT aarch64 Pi 5 binary linking only libc and libm, so it drops
+#     into /usr/lib/lv2 with no build. Ardour is a named supported host.
+#   * Build it yourself only with a modern toolchain: the A2 fast path is
+#     reported SLOWER on GCC 12 (what Pi OS Bookworm ships) and faster on
+#     GCC 15+. Prefer the prebuilt binary.
 AMP_ENGINES = ("guitarix", "nam")
+
+NAM_URI = "http://github.com/mikeoliphant/neural-amp-modeler-lv2"
+NAM_ALT_URI = "http://two-play.com/plugins/toob-nam"   # PiPedal's TooB NAM
+NAM_QUALITY_PORT = "quality_scale"      # 0.0..1.0; <0.5 = Lite, >= = Full
+NAM_TIERS = ("lite", "full")
+NAM_DEFAULT_TIER = "lite"   # cheapest that still sounds like the amp, and
+                            # what fits beside a 1600%-speed emulator
+
+# Two hard operational constraints from the plugin's own docs:
+NAM_REQUIRES_48K = True     # it does no resampling; host must run at the
+                            # model's rate, which the appliance already does
+NAM_NEEDS_CAB_AFTER = True  # amp-only captures need a cab IR after them,
+                            # which is why the chain keeps its cab slot
+
 NAM_MODELS = [
-    {"name": "DLX", "file": "fender-deluxe-reverb-clean.nam"},
-    {"name": "PLEXI", "file": "marshall-plexi-1959.nam"},
-    {"name": "IIC+", "file": "mesa-mark-iic-plus.nam"},
-    {"name": "AC30", "file": "vox-ac30-top-boost.nam"},
-    {"name": "5150", "file": "peavey-5150-lead.nam"},
+    {"name": "DLX", "file": "fender-deluxe-reverb-a2.nam",
+     "source": "https://www.tone3000.com/tones/fender-deluxe-reverb-a2-65227",
+     "note": "by sdatkinson, NAM's author; vibrato channel"},
+    {"name": "PLEXI", "file": "marshall-jmp50-plexi-1969-a2.nam",
+     "source": "https://www.tone3000.com/tones/marshall-jmp-50-lead-1969-plexi-65578",
+     "note": "A2-Full ESR 0.0074"},
+    {"name": "IIC+", "file": "mesa-mark-iic-plus-hetfield-rhythm.nam",
+     "source": "https://www.tone3000.com/tones/mesa-boogie-mark-iic-hetfield-rhythm-2769",
+     "note": "A2-Full ESR 0.0039"},
+    # These two have guitarix voicings but no pinned capture yet; the
+    # session falls back to guitarix for them rather than shipping a
+    # wrong amp under the right name.
+    {"name": "AC30", "file": None,
+     "source": "https://www.tone3000.com (search: AC30 top boost A2)",
+     "note": "capture not yet pinned; guitarix voicing used"},
+    {"name": "5150", "file": None,
+     "source": "https://www.tone3000.com (search: 5150 A2)",
+     "note": "capture not yet pinned; guitarix voicing used"},
 ]
-NAM_TIER = "nano"      # A2 quality tier; nano is the cheapest that still
-                       # sounds like the amp, and is what fits beside a
-                       # 1600%-speed emulator on a Pi 5.
 
 # Buildroot/apt package names behind the URIs above.
 PACKAGES = [
@@ -237,6 +273,13 @@ PACKAGES = [
     ("x42-plugins", "fil4 EQ and dpl limiter fallbacks"),
     ("zam-plugins", "ZamTube fallback drive"),
 ]
+
+# NAM is not in Debian; it is a prebuilt LV2 dropped into /usr/lib/lv2.
+NAM_INSTALL = (
+    "https://github.com/mikeoliphant/neural-amp-modeler-lv2/releases",
+    "neural_amp_modeler_lv2_rpi5.tgz",
+    "untar into /usr/lib/lv2 - links only libc and libm, no deps",
+)
 
 
 def role_for_kind(kind):
@@ -259,6 +302,14 @@ def self_test():
     kinds = {r["kind"] for r in ROLES}
     missing = kinds - set(KINDS)
     assert not missing, missing
+    # A2 has exactly two tiers; asserting it stops "nano"/"feather" (A1
+    # names) creeping back in, which is the mistake this file was written
+    # to correct.
+    assert NAM_TIERS == ("lite", "full"), NAM_TIERS
+    assert NAM_DEFAULT_TIER in NAM_TIERS
+    assert NAM_REQUIRES_48K, "the plugin does no resampling"
+    assert NAM_NEEDS_CAB_AFTER, "amp-only captures need a cab after them"
+
     assert len(AMP_MODELS) == len(NAM_MODELS), \
         "the two amp engines must offer the same voicings, or switching " \
         "engines would silently change the rig"

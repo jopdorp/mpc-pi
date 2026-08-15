@@ -557,22 +557,54 @@ what makes the pairing meaningful:
 
 **Two amp engines, same voicings.** guitarix is the default because it is
 a complete single-app chain — tube stage, tone stack and a real cabinet
-model — it is analytic rather than neural, and it is packaged for arm64.
-**NAM is offered as an alternative**, not a replacement: a capture sounds
-closer to one specific rig, at the cost of neural inference per instance
-and model files shipped in the image. `plugins.py` keeps both lists the
-same length with matching names and the self-test enforces it, so
-switching engines can never silently change which amps exist. The panel's
-amp view is identical either way, so the engine is invisible to the
-player.
+model — analytic rather than neural, and packaged for arm64. **NAM is the
+alternative**: a capture sounds like one specific rig, at the cost of
+neural inference per instance and model files in the image.
+`plugins.py` keeps both voicing lists the same length with matching names
+and the self-test enforces it, so switching engines can never silently
+change which amps exist. The panel's amp view is identical either way.
 
-NAM's **A2** generation is the target rather than classic NAM: its nano
-tier is dramatically cheaper than the original WaveNet models, which is
-what makes it viable beside a 1600%-speed emulator. Note that A2 is newer
-than the WaveNet implementation in the neighbouring `rpi-pedal` project,
-so that code is a proven ARM inference path but not an A2 one.
+### Neural Amp Modeler A2 (researched 2026-08-15)
 
-**Packages** (`sudo apt install lsp-plugins-lv2 dragonfly-reverb guitarix
+| | |
+|---|---|
+| Plugin | `mikeoliphant/neural-amp-modeler-lv2` v0.2.0+, URI `http://github.com/mikeoliphant/neural-amp-modeler-lv2` |
+| Install | **prebuilt aarch64 Pi 5 binary**, `neural_amp_modeler_lv2_rpi5.tgz`, untarred into `/usr/lib/lv2`; links only libc and libm |
+| Host | Ardour is a named supported host; model loading uses `atom:Path`, which Ardour drives |
+| Alternative | TooB NAM (`http://two-play.com/plugins/toob-nam`), A2-capable **only inside the PiPedal 2 .deb** — standalone ToobAmp releases predate the A2 merge |
+
+Facts worth stating because they are easy to get wrong, and two of them
+corrected this design:
+
+- **A2 has exactly two tiers, Full and Lite.** "Nano" and "feather" are
+  *A1* names; "A2-Nano" was only a pre-launch name for A2-Lite. Both
+  tiers live in one slimmable `.nam` file and are chosen at runtime by
+  the plugin's `quality_scale` port (<0.5 Lite, ≥0.5 Full). The
+  self-test asserts this so the A1 names cannot creep back.
+- **A2-Full is 30–40% cheaper than A1-Standard** at roughly half the
+  error, so A2 is worth having on its own terms.
+- The often-repeated "~10 A2 models on a Pi 5" is **not substantiated as
+  stated**. The nearest hard figure is PiPedal's author measuring **16
+  simultaneous A1-Standard instances on a Pi 5** with A76-tuned flags
+  (8 without). Since A2-Full is cheaper again, ~10 is plausible — but
+  that was PiPedal's host at 128×3 buffers, not Ardour, and nobody has
+  published an Ardour figure.
+- **Build only with a modern toolchain.** The A2 fast path is reported
+  *slower* on GCC 12 — which is what Pi OS Bookworm ships — and faster on
+  GCC 15+. The official Pi binaries use a GCC 16 cross-toolchain, so the
+  prebuilt tarball beats a local build.
+- Two operational constraints: the plugin does **no resampling**, so the
+  host must run at the model's 48 kHz (the appliance already does), and
+  amp-only captures need a **cab after them**, which is why the guitar
+  chain keeps its cab slot either way.
+
+Captures for three of the five voicings are pinned (Fender Deluxe Reverb
+A2 by NAM's own author, Marshall JMP-50 Plexi 1969, Mesa Mark IIC+
+Hetfield rhythm — all free on tone3000.com). AC30 and 5150 have guitarix
+voicings but no pinned capture yet, and the manifest says so rather than
+shipping a wrong amp under the right name.
+
+**Packages****Packages** (`sudo apt install lsp-plugins-lv2 dragonfly-reverb guitarix
 x42-plugins zam-plugins`) — LSP, x42 and Zam are already present on the
 build host; dragonfly-reverb and guitarix are packaged for arm64 but not
 yet installed here, so their URIs are the manifest's first choice and are
