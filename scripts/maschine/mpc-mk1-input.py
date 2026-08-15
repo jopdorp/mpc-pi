@@ -70,20 +70,39 @@ BUTTON_TO_KEYCODE = {
     'browse':    KEY['main_screen'],
     'sampling':  KEY['sample'],
     'note_repeat': KEY['after'],
-    'f1':        KEY['soft1'],
-    'f2':        KEY['soft2'],
-    'f3':        KEY['soft3'],
+    # The MPC has six soft keys under its LCD and the MK1 has eight
+    # display buttons, so F1-F6 map straight across with two to spare for
+    # the DAW side.
+    'display1':  KEY['soft1'],
+    'display2':  KEY['soft2'],
+    'display3':  KEY['soft3'],
+    'display4':  KEY['soft4'],
+    'display5':  KEY['soft5'],
+    'display6':  KEY['soft6'],
 }
 
 # cabl Button enum for the MK1, in bit order. Names lowered; entries we do
 # not map still consume their bit position.
+# Bit order taken verbatim from cabl's `enum class MaschineMK1::Button`
+# (src/devices/ni/MaschineMK1.cpp). Note bit 8 is UNUSED - the enum jumps
+# from Scene (7) to `Rec = 9`. An earlier version of this table closed
+# that gap, which silently shifted every button from Rec onwards by one
+# position, so Shift pressed Grid and so on.
 MK1_BUTTONS = [
-    'mute', 'solo', 'select', 'duplicate', 'navigate', 'keyboard', 'pattern',
-    'scene', 'shift', 'erase', 'grid', 'transport_right', 'rec', 'play',
-    'f3', 'f2', 'f1', 'control', 'nav_right', 'nav_left', 'main',
-    'group_h', 'group_g', 'group_f', 'group_e', 'group_d', 'group_c',
-    'group_b', 'group_a', 'auto_write', 'snap', 'note_repeat', 'sampling',
-    'browse', 'step', 'transport_left', 'restart',
+    'mute', 'solo', 'select', 'duplicate', 'navigate', 'keyboard',
+    'pattern', 'scene',
+    None,                       # bit 8: unused in cabl's enum
+    'rec', 'erase', 'shift', 'grid', 'transport_right', 'transport_left',
+    'loop',
+    'group_e', 'group_f', 'group_g', 'group_h',
+    'group_d', 'group_c', 'group_b', 'group_a',
+    'control', 'browse', 'browse_left', 'snap', 'auto_write',
+    'browse_right', 'sampling', 'step',
+    # The eight buttons that belong to the displays, numbered right to
+    # left in the report.
+    'display8', 'display7', 'display6', 'display5',
+    'display4', 'display3', 'display2', 'display1',
+    'note_repeat', 'play',
 ]
 
 
@@ -134,7 +153,7 @@ class Bridge:
         changed = bits ^ self.button_state
         self.button_state = bits
         for position, name in enumerate(MK1_BUTTONS):
-            if not (changed >> position) & 1:
+            if name is None or not (changed >> position) & 1:
                 continue
             code = BUTTON_TO_KEYCODE.get(name)
             down = (bits >> position) & 1

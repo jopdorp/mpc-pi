@@ -88,3 +88,36 @@ launcher's `internal-pads` mode (patch 0020) through a virtual MIDI port.
 - https://github.com/shaduzlabs/cabl (MK1 device + display classes)
 - https://github.com/biappi/Macchina (independent MK1 RE, display upload PoC)
 - https://github.com/fzero/maschine-mk1 (Linux-focused MK1 notes)
+
+
+## Verified control inventory
+
+Taken from cabl's `MaschineMK1.cpp`/`.h` (the same reference this display
+protocol comes from), not from marketing copy — a lot of documentation
+conflates MK1 with later models.
+
+| Control | Count | Notes |
+|---|---|---|
+| Displays | 2 | 255x64, 5 bpp (32 grey levels) |
+| Pads | 16 | 12-bit pressure, cabl's on-threshold is 200 |
+| Encoders | 11 | endless; a remap table converts report order to logical order |
+| Buttons | 41 | named below; **bit 8 of the report is unused** |
+
+Buttons, in report bit order: Mute, Solo, Select, Duplicate, Navigate,
+Keyboard, Pattern, Scene, *(bit 8 unused)*, Rec, Erase, Shift, Grid,
+TransportRight, TransportLeft, Loop, GroupE, GroupF, GroupG, GroupH,
+GroupD, GroupC, GroupB, GroupA, Control, Browse, BrowseLeft, Snap,
+AutoWrite, BrowseRight, Sampling, Step, DisplayButton8..DisplayButton1,
+NoteRepeat, Play.
+
+Two consequences for the control map:
+
+- There are **eight display buttons in total, not eight per screen**, and
+  the MPC has six soft keys, so F1-F6 map straight across with two spare.
+  Whether buttons 1-4 sit above the left panel and 5-8 above the right
+  still needs a photo or the hardware to confirm; the map is a table so
+  re-pointing it is one edit.
+- `Rec = 9` leaves bit 8 unused. An earlier version of
+  `scripts/maschine/mpc-mk1-input.py` closed that gap, which shifted every
+  button from Rec onwards by one position — Shift would have pressed Grid.
+  Corrected against the enum above.
