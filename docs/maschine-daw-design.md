@@ -157,14 +157,27 @@ offset. Sample-locked sync falls out for free. The design is therefore:
 
 - **Ardour's transport free-runs internally** (rock solid under full
   emulator load — Phase 2 recorded 7/7 this way even at quantum 32).
-- **daw-ctl gets tempo and bar phase from an emulator-side transport
-  export**, not from MIDI (see "MIDI sync out does not work" below):
-  a Lua/shared-memory publisher reads the sequencer's running position and
-  tempo out of emulated RAM every frame, exactly as patch 0039 already
-  exports LCD frames. This is jitter-free and sample-accurate by
-  construction — no serial link in the path at all.
+- **daw-ctl follows an emulator-side transport export**, not MIDI (see
+  "MIDI sync out does not work" below). `scripts/daw/transport-export.lua`
+  publishes `<playing> <elapsed_ms> <emu_seconds>` to
+  `/dev/shm/mpc-transport` at 200 Hz, read straight from the sequencer's
+  own state — no serial link, no jitter. **Verified end to end: exactly
+  1000.0 counter units per emulated second while playing**
+  (`scripts/daw/transport-export-run.sh` → `TRANSPORT EXPORT OK`).
   `scripts/daw/daw_ctl_clock.py` implements the equivalent logic for a real
   MIDI clock source and stays useful for **external** gear driving the rig.
+
+  The signal is the 32-bit little-endian counter at **`0x014188`**
+  (mirrored at `0x01418c`): elapsed playback milliseconds, frozen while
+  the sequencer is stopped. Found with `scripts/daw/find-transport-state.lua`,
+  which diffs RAM between stopped and playing states and reports counters
+  that advance monotonically only under playback — the same script re-finds
+  it if a firmware revision moves it.
+
+  Tempo still comes from the session (UI/project), not from RAM: pinning
+  the tempo address is a small follow-up (change tempo, re-scan, see which
+  of the candidate addresses tracks). Bar phase is then exact, because
+  playback always starts on a bar line.
 - **The bar grid is arithmetic**: at the session tempo, one bar is an exact
   sample count (120 BPM 4/4 → 96 000 samples at 48 kHz). daw-ctl anchors
   the grid once (first record start) and issues record start/stop at bar
