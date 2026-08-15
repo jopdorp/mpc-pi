@@ -124,6 +124,92 @@ class Lane:
         self.filled_to += count * self.length_samples
 
 
+# --- the engine ------------------------------------------------------
+
+
+class Engine:
+    """Turns UI commands plus transport observations into DAW actions.
+
+    Actions are emitted as plain strings for the Ardour Lua side to run;
+    keeping them declarative is what makes the whole loop lifecycle
+    testable without an audio graph. The Maschine UI drives the same
+    commands, so what the tests exercise is what the hardware does.
+    """
+
+    LOOKAHEAD_BARS = 2
+
+    def __init__(self, transport, lanes=None):
+        self.transport = transport
+        self.lanes = lanes or {}
+        self.pending = []      # lanes armed, waiting for their bar line
+
+    def add_lane(self, name, bars=2):
+        self.lanes[name] = Lane(name, bars=bars)
+        return self.lanes[name]
+
+    def command(self, text, playhead):
+        """Handle one UI command; returns the actions to perform."""
+        parts = text.split()
+        if not parts:
+            return []
+        verb, args = parts[0], parts[1:]
+        if verb == "rec" and args:
+            return self._rec(args[0], playhead)
+        if verb == "stop" and args:
+            return self._stop(args[0])
+        if verb == "undo" and args:
+            return self._undo(args[0])
+        return ["error unknown-command " + verb]
+
+    def _rec(self, name, playhead):
+        lane = self.lanes.get(name)
+        if lane is None:
+            return ["error no-lane " + name]
+        start = self.transport.next_bar_sample(playhead)
+        if start is None:
+            return ["error no-transport"]
+        lane.arm(start)
+        self.pending.append(lane)
+        return ["arm %s at %d" % (name, start)]
+
+    def _stop(self, name):
+        lane = self.lanes.get(name)
+        if lane is None or lane.state != "recording":
+            return ["error not-recording " + name]
+        length = lane.bars * self.transport.samples_per_bar()
+        lane.finish(length)
+        return ["disarm %s" % name,
+                "finalize %s length %d" % (name, length)]
+
+    def _undo(self, name):
+        lane = self.lanes.get(name)
+        if lane is None:
+            return ["error no-lane " + name]
+        lane.state = "idle"
+        lane.filled_to = None
+        lane.length_samples = None
+        return ["clear %s" % name]
+
+    def tick(self, playhead):
+        """Call every UI frame: starts due recordings, tops up loops."""
+        actions = []
+        for lane in list(self.pending):
+            if playhead >= lane.start_sample:
+                lane.begin()
+                self.pending.remove(lane)
+                actions.append("record-start %s" % lane.name)
+        spb = self.transport.samples_per_bar()
+        if spb:
+            lookahead = self.LOOKAHEAD_BARS * spb
+            for lane in self.lanes.values():
+                need = lane.repetitions_needed(playhead, lookahead)
+                if need:
+                    actions.append("repeat %s at %d times %d"
+                                   % (lane.name, lane.filled_to, need))
+                    lane.note_filled(need)
+        return actions
+
+
 # --- self test -------------------------------------------------------
 
 
@@ -169,6 +255,29 @@ def self_test():
              now_sample=2_000_000)
     assert t.samples_per_bar() == int(round(48000 * 60 / 86 * 4))
     assert t.bar_anchor_sample == 2_000_000
+    # Engine: a full loop lifecycle, quantized to bar lines.
+    et = Transport(rate=rate)
+    et.bpm = 120.0
+    et.update_from_export(playing=1, elapsed_ms=0, now_sample=0)
+    eng = Engine(et)
+    eng.add_lane("LOOP1", bars=2)
+    acts = eng.command("rec LOOP1", playhead=10_000)
+    assert acts == ["arm LOOP1 at 96000"], acts
+    # Nothing happens until the bar line arrives.
+    assert eng.tick(50_000) == []
+    assert eng.tick(96_000) == ["record-start LOOP1"], "should start on the bar"
+    acts = eng.command("stop LOOP1", playhead=96_000 + 192_000)
+    assert acts == ["disarm LOOP1", "finalize LOOP1 length 192000"], acts
+    # The lane now needs repetitions laid ahead of the playhead.
+    # Lookahead is 2 bars, so from 300000 the lane must be filled to
+    # 492000: two more copies of the 192000-sample loop.
+    acts = eng.tick(300_000)
+    assert acts == ["repeat LOOP1 at 288000 times 2"], acts
+    assert eng.tick(300_000) == [], "must not re-lay the same region"
+    assert eng.command("undo LOOP1", playhead=0) == ["clear LOOP1"]
+    assert eng.tick(400_000) == [], "cleared lane stays silent"
+    assert eng.command("rec NOPE", playhead=0) == ["error no-lane NOPE"]
+
     print("daw-ctl self-test PASS: "
           f"spb@120={96000} anchor={940_000} lane-refill=ok "
           f"spb@86={t.samples_per_bar()}")
