@@ -259,7 +259,7 @@ recording recovery plus flush-on-stop.
 | Component | Status |
 |---|---|
 | Design (this document) | done |
-| Phase 1 PoC | **passing 9/10** on desktop Ardour 9 (`scripts/daw/phase1-run.sh`): engine, session, track, a-EQ insert, param set, record (region captured), playback, save. The one FAIL is environmental: the PulseAudio backend exposes no capture ports headless; the connect mechanism itself is exercised |
+| Phase 1 PoC | **passing 10/10** on desktop Ardour 9 with the JACK/PipeWire backend (`scripts/daw/phase1-run.sh`): backend, session, track, physical input connected, a-EQ insert, param set, record (region captured), playback, save |
 | Phases 2-5 | not started |
 
 ## Phase 1 findings (hard-won, do not rediscover)
@@ -280,7 +280,14 @@ recording recovery plus flush-on-stop.
 - a-* plugins load as `urn:ardour:a-eq` with `PluginType.LV2`.
 - The packaged luasession needs the wrapper env: `ARDOUR_DATA_PATH`,
   `ARDOUR_CONFIG_PATH`, `ARDOUR_DLL_PATH`, `LD_LIBRARY_PATH`.
-- **Open for Phase 2**: under pipewire-jack the JACK backend fails to
-  register its second MIDI port ("MTC in") and transport-master init dies;
-  PulseAudio backend works but has no capture ports. The appliance needs the
-  JACK path, so this is the first Phase 2 problem to solve.
+- **Solved: the pipewire-jack "MTC in" failure.** Never call
+  `AudioEngine:start()` before `create_session` on the JACK backend.
+  `create_session` restarts the engine as a second JACK client; the first
+  client's transport-master ports linger in the PipeWire registry long
+  enough that the restarted client's "MTC in" re-registration collides
+  (pw-jack's duplicate check is registry-global for these empty-prefix port
+  names) and transport-master init dies. With `set_backend` only, the
+  session owns the single engine client and everything registers cleanly.
+  Diagnosed with a plain-JACK C probe (duplicates rejected, four distinct
+  names fine) plus `PIPEWIRE_DEBUG=3` showing the two clients and the
+  register-unregister-register race.

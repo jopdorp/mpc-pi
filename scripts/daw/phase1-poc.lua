@@ -28,10 +28,13 @@ end
 
 local session = nil
 
-local engine_ok = step("start audio engine", function()
-	-- Do not iterate AudioEngine:available_backends(): the returned vector is
-	-- a temporary and iterating it poisons the engine (later create_session
-	-- segfaults). Probe candidate names through set_backend instead.
+local engine_ok = step("select audio backend", function()
+	-- Set the backend but do NOT call AudioEngine:start(): create_session
+	-- restarts the engine itself, and under pipewire-jack the first client's
+	-- transport-master ports linger long enough that the restarted client's
+	-- "MTC in" re-registration collides globally and manager init dies.
+	-- Letting create_session own the engine lifecycle avoids the second
+	-- client entirely. (Diagnosed with PIPEWIRE_DEBUG=3, 2026-08-15.)
 	local want = os.getenv("PHASE1_BACKEND")
 	local candidates = want and { want }
 		or { "JACK/Pipewire", "PulseAudio", "Dummy" }
@@ -45,8 +48,6 @@ local engine_ok = step("start audio engine", function()
 		backend = nil
 	end
 	assert(backend, "no usable audio backend among candidates")
-	assert(AudioEngine:start(false) == 0, "engine start failed")
-	say("  running: " .. AudioEngine:current_backend_name())
 end)
 
 if not engine_ok then
