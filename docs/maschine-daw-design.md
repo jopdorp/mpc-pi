@@ -157,9 +157,14 @@ offset. Sample-locked sync falls out for free. The design is therefore:
 
 - **Ardour's transport free-runs internally** (rock solid under full
   emulator load — Phase 2 recorded 7/7 this way even at quantum 32).
-- **daw-ctl consumes the MPC's MIDI clock directly** (ALSA sequencer
-  subscription, outside Ardour): counts clocks for tempo, Start/SPP for
-  bar phase, and computes bar boundaries in its own clock domain.
+- **daw-ctl gets tempo and bar phase from an emulator-side transport
+  export**, not from MIDI (see "MIDI sync out does not work" below):
+  a Lua/shared-memory publisher reads the sequencer's running position and
+  tempo out of emulated RAM every frame, exactly as patch 0039 already
+  exports LCD frames. This is jitter-free and sample-accurate by
+  construction — no serial link in the path at all.
+  `scripts/daw/daw_ctl_clock.py` implements the equivalent logic for a real
+  MIDI clock source and stays useful for **external** gear driving the rig.
 - **The bar grid is arithmetic**: at the session tempo, one bar is an exact
   sample count (120 BPM 4/4 → 96 000 samples at 48 kHz). daw-ctl anchors
   the grid once (first record start) and issues record start/stop at bar
@@ -168,11 +173,38 @@ offset. Sample-locked sync falls out for free. The design is therefore:
 - Play/stop follow the MPC via the same MIDI stream, handled by daw-ctl
   issuing transport requests.
 
-MIDI-clock jitter therefore affects only the one-shot phase measurement
-(averaged over many clocks), never ongoing playback. The escalation path
-if bar-phase accuracy ever measures short: a shared-memory sample clock
-published by the emulator's audio-clock code, read by daw-ctl — still no
-Ardour transport master involved.
+### MIDI sync out does not work (measured, 2026-08-15)
+
+The original plan assumed "the emulated MPC2000XL already transmits MIDI
+Clock — authentic firmware behaviour, no patch needed". That is **false**
+for this emulation, established over 18 instrumented runs:
+
+- Panel navigation to the setting works headlessly and is verified by LCD
+  snapshots: Shift+9 opens MIDI/SYNC, then **Right ×2, Up, one data-wheel
+  detent** sets `Sync Out ... Mode: MIDI CLOCK`. (The cursor tab order is
+  linear, not spatial; one detent is **one** encoder unit — four units, the
+  value used by the analog sweep, overshoots to MIDI TIME CODE.)
+- With that set and the sequencer visibly running (`Now:` advancing, PLAY
+  lit, 86.0 BPM), `aseqdump` on the emulator's MIDI out sees **zero** clock
+  and zero start events, on `mdout1` and `mdout2`, with the full-speed and
+  all-accurate emulation presets alike.
+- An I/O write tap on both MB89371 windows shows the firmware writes
+  **only** the mode register (0x0186, value `0xf7`, ~200 times during boot,
+  none once playing) and **never writes the data register**. So no byte is
+  ever handed to the UART: this is not a UART or host-MIDI problem.
+- `0xf7` has `MODE_USE_BRG` **set**, i.e. the firmware selects the internal
+  baud-rate generator. An earlier hypothesis that the board's external
+  TRNCLK/RVCLK was unmodelled (patch 0044) is therefore **falsified and the
+  patch was reverted** — the BRG path was already correct.
+
+Root cause is somewhere in unemulated sync/sequencer plumbing and is not
+worth chasing: the transport export above is strictly better for our use
+(no jitter, no serial round trip). Re-test the MIDI path only if the MPC
+ever needs to drive **external** hardware.
+
+The escalation path if bar-phase accuracy ever measures short: publish a
+sample-accurate clock from the emulator's audio-clock code (patch 0004)
+alongside the transport export — still no Ardour transport master involved.
 
 ## Mixer and routing
 

@@ -75,25 +75,57 @@ manager.machine.sound.ui_mute = false
 -- SYNCOUT_TAP=1: count firmware writes to the SIO (MIDI UART) I/O windows.
 -- Distinguishes "firmware never sends clock" from "UART/portmidi loses it".
 local tap_counts = { a = 0, b = 0 }
+-- Register writes seen per channel, keyed "offset=value", so the firmware's
+-- actual UART programming (mode byte in particular: bit for internal BRG vs
+-- external TRNCLK/RVCLK) is visible without a rebuild.
+local reg_writes = { a = {}, b = {} }
 if os.getenv("SYNCOUT_TAP") == "1" then
     local io_space = manager.machine.devices[":maincpu"].spaces["io"]
     io_space:install_write_tap(0x0180, 0x0187, "sio_a", function(offset, data, mask)
         tap_counts.a = tap_counts.a + 1
+        local key = string.format("%d=%02x", offset - 0x0180, data & 0xff)
+        reg_writes.a[key] = (reg_writes.a[key] or 0) + 1
     end)
     io_space:install_write_tap(0x01a0, 0x01a7, "sio_b", function(offset, data, mask)
         tap_counts.b = tap_counts.b + 1
+        local key = string.format("%d=%02x", offset - 0x01a0, data & 0xff)
+        reg_writes.b[key] = (reg_writes.b[key] or 0) + 1
     end)
     print("SYNCOUT_TAP_INSTALLED")
+end
+
+local function dump_regs()
+    for _, ch in ipairs({ "a", "b" }) do
+        local parts = {}
+        for key, count in pairs(reg_writes[ch]) do
+            parts[#parts + 1] = key .. "x" .. count
+        end
+        table.sort(parts)
+        print("SYNCOUT_REGS_" .. ch .. " " .. table.concat(parts, " "))
+    end
 end
 
 print("SYNCOUT_PLAYBACK_BEGIN")
 while true do
     press(field(":Y4", "Play Start"))
+    emu.wait(2)
+    snap("playing")
+    -- Re-open MIDI/SYNC while the sequencer runs: proves whether the Sync
+    -- Out setting survived leaving the screen.
+    shift:set_value(1)
+    emu.wait(0.3)
+    press(field(":Y0", "9 / MIDI/Sync"))
+    shift:clear_value()
+    emu.wait(1.0)
+    snap("sync-while-playing")
+    press(field(":Y4", "Main Screen"))
+    emu.wait(0.5)
     for _ = 1, 3 do
         emu.wait(5)
         if os.getenv("SYNCOUT_TAP") == "1" then
             print(string.format("SYNCOUT_TAP_COUNTS a=%d b=%d",
                 tap_counts.a, tap_counts.b))
+            dump_regs()
         end
     end
 end
