@@ -1,0 +1,91 @@
+--- a/src/devices/machine/mb89371.h
++++ b/src/devices/machine/mb89371.h
+@@ -17,6 +17,11 @@
+ 	// construction/destruction
+ 	mb89371_device(const machine_config &mconfig, const char *tag, device_t *owner, uint32_t clock);
+ 	void set_event_driven_brg(bool enabled) { m_event_driven_brg = enabled; }
++	// Rate of the board-supplied TRNCLK/RVCLK. When nonzero, the BRG
++	// machinery keeps clocking the USARTs while the firmware selects the
++	// external clock (MODE_USE_BRG clear), modeling the external source
++	// the MPC2000XL board wires to both channels for MIDI.
++	void set_external_clock_rate(uint32_t hz) { m_external_clock_hz = hz; }
+ 
+ 	template<int ch> void map(address_map &map) ATTR_COLD;
+ 
+@@ -68,6 +73,7 @@
+ 	attotime m_brg_next[2];
+ 	uint32_t m_brg_frequency[2];
+ 	bool m_event_driven_brg;
++	uint32_t m_external_clock_hz = 0;
+ 
+ 	devcb_write_line m_txd_w[2], m_rxready_w[2], m_txready_w[2], m_txempty_w[2], m_syndet_w[2];
+ 
+--- a/src/devices/machine/mb89371.cpp
++++ b/src/devices/machine/mb89371.cpp
+@@ -136,7 +136,7 @@
+ template<int ch> void mb89371_device::write(offs_t offset, uint8_t data)
+ {
+ 	const attotime now = machine().time();
+-	if (m_event_driven_brg && BIT(m_mode[ch], MODE_USE_BRG))
++	if (m_event_driven_brg && (BIT(m_mode[ch], MODE_USE_BRG) || m_external_clock_hz))
+ 		direct_brg_prepare_write(ch, now);
+ 
+ 	switch (offset)
+@@ -158,7 +158,7 @@
+ 		break;
+ 	}
+ 
+-	if (m_event_driven_brg && BIT(m_mode[ch], MODE_USE_BRG))
++	if (m_event_driven_brg && (BIT(m_mode[ch], MODE_USE_BRG) || m_external_clock_hz))
+ 		direct_brg_reschedule(ch, now);
+ }
+ 
+@@ -226,7 +226,7 @@
+ {
+ 	m_brg_timer[channel]->adjust(attotime::never, channel);
+ 	const int clocks = m_sio[channel]->clocks_until_event();
+-	if (!BIT(m_mode[channel], MODE_USE_BRG) || !clocks)
++	if ((!BIT(m_mode[channel], MODE_USE_BRG) && !m_external_clock_hz) || !clocks)
+ 		return;
+ 
+ 	const attotime target = m_brg_next[channel] + (m_brg_interval[channel] * (clocks - 1));
+@@ -247,10 +247,10 @@
+ 		return;
+ 
+ 	const attotime now = machine().time();
+-	if (m_event_driven_brg && BIT(m_mode[ch], MODE_USE_BRG))
++	if (m_event_driven_brg && (BIT(m_mode[ch], MODE_USE_BRG) || m_external_clock_hz))
+ 		direct_brg_prepare_write(ch, now);
+ 	m_sio[ch]->write_rxd(state);
+-	if (m_event_driven_brg && BIT(m_mode[ch], MODE_USE_BRG))
++	if (m_event_driven_brg && (BIT(m_mode[ch], MODE_USE_BRG) || m_external_clock_hz))
+ 		direct_brg_reschedule(ch, now);
+ }
+ 
+@@ -302,9 +302,10 @@
+ 
+ void mb89371_device::recalc_brg(int channel)
+ {
+-	if (BIT(m_mode[channel], MODE_USE_BRG))
++	const bool use_internal_brg = BIT(m_mode[channel], MODE_USE_BRG);
++	if (use_internal_brg || m_external_clock_hz)
+ 	{
+-		uint32_t rate = clock() / (2 << m_baud[channel]);
++		uint32_t rate = use_internal_brg ? clock() / (2 << m_baud[channel]) : m_external_clock_hz;
+ 		LOGMASKED(LOG_BAUD_RATE_GENERATOR, "BRG %d enabled at %d Hz\n", channel, rate);
+ 		const attotime now = machine().time();
+ 		const attotime period = attotime::from_hz(rate);
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -1356,6 +1356,11 @@
+ 	// IC100: MIDI A & B
+ 	MB89371(config, m_sio, V53_PCLKOUT);
+ 	m_sio->set_event_driven_brg(event_driven_midi_brg);
++	// The board feeds both UART channels a fixed MIDI-rate clock (16x
++	// 31.25 kHz) on TRNCLK/RVCLK and the firmware selects the external
++	// clock; without this the 8251s never shift a bit through the MIDI
++	// ports (sync out in particular stays silent).
++	m_sio->set_external_clock_rate(500'000);
+ 	m_sio->rxrdy_handler<0>().set("intp4", FUNC(input_merger_device::in_w<1>));
+ 	m_sio->rxrdy_handler<1>().set("intp4", FUNC(input_merger_device::in_w<2>));
+ 	m_sio->txrdy_handler<0>().set_inputline(m_maincpu, INPUT_LINE_IRQ7);
