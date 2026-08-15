@@ -162,7 +162,10 @@ def draw_encoder_bar(f, st, values):
                 v.get("level", NORMAL))
         text = v.get("text")
         if text:
-            f.text_center(x, COL_W, ENCBAR_Y + 5, text[:5], NORMAL)
+            # 62px columns fit ten characters; the old five-character cap
+            # was a leftover from the eight-column layout and truncated
+            # "XF OUT" to "XF OU".
+            f.text_center(x, COL_W, ENCBAR_Y + 5, text[:10], NORMAL)
 
 
 def draw_header(f, st):
@@ -631,7 +634,102 @@ def page_wave(f, st):
     ])
 
 
-RENDERERS = {"WAVE": page_wave, "LOOP": page_loop, "MIX": page_mix, "FX": page_fx,
+# --- EDIT ------------------------------------------------------------
+
+
+def page_edit(f, st):
+    """One track's regions across the timeline: the rap-edit view.
+
+    The workflow this serves: scrub to a syllable, SPLIT at the playhead,
+    nudge the pieces, overlap the boundary and shape the crossfade. Split,
+    nudge, copy, paste, clear and undo ride the MPC's own printed
+    shift-pad functions, so the panel silkscreen stays true; the encoders
+    carry what must be continuous - MOVE, the two fade lengths, gain.
+
+    Regions are blocks with their fades drawn as corner diagonals; where
+    two regions overlap, the overlap zone gets the crossing diagonals of
+    the classic crossfade glyph. The snap setting is always on screen:
+    editing against an invisible grid is a trap.
+    """
+    draw_header(f, st)
+    ed = st.get("edit", {})
+    regions = ed.get("regions", [])
+    win0, win1 = ed.get("window", (0.0, 8.0))
+    span = max(0.001, win1 - win0)
+
+    sel = next((r for r in regions if r.get("sel")), None)
+    f.text(3, BODY_Y, ed.get("track", "-")[:5], BRIGHT)
+    if sel:
+        f.text(42, BODY_Y, sel.get("name", "-")[:10], NORMAL)
+        f.text(110, BODY_Y, ed.get("sel_pos", ""), MUTED)
+    f.text_right(254, BODY_Y, "SNAP %s" % ed.get("snap", "1/16"), MUTED)
+
+    def tx(bar):
+        return 1 + int((bar - win0) / span * 252)
+
+    # bar ruler: a tick per bar, a taller one every four
+    ry = BODY_Y + 10
+    bar = int(win0)
+    while bar <= win1:
+        x = tx(bar)
+        if 1 <= x <= 253:
+            f.vline(x, ry, 3 if bar % 4 == 0 else 2,
+                    NORMAL if bar % 4 == 0 else DIM)
+        bar += 1
+
+    top, bot = BODY_Y + 14, ENCBAR_Y - 4
+    h = bot - top
+
+    # regions, unselected first so the selected one draws over overlaps
+    for r in sorted(regions, key=lambda r: bool(r.get("sel"))):
+        x0, x1 = tx(r["start"]), tx(r["start"] + r["len"])
+        x0c, x1c = max(1, x0), min(253, x1)
+        if x1c <= x0c:
+            continue
+        selr = r.get("sel")
+        f.fill(x0c, top, x1c - x0c, h, MUTED if selr else DIM)
+        f.rect(x0c, top, x1c - x0c, h, BRIGHT if selr else NORMAL)
+        # fades as corner diagonals, in bars of timeline like the data
+        fi = tx(r["start"] + r.get("fade_in", 0.0)) - x0
+        fo = x1 - tx(r["start"] + r["len"] - r.get("fade_out", 0.0))
+        for i in range(min(fi, x1c - x0c)):
+            y = bot - 1 - int(i / max(1, fi) * (h - 2))
+            f.point(x0 + i, y, BRIGHT if selr else NORMAL)
+        for i in range(min(fo, x1c - x0c)):
+            y = bot - 1 - int(i / max(1, fo) * (h - 2))
+            f.point(x1 - i, y, BRIGHT if selr else NORMAL)
+        if x1c - x0c > 14:
+            f.text(x0c + 3, top + 3, r.get("name", "")[:max(1, (x1c - x0c - 6) // 6)],
+                   OFF if selr else MUTED)
+
+    # crossfade glyph where consecutive regions overlap
+    ordered = sorted(regions, key=lambda r: r["start"])
+    for a, b in zip(ordered, ordered[1:]):
+        oa, ob = tx(b["start"]), tx(a["start"] + a["len"])
+        if ob > oa:
+            w = ob - oa
+            for i in range(w):
+                y1 = bot - 1 - int(i / max(1, w - 1) * (h - 2))
+                y2 = top + 1 + int(i / max(1, w - 1) * (h - 2))
+                f.point(oa + i, y1, BRIGHT)
+                f.point(oa + i, y2, BRIGHT)
+
+    ph = ed.get("playhead")
+    if ph is not None and win0 <= ph <= win1:
+        f.vline(tx(ph), ry, bot - ry, BRIGHT)
+
+    g = sel.get("gain", 1.0) if sel else 1.0
+    draw_encoder_bar(f, st, [
+        {"norm": ed.get("move_norm", 0.5), "level": NORMAL, "text": "MOVE"},
+        {"norm": (sel.get("fade_in", 0.0) / 2.0) if sel else 0, "level": NORMAL,
+         "text": "XF IN"},
+        {"norm": (sel.get("fade_out", 0.0) / 2.0) if sel else 0, "level": NORMAL,
+         "text": "XF OUT"},
+        {"norm": min(1.0, g / 2.0), "level": NORMAL, "text": "GAIN"},
+    ])
+
+
+RENDERERS = {"EDIT": page_edit, "WAVE": page_wave, "LOOP": page_loop, "MIX": page_mix, "FX": page_fx,
              "SONG": page_song}
 
 
@@ -684,6 +782,20 @@ def sample_state(page):
         "peaks": [abs(_m.sin(i / 6.0)) * _m.exp(-((i % 63) / 40.0))
                   * (0.35 + 0.65 * _m.exp(-i / 160.0)) + 0.04
                   for i in range(252)],
+    }
+    st["edit"] = {
+        "track": "VOX", "snap": "1/16", "playhead": 3.25,
+        "window": (0.0, 8.0), "sel_pos": "BAR 2.3",
+        "regions": [
+            {"name": "VERSE A", "start": 0.0, "len": 1.9,
+             "fade_in": 0.05, "fade_out": 0.3},
+            {"name": "FIX", "start": 2.1, "len": 1.2, "sel": True,
+             "fade_in": 0.25, "fade_out": 0.25, "gain": 1.1},
+            {"name": "VERSE B", "start": 3.1, "len": 2.4,
+             "fade_in": 0.3, "fade_out": 0.1},
+            {"name": "TAG", "start": 6.0, "len": 1.5,
+             "fade_in": 0.05, "fade_out": 0.05},
+        ],
     }
     st["master"] = {"name": "MSTR", "db": "0.0", "gain": 0.85,
                     "level_l": 0.72, "level_r": 0.66,

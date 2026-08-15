@@ -84,6 +84,11 @@ BUTTONS_RIGHT_BY_PAGE = {
     # the take under that pad, NAVIGATE opens the focused lane's take,
     # and BACK returns to wherever the performer came from.
     "WAVE": ("TRIM", "NORM", "UNDO", "BACK"),
+    # EDIT is the track/arrangement editor: split at the playhead, step
+    # region selection, and back out. Nudge, copy, paste, clear and undo
+    # ride the MPC's printed shift-pad functions, which are exactly the
+    # editing verbs - the silkscreen stays true.
+    "EDIT": ("SPLIT", "PREV", "NEXT", "BACK"),
 }
 
 # Transport maps one-for-one onto the MPC's, because that is the muscle
@@ -118,7 +123,9 @@ PAD_SECTION = {
     "solo": "daw:solo",
     "select": "daw:select",         # select without triggering
     "duplicate": "daw:duplicate",
-    "navigate": "daw:page:WAVE",
+    # NAVIGATE opens the track editor; from there SELECT+pad drills into
+    # a single take's WAVE view.
+    "navigate": "daw:page:EDIT",
     "pattern": "mpc:main_screen",
     "scene": "mpc:song",
 }
@@ -148,6 +155,7 @@ KNOBS_RIGHT_BY_PAGE = {
     "FX": "focused parameter bank (EQ: freq/gain/Q/type per band)",
     "SONG": "scrub",
     "WAVE": "trim start / trim end / zoom / gain",
+    "EDIT": "move region / fade in / fade out / region gain",
 }
 
 # MK1's three MASTER knobs are separate hardware, not a jog encoder.

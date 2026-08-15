@@ -456,6 +456,36 @@ map to START / END / ZOOM / GAIN, buttons to TRIM / NORM / UNDO / BACK.
 The data comes from Ardour's own peak files for the captured region, so
 drawing it costs no extra DSP.
 
+### EDIT: cutting, moving and crossfading on the timeline
+
+The mental model is the ordinary DAW one and the engine already provides
+it: a lane is an Ardour track, every recording is a **region on that
+track's playlist**, and the playlist spans the whole MPC song because the
+timeline and the sequencer share one hardware clock. Editing a rap vocal
+works exactly as it would on a desktop, driven from the panel:
+
+1. **Get to the syllable** — scrub (SONG page or EDIT's MOVE encoder) or
+   step with the MPC's own STEP/BAR keys, which are already mapped.
+2. **Cut** — SPLIT (Button 5, and also the MPC's printed SHIFT+Pad 4)
+   splits the selected region at the playhead.
+3. **Move** — the MOVE encoder slides the selected region snapped to the
+   grid shown on screen; SHIFT+MOVE is fine (sample-level). The MPC's
+   printed NUDGE ‹ / › (SHIFT+Pads 7/8) nudge by one snap unit.
+4. **Crossfade** — slide a region into its neighbour: Ardour crossfades
+   overlaps natively. The XF IN / XF OUT encoders shape the two fade
+   lengths, drawn as corner diagonals on the blocks, and the overlap zone
+   gets the crossing-diagonals crossfade glyph.
+5. **Level the phrase** — GAIN is per-region gain, so one hot syllable is
+   turned down without touching the track fader.
+6. COPY / PASTE / CLEAR / UNDO ride the MPC's printed shift-pad
+   functions. The silkscreen on the panel is literally the edit menu.
+
+The snap setting is always on screen (`SNAP 1/16`) because editing
+against an invisible grid is a trap. NAVIGATE opens EDIT; from there
+SELECT+pad drills into one take's WAVE view. Everything the view drives
+is stock Ardour region editing — split, position, fades, gain are all in
+the Lua bindings — so the wiring is command plumbing, not new audio code.
+
 ### The mixer, fully specified
 
 Eight channels plus master. **Master is always visible in the fourth
