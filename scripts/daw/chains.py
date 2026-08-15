@@ -100,14 +100,29 @@ CHAINS = {
 }
 
 
-def resolve(chain):
-    """Attach the preferred URI to every slot."""
+def resolve(chain, amp_engine="guitarix"):
+    """Attach the preferred URI to every slot.
+
+    `amp_engine` swaps only the amp slot. The cab slot stays either way:
+    guitarix needs it because it models the cab separately, and NAM needs
+    it because amp-only captures have no cab in them. That is why the
+    engine is invisible downstream - the chain shape does not change.
+    """
+    assert amp_engine in plugins.AMP_ENGINES, amp_engine
     out = []
     for slot in chain:
         entry = dict(slot)
         if slot.get("cab"):
             amp = plugins.role_for_kind("amp")[0]
             entry["uri"] = amp.get("cab_uri")
+        elif slot["kind"] == "amp" and amp_engine == "nam":
+            entry["uri"] = plugins.NAM_URI
+            entry["engine"] = "nam"
+            # Lite is the default tier: the cheapest that still sounds
+            # like the amp. quality_scale < 0.5 selects it.
+            entry["params"] = {plugins.NAM_QUALITY_PORT:
+                               0.0 if plugins.NAM_DEFAULT_TIER == "lite"
+                               else 1.0}
         else:
             entry["uri"] = _first_uri(slot["kind"], slot.get("role", 0))
         out.append(entry)
@@ -115,11 +130,27 @@ def resolve(chain):
 
 
 def self_test():
-    # Every slot must resolve to a plugin, or the session would build a
-    # chain with a hole in it.
+    # Every slot must resolve to a plugin under BOTH amp engines, or the
+    # session would build a chain with a hole in it.
+    for engine in plugins.AMP_ENGINES:
+        for track, chain in CHAINS.items():
+            for slot in resolve(chain, engine):
+                assert slot["uri"], "%s/%s has no plugin under %s" % (
+                    track, slot["name"], engine)
+
+    # Swapping the engine must not change the chain's shape, or the FX
+    # page's chips and the signal order would depend on the engine.
     for track, chain in CHAINS.items():
-        for slot in resolve(chain):
-            assert slot["uri"], "%s/%s has no plugin" % (track, slot["name"])
+        a = [s["name"] for s in resolve(chain, "guitarix")]
+        b = [s["name"] for s in resolve(chain, "nam")]
+        assert a == b, "%s changes shape between engines: %s vs %s" % (
+            track, a, b)
+
+    # NAM captures are amp-only, so a cab must follow the amp slot.
+    gtr = resolve(CHAINS["GTR1"], "nam")
+    names = [s["name"] for s in gtr]
+    assert names.index("CAB") == names.index("AMP") + 1, \
+        "a NAM capture with no cab after it is only half an amp"
 
     # Order rules that matter sonically, asserted rather than trusted.
     g = [s["name"] for s in CHAINS["GTR1"]]
