@@ -24,9 +24,11 @@ import sys
 
 try:
     from ui import Frame, OFF, DIM, MUTED, NORMAL, BRIGHT, GLYPH_H
+    import control_map
 except ImportError:  # running from the repo root
     sys.path.insert(0, __file__.rsplit("/", 1)[0])
     from ui import Frame, OFF, DIM, MUTED, NORMAL, BRIGHT, GLYPH_H
+    import control_map
 
 PAGES = ("LOOP", "MIX", "FX", "SONG")
 
@@ -69,7 +71,9 @@ def draw_button_bar(f, st):
     same eight cells rather than two competing rows - the page buttons
     are simply four of the eight buttons.
     """
-    labels = list(st.get("buttons", PAGES))
+    labels = list(st.get("buttons")
+                  or control_map.BUTTONS_RIGHT_BY_PAGE.get(st["page"],
+                                                           ("", "", "", "")))
     for i, label in enumerate(labels[:COLS]):
         x = COL_X[i]
         if not label:
@@ -120,6 +124,21 @@ def draw_status(f, st):
     else:
         f.fill(tx, y, 2, GLYPH_H, MUTED)
         f.fill(tx + 4, y, 2, GLYPH_H, MUTED)
+
+    # Bank dots: more than four items page in fours, Elektron-style, and
+    # the page indicator ships from day one rather than being retrofitted
+    # after users cannot tell there is a second page.
+    banks = st.get("banks", 1)
+    if banks > 1:
+        cur = st.get("bank", 0)
+        dx = 6 + f.text_width(st["page"]) + f.text_width(st.get("mode", ""))
+        for b in range(banks):
+            if b == cur:
+                f.fill(dx, y + 2, 4, 4, BRIGHT)
+            else:
+                f.rect(dx, y + 2, 4, 4, DIM)
+            dx += 6
+
 
     # The expanded-label line: the full, untruncated name and value of
     # whichever encoder is being turned. Truncated 5-character cells are
@@ -231,18 +250,23 @@ def page_loop(f, st):
 def page_mix(f, st):
     draw_header(f, st)
     encoders = []
-    for i, ch in enumerate(st["mixer"][:COLS]):
+    bank = st.get("bank", 0)
+    strips = st["mixer"][bank * COLS:(bank + 1) * COLS]
+    for i, ch in enumerate(strips):
         x = COL_X[i]
         column_divider(f, i)
         name = ch.get("name", "-")[:5]
+        db = ch.get("db", "")
         if ch.get("solo"):
             f.fill(x, BODY_Y, COL_W, GLYPH_H + 3, BRIGHT)
-            f.text_center(x, COL_W, BODY_Y + 1, name, OFF)
+            f.text(x + 3, BODY_Y + 1, name, OFF)
+            f.text_right(x + COL_W - 3, BODY_Y + 1, db, OFF)
         else:
-            f.text_center(x, COL_W, BODY_Y + 1, name,
-                          DIM if ch.get("mute") else NORMAL)
+            ink = DIM if ch.get("mute") else NORMAL
+            f.text(x + 3, BODY_Y + 1, name, ink)
+            f.text_right(x + COL_W - 3, BODY_Y + 1, db, MUTED)
 
-        top, height = BODY_Y + 12, 14
+        top, height = BODY_Y + 12, 20
         # A fader is a knob on a thin track; a meter is a solid column.
         # When both were thin vertical lines they swapped identities.
         track_x = x + 8
@@ -273,21 +297,30 @@ def page_mix(f, st):
 def page_fx(f, st):
     draw_header(f, st)
     fx = st.get("fx", {})
-    f.text(2, BODY_Y - 8, fx.get("track", "-")[:6], BRIGHT)
-    badge = "BYPASS" if fx.get("bypass") else "ACTIVE"
-    badge_x = 254 - f.text_width(badge) - 3
-    f.text(46, BODY_Y - 8, fx.get("name", "-")[:(badge_x - 50) // 6], NORMAL)
-    if fx.get("bypass"):
-        f.text_right(254, BODY_Y - 8, badge, MUTED)
-    else:
-        f.text_inverted(badge_x, BODY_Y - 8, badge)
 
+    # The context row lives inside the body, not on the status line - an
+    # earlier version drew it at the same y and the two overlapped.
+    badge = "BYPASS" if fx.get("bypass") else "ACTIVE"
+    badge_x = 254 - f.text_width(badge) - 4
+    f.text(3, BODY_Y, fx.get("track", "-")[:5], BRIGHT)
+    name_x = 3 + f.text_width("XXXXX") + 6
+    f.text(name_x, BODY_Y, fx.get("name", "-")[:(badge_x - name_x) // 6],
+           NORMAL)
+    if fx.get("bypass"):
+        f.text_right(254, BODY_Y, badge, MUTED)
+    else:
+        f.text_inverted(badge_x, BODY_Y, badge)
+    f.hline(0, BODY_Y + 9, 255, DIM)
+
+    bank = st.get("bank", 0)
+    params = fx.get("params", [])[bank * COLS:(bank + 1) * COLS]
     encoders = []
-    for i, prm in enumerate(fx.get("params", [])[:COLS]):
+    for i, prm in enumerate(params):
         x = COL_X[i]
-        column_divider(f, i, top=BODY_Y + 2)
-        f.text_center(x, COL_W, BODY_Y + 4, prm.get("name", "-")[:5], DIM)
-        f.text_center(x, COL_W, BODY_Y + 14, prm.get("value", "-")[:5], BRIGHT)
+        column_divider(f, i, top=BODY_Y + 11)
+        f.text_center(x, COL_W, BODY_Y + 12, prm.get("name", "-")[:9], DIM)
+        f.text_center(x, COL_W, BODY_Y + 21, prm.get("value", "-")[:9],
+                      BRIGHT)
         encoders.append({"norm": prm.get("norm", 0.0), "level": NORMAL,
                          "text": prm.get("value", "")[:5]})
     draw_encoder_bar(f, st, encoders)
@@ -301,7 +334,10 @@ def page_song(f, st):
     song = st.get("song", {})
     f.text(2, BODY_Y, "SEQ", DIM)
     f.text(24, BODY_Y, song.get("sequence", "-")[:12], BRIGHT)
-    f.text_right(254, BODY_Y, "%d BARS" % song.get("bars", 0), MUTED)
+    # Both counts go on the header row: adding a line below the ribbon
+    # ran it into the encoder strip, and the width was free.
+    f.text_right(254, BODY_Y, "%d BARS  %d LOOPS" % (
+        song.get("bars", 0), song.get("loops", 0)), MUTED)
 
     # The arrangement as a map: position is spatial, not numeric, which
     # is the one thing the big-screen loopers get wrong.
@@ -318,7 +354,17 @@ def page_song(f, st):
                    OFF if seg.get("current") else NORMAL)
     head = 1 + int(song.get("position", 0) / total * 251)
     f.vline(head, top - 3, height + 5, BRIGHT)
-    draw_encoder_bar(f, st, [None] * COLS)
+
+    # The four encoders get named jobs rather than being left dead: a
+    # blank cell is a legitimate state, but four blank cells on a whole
+    # page is just unused surface.
+    pos = song.get("position", 0)
+    draw_encoder_bar(f, st, [
+        {"norm": pos / total, "level": NORMAL, "text": "SCRUB"},
+        {"norm": song.get("zoom", 0.5), "level": NORMAL, "text": "ZOOM"},
+        {"norm": 0.0, "level": DIM, "text": "SECT"},
+        None,
+    ])
 
 
 def draw_pad_overlay(f, st):
@@ -382,7 +428,6 @@ def sample_state(page):
     st = {"page": page, "playing": True, "bpm": 86.0, "position": "005.3",
           "recording": 1, "xruns": 0, "mode": "DAW",
           "message": "GTR2 LEVEL  -6.0 DB",
-          "buttons": ("REC", "ARM", "UNDO", "PIN"),
           "buttons_active": ()}
     st["lanes"] = [
         {"name": "GTR1", "state": "play", "bars": 4, "bar": 3,
@@ -399,6 +444,8 @@ def sample_state(page):
         {"name": "L7", "state": "empty"},
         {"name": "L8", "state": "empty"},
     ]
+    st["banks"] = 2
+    st["bank"] = 0
     st["pads"] = {
         "mode": "LOOP - COLUMN IS LANE",
         "rows": ("REC", "PLAY", "STOP", "CLEAR"),
@@ -409,16 +456,16 @@ def sample_state(page):
                  [0, 1, 0, 0]],
     }
     st["mixer"] = [
-        {"name": "MPC", "gain": 0.80, "level": 0.62, "peak": 0.71},
-        {"name": "GTR1", "gain": 0.65, "level": 0.44, "peak": 0.52},
-        {"name": "GTR2", "gain": 0.70, "level": 0.05, "peak": 0.30},
-        {"name": "MIC", "gain": 0.55, "level": 0.88, "peak": 0.96,
+        {"db": "-3.5", "name": "MPC", "gain": 0.80, "level": 0.62, "peak": 0.71},
+        {"db": "-8.0", "name": "GTR1", "gain": 0.65, "level": 0.44, "peak": 0.52},
+        {"db": "-6.5", "name": "GTR2", "gain": 0.70, "level": 0.05, "peak": 0.30},
+        {"db": "-12.0", "name": "MIC", "gain": 0.55, "level": 0.88, "peak": 0.96,
          "solo": True},
-        {"name": "LOOP", "gain": 0.75, "level": 0.33, "peak": 0.40},
-        {"name": "VERB", "gain": 0.40, "level": 0.20, "peak": 0.25},
-        {"name": "DLY", "gain": 0.35, "level": 0.10, "peak": 0.18,
+        {"db": "-5.0", "name": "LOOP", "gain": 0.75, "level": 0.33, "peak": 0.40},
+        {"db": "-18.0", "name": "VERB", "gain": 0.40, "level": 0.20, "peak": 0.25},
+        {"db": "-20.0", "name": "DLY", "gain": 0.35, "level": 0.10, "peak": 0.18,
          "mute": True},
-        {"name": "MSTR", "gain": 0.85, "level": 0.70, "peak": 0.80},
+        {"db": "0.0", "name": "MSTR", "gain": 0.85, "level": 0.70, "peak": 0.80},
     ]
     st["fx"] = {
         "track": "GTR1", "name": "GUITARIX DRIVE", "bypass": False,
@@ -435,6 +482,7 @@ def sample_state(page):
     }
     st["song"] = {
         "sequence": "LT-BEAT", "bars": 32, "position": 12, "loops": 4,
+        "zoom": 0.5,
         "sections": [
             {"name": "INTR", "start": 0, "length": 8},
             {"name": "VRSE", "start": 8, "length": 8, "current": True},
