@@ -706,13 +706,35 @@ recording recovery plus flush-on-stop.
 
 ## Implementation status
 
-| Component | Status |
-|---|---|
-| Design (this document) | done |
-| Phase 1 PoC | **passing 10/10** on desktop Ardour 9 with the JACK/PipeWire backend (`scripts/daw/phase1-run.sh`): backend, session, track, physical input connected, a-EQ insert, param set, record (region captured), playback, save |
-| Phase 2 capture | **passing 7/7** (`scripts/daw/phase2-run.sh`): MAME playing the demo project and headless Ardour share one PipeWire graph; Ardour creates 4 tracks, connects the MPC track to the emulator's `:speaker` ports, records 5 s — verdict SIGNAL CAPTURED (RMS ≈ 15.8k both channels) |
-| Phase 2 sync | MIDI-clock slave harness (`scripts/daw/phase2-sync-run.sh` + `mclk.c` ALSA-seq clock sender); real MPC clock path pending |
-| Phases 3-5 | not started |
+Four processes, each with a self-test that runs with no hardware and no
+emulator. `for t in scripts/daw/osc.py scripts/daw/daw_ctl.py
+scripts/daw/daw-ctl scripts/maschine/maschine-hub.py
+scripts/maschine/ardour_bindings.py; do python3 $t --self-test; done`
+
+| Component | State | Verified by |
+|---|---|---|
+| MPC emulator (MAME, 43 patches) | working, ~1600% | instruction counts, live play |
+| Transport export | working | 1000.0 counter units per emulated second |
+| Ardour session template | **9/9 against real Ardour** | 18 tracks, 2 send buses, EQ + reverb/delay created and saved |
+| `daw_ctl.Engine` (loop lifecycle) | working | bar-quantized arm, refill, undo |
+| `daw-ctl` daemon | working | transport → arm at the bar → OSC → renderable state |
+| `osc.py` | working | wire format against hand-checked bytes |
+| `ardour_bindings` | working | every OSC path checked against this Ardour build |
+| Panel renderer (7 views) | working | snapshots reviewed as images |
+| `maschine-hub` routing | working | buttons, pads, knobs, shift, hold-modes |
+| `maschine-hub` USB I/O | **not done** | needs the controller |
+| Plugin micro-view parameter binding | **not done** | needs a plugin instance to enumerate |
+| Region ops (split/move/fade) | **designed, not wired** | Lua calls named in `ardour_bindings` |
+| RPi5 appliance image | built | 11/11 contents verified |
+| USB audio gadget | implemented | untested: needs the Pi |
+
+What "not done" means precisely: the USB layer of `maschine-hub` (reading
+the MK1's report endpoints and pushing frames) and the Lua session
+governor that drains region operations. Both are mechanical given what is
+verified — the routing above already produces the exact command lines,
+and the Lua calls are named — but neither can be tested here, so neither
+is claimed as working.
+
 
 ## Phase 1 findings (hard-won, do not rediscover)
 

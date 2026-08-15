@@ -500,45 +500,56 @@ def page_song(f, st):
 
 
 def draw_pad_overlay(f, st):
-    """The 4x4 pad map, drawn over the page while PAD MODE is held.
+    """The 4x4 pad map, drawn while a mode button is held.
 
-    This is the single most direct answer to "what do my pads do right
-    now", and it is an overlay rather than a page because holding a mode
-    button to preview it - and reverting on release - is what keeps a
-    performer from getting lost. A held mode cannot be forgotten; the
-    muscular effort is the reminder.
+    Each pad mode has its own button (PAD MODE, MUTE, SOLO) and holding
+    it *is* the mode; releasing returns the pads to the MPC. While held
+    this map covers the page so the performer sees what the pads mean
+    before hitting one. The header names the held button and says what
+    release does, because a mode you cannot name is a mode you can get
+    lost in - and PIN is offered on the spot for when both hands are
+    needed elsewhere.
 
-    Columns are lanes, matching both the four screen columns above and
-    the MPC's own Clip-program convention, so "column = lane" is true on
-    the pads, on the screen and in the MPC idiom at the same time.
+    Columns are lanes, matching the four screen columns above and Akai's
+    own Clip-program convention, so "column = lane" is true on the pads,
+    on the screen and in the MPC idiom at once.
     """
     pads = st.get("pads", {})
     rows = pads.get("rows", ("REC", "PLAY", "STOP", "CLEAR"))
     grid = pads.get("grid", [[0] * COLS for _ in rows])
+    labels = pads.get("labels")
 
-    # Opaque, not translucent. A first attempt dimmed the page and drew
-    # the grid over it; the two layers landed on the same rows and the
-    # result was illegible. What makes this a peek is that it is
-    # momentary - held, not entered - not that you can see through it.
+    # Opaque, not translucent: a first attempt dimmed the page and drew
+    # the grid over it, and the two layers were illegible together. What
+    # makes this a peek is that it is momentary, not see-through.
     f.fill(0, BTNBAR_H + 1, f.w, f.h - BTNBAR_H - 1, OFF)
+
+    held = pads.get("held", "PAD MODE")
+    f.text_inverted(3, HEADER_Y + 1, "HOLD " + held)
+    f.text_right(254, HEADER_Y + 1, "RELEASE = MPC PADS", MUTED)
 
     gutter = 34
     cell_w = (f.w - gutter - 4) // COLS
-    f.text(2, HEADER_Y + 1, "PADS", BRIGHT)
-    f.text(34, HEADER_Y + 1, pads.get("mode", "")[:24], MUTED)
-
     for r, label in enumerate(rows[:4]):
         y = BODY_Y + 2 + r * 9
         f.text(2, y, label[:5], MUTED)
         for c in range(COLS):
             x = gutter + c * cell_w
             state = grid[r][c] if r < len(grid) and c < len(grid[r]) else 0
-            if state == 2:        # active
-                f.fill(x, y, cell_w - 3, 6, BRIGHT)
+            w = cell_w - 3
+            if state == 2:        # active now
+                f.fill(x, y, w, 7, BRIGHT)
             elif state == 1:      # available
-                f.rect(x, y, cell_w - 3, 6, NORMAL)
-            else:                 # unavailable - visibly a third state,
-                f.hline(x, y + 5, cell_w - 3, DIM)   # not just dimmer
+                f.rect(x, y, w, 7, NORMAL)
+            else:                 # unavailable: a third shape, not just
+                f.hline(x, y + 6, w, DIM)      # a dimmer version of one
+            if labels:
+                txt = (labels[r][c] if r < len(labels)
+                       and c < len(labels[r]) else "")
+                if txt:
+                    f.text_center(x, w, y + 1, txt[:4],
+                                  OFF if state == 2 else
+                                  (NORMAL if state == 1 else DIM))
 
 
 # --- WAVE ------------------------------------------------------------

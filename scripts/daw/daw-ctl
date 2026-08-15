@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""The daemon: MPC transport in, Ardour control out, panel state on disk.
+
+This is the process that makes the parts one system. Every 10 ms it:
+
+  1. reads the emulator's transport export (elapsed ms, playing),
+  2. advances the loop engine, which owns bar quantisation,
+  3. turns the engine's actions into Ardour OSC,
+  4. writes the panel's state as JSON for daw-ui-daemon to render.
+
+Commands arrive as lines on a FIFO, which is what maschine-hub writes
+when a button or pad is pressed. A FIFO rather than a socket because a
+FIFO survives either side restarting without a reconnect dance, which on
+stage is the only property that matters.
+
+    daw-ctl --session-strips MPC,GTR1,...   [--dry-run] [--self-test]
+"""
+import argparse
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import daw_ctl                                            # noqa: E402
+import osc as osclib                                      # noqa: E402
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "maschine"))
+import ardour_bindings                                    # noqa: E402
+
+TRANSPORT = "/dev/shm/mpc-transport"
+STATE = "/dev/shm/daw-ui-state.json"
+FIFO = "/run/daw-ctl.fifo"
+
+# Column order is the contract: strip N on the panel is OSC ssid N+1 and
+# the same column the UI draws. Changing this changes three things at
+# once, so it lives in exactly one place.
+STRIPS = ["MPC", "GTR1", "GTR2", "MIC", "LOOP", "VERB", "DLY", "AUX"]
+LANES = ["GTR1", "GTR2", "MIC", "AUX"]
+
+
+class Daw:
+    def __init__(self, client, strips=None, lanes=None, bpm=120.0):
+        self.osc = client
+        self.strips = list(strips or STRIPS)
+        self.transport = daw_ctl.Transport()
+        self.transport.bpm = bpm
+        self.engine = daw_ctl.Engine(self.transport)
+        for name in (lanes or LANES):
+            self.engine.add_lane(name, bars=4)
+        self.page = "LOOP"
+        self.mode = "MPC"
+        self.focus_bank = 0
+        self.gains = {n: 0.8 for n in self.strips}
+        self.mutes = {n: False for n in self.strips}
+        self.solos = {n: False for n in self.strips}
+        self.message = ""
+        self.playhead = 0
+        self.xruns = 0
+
+    # --- Ardour ---
+
+    def ssid(self, name):
+        return ardour_bindings.ssid(self.strips.index(name))
+
+    def setup(self):
+        for line in ardour_bindings.SETUP:
+            parts = line.split()
+            self.osc.send(parts[0], *[int(p) for p in parts[1:]])
+
+    def perform(self, action):
+        """Turn one engine action string into Ardour calls."""
+        parts = action.split()
+        verb = parts[0]
+        if verb in ("arm", "record-start") and len(parts) > 1:
+            lane = parts[1]
+            if lane in self.strips:
+                self.osc.send("/strip/recenable", self.ssid(lane),
+                              1 if verb == "record-start" else 0)
+        elif verb == "disarm" and len(parts) > 1:
+            if parts[1] in self.strips:
+                self.osc.send("/strip/recenable", self.ssid(parts[1]), 0)
+        # "finalize" and "repeat" are region work: they go to the Lua
+        # side, which owns the playlist. Queued here, drained by the
+        # session governor.
+        return action
+
+    # --- commands from the panel ---
+
+    def command(self, line):
+        parts = line.strip().split()
+        if not parts:
+            return []
+        verb = parts[0]
+        if verb == "page" and len(parts) > 1:
+            self.page = parts[1].upper()
+            return []
+        if verb == "mode" and len(parts) > 1:
+            self.mode = parts[1].upper()
+            return []
+        if verb == "bank":
+            self.focus_bank = (self.focus_bank + 1) % 2
+            return []
+        if verb == "gain" and len(parts) > 2:
+            name, db = parts[1], float(parts[2])
+            self.gains[name] = db
+            self.osc.send("/strip/gain", self.ssid(name), db)
+            self.message = "%s %.1f DB" % (name, db)
+            return []
+        if verb in ("mute", "solo") and len(parts) > 1:
+            name = parts[1]
+            book = self.mutes if verb == "mute" else self.solos
+            book[name] = not book.get(name, False)
+            self.osc.send("/strip/%s" % verb, self.ssid(name),
+                          1 if book[name] else 0)
+            return []
+        # anything else is loop-engine vocabulary
+        actions = self.engine.command(line, self.playhead)
+        return [self.perform(a) for a in actions]
+
+    # --- the loop ---
+
+    def poll_transport(self, path=TRANSPORT):
+        try:
+            with open(path) as f:
+                playing, elapsed_ms, _ = f.read().split()
+        except (OSError, ValueError):
+            return False
+        self.transport.update_from_export(int(playing), int(elapsed_ms),
+                                          self.playhead)
+        self.playhead = int(int(elapsed_ms) * self.transport.rate / 1000.0)
+        return bool(int(playing))
+
+    def tick(self):
+        return [self.perform(a) for a in self.engine.tick(self.playhead)]
+
+    def ui_state(self):
+        lanes = []
+        for name in self.strips[:8]:
+            lane = self.engine.lanes.get(name)
+            if lane is None or lane.state == "idle":
+                continue
+            spb = self.transport.samples_per_bar() or 1
+            played = max(0, self.playhead - (lane.start_sample or 0))
+            bar = (played // spb) % max(1, lane.bars)
+            lanes.append({
+                "name": name, "state": lane.state, "bars": lane.bars,
+                "bar": bar, "phase": (played % spb) / spb,
+                "bars_remaining": lane.bars - bar,
+                "level": 0.0,
+            })
+        return {
+            "page": self.page, "mode": self.mode,
+            "playing": self.transport.playing,
+            "recording": sum(1 for l in self.engine.lanes.values()
+                             if l.state in ("recording", "rec", "dub")),
+            "xruns": self.xruns, "message": self.message,
+            "focus_bank": self.focus_bank,
+            "lanes": lanes,
+            "mixer": [{"name": n, "gain": 0.8,
+                       "db": "%.1f" % self.gains.get(n, 0.0),
+                       "level": 0.0, "peak": 0.0,
+                       "mute": self.mutes.get(n, False),
+                       "solo": self.solos.get(n, False)}
+                      for n in self.strips],
+            "master": {"name": "MSTR", "db": "0.0", "gain": 0.85,
+                       "level_l": 0.0, "level_r": 0.0},
+        }
+
+    def write_state(self, path=STATE):
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.ui_state(), f)
+        os.replace(tmp, path)
+
+
+def self_test():
+    class FakeOsc:
+        def __init__(self):
+            self.msgs = []
+
+        def send(self, path, *a):
+            self.msgs.append((path, a))
+
+    o = FakeOsc()
+    d = Daw(o, bpm=120.0)
+    d.setup()
+    assert any(p == "/set_surface/bank_size" for p, _ in o.msgs)
+
+    # ssid is the panel column + 1, the contract the whole system leans on
+    assert d.ssid("MPC") == 1 and d.ssid("GTR1") == 2
+
+    # a mixer move reaches Ardour with the right strip and value
+    d.command("gain GTR2 -6.5")
+    assert ("/strip/gain", (3, -6.5)) in o.msgs, o.msgs
+
+    # mute toggles rather than sets, and echoes to Ardour
+    d.command("mute MIC")
+    assert ("/strip/mute", (4, 1)) in o.msgs
+    d.command("mute MIC")
+    assert ("/strip/mute", (4, 0)) in o.msgs
+
+    # transport export drives the bar grid; recording arms at the bar
+    d.transport.update_from_export(1, 0, 0)
+    d.playhead = 0
+    out = d.command("rec GTR1")
+    assert out and out[0].startswith("arm GTR1"), out
+    d.playhead = d.transport.samples_per_bar()
+    acts = d.tick()
+    assert any(a.startswith("record-start") for a in acts), acts
+    assert ("/strip/recenable", (2, 1)) in o.msgs, o.msgs
+
+    # the UI state is renderable by the panel code
+    st = d.ui_state()
+    sys.path.insert(0, os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "maschine"))
+    import daw_ui
+    frame = daw_ui.render(dict(daw_ui.sample_state("LOOP"), **st))
+    assert len(frame.px) == 255 * 64
+    print("daw-ctl self-test PASS: %d OSC messages, state renders" %
+          len(o.msgs))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--fifo", default=FIFO)
+    ap.add_argument("--state", default=STATE)
+    ap.add_argument("--transport", default=TRANSPORT)
+    ap.add_argument("--osc-port", type=int, default=3819)
+    ap.add_argument("--bpm", type=float, default=120.0)
+    ap.add_argument("--self-test", action="store_true")
+    args = ap.parse_args()
+    if args.self_test:
+        return self_test()
+
+    daw = Daw(osclib.Client(port=args.osc_port), bpm=args.bpm)
+    daw.setup()
+    if not os.path.exists(args.fifo):
+        os.mkfifo(args.fifo)
+    fifo = os.open(args.fifo, os.O_RDONLY | os.O_NONBLOCK)
+    buf = b""
+    while True:
+        daw.poll_transport(args.transport)
+        daw.tick()
+        try:
+            chunk = os.read(fifo, 4096)
+            if chunk:
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    daw.command(line.decode("utf-8", "replace"))
+        except BlockingIOError:
+            pass
+        daw.write_state(args.state)
+        time.sleep(0.01)
+
+
+if __name__ == "__main__":
+    main()

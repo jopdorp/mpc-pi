@@ -22,30 +22,49 @@ Hardware facts this depends on (docs/maschine-mk1-display-protocol.md):
 
 # --- modes -----------------------------------------------------------
 #
-# Momentary by default, latched only by an explicit, labelled gesture:
-# hold the mode button and press Button 1, which the screen labels PIN.
-# That is Maschine's own idiom, and it matters because a held mode cannot
-# be forgotten - the muscular effort is the reminder - whereas a latched
-# one is a mode error waiting for the moment attention is on the music.
+# One rule, no cycling: **each mode has its own button, and holding that
+# button is the mode.** Release and the pads are the MPC's again. There
+# is nothing to step through and nothing to remember, because the panel's
+# own printed labels say which button does what.
+#
+# Why hold rather than toggle: a held mode cannot be forgotten - the
+# muscular effort is the reminder - so a performer can never look down
+# mid-bar and wonder what the pads currently are. A latched mode can, and
+# that is how you clear a loop while reaching for a kick drum.
+#
+# Latching still exists for when you want both hands free: hold the mode
+# button and press Button 1, which the screen labels PIN. The button then
+# stays lit until you press it again. That is Maschine's own idiom, and
+# the gesture is self-documenting because the screen names it.
+#
+# Whenever a mode button is held, the screen draws that mode's 4x4 pad
+# map over the current page, so you see what the pads mean *before* you
+# hit one. Release restores the page underneath.
 
 MODES = {
     "MPC": {
+        "button": None,          # the resting state, nothing held
         "pads": "mpc",
-        "screen_r": "LOOP",
-        "help": "pads play the MPC; the DAW keeps running underneath",
+        "help": "the MPC's own pads, banked by Group A-D",
     },
     "LOOP": {
+        "button": "pad_mode",    # 1st-gen panels print this KEYBOARD
         "pads": "loops",
-        "screen_r": "LOOP",
-        "help": "pads are 4 lanes x 4 slots, laid out like the screen",
+        "help": "hold PAD MODE: 4 lanes x REC/PLAY/STOP/CLEAR",
     },
     "MUTE": {
+        "button": "mute",
         "pads": "mute",
-        "screen_r": "MIX",
-        "help": "pads mute their lane; hold to preview, release to revert",
+        "help": "hold MUTE: each pad mutes its lane",
+    },
+    "SOLO": {
+        "button": "solo",
+        "pads": "solo",
+        "help": "hold SOLO: each pad solos its lane",
     },
 }
 DEFAULT_MODE = "MPC"
+PIN_BUTTON = "display1"          # held mode + this = latch, labelled PIN
 
 # --- pads ------------------------------------------------------------
 #
@@ -118,9 +137,11 @@ GROUPS = {
 # Mode buttons down the left of the pads. Their MPC-side equivalents are
 # used where one exists so the button keeps meaning something familiar.
 PAD_SECTION = {
-    "pad_mode": "mode:cycle",       # 1st-gen panels print this KEYBOARD
+    # Hold-to-enter mode buttons; see MODES above. Each is momentary, and
+    # each latches with + Button 1 (PIN).
+    "pad_mode": "mode:LOOP",        # 1st-gen panels print this KEYBOARD
     "mute": "mode:MUTE",
-    "solo": "daw:solo",
+    "solo": "mode:SOLO",
     "select": "daw:select",         # select without triggering
     "duplicate": "daw:duplicate",
     # NAVIGATE opens the track editor; from there SELECT+pad drills into
@@ -169,8 +190,10 @@ MASTER_KNOBS = {
 def describe():
     """Human-readable dump, used by the docs and by bring-up."""
     out = []
-    out.append("MODES: " + ", ".join(
-        "%s (%s)" % (k, v["help"]) for k, v in MODES.items()))
+    out.append("PAD MODES (hold the button; + Button 1 = PIN to latch):")
+    for k, v in MODES.items():
+        out.append("  %-5s %-9s %s" % (k, v["button"] or "(resting)",
+                                       v["help"]))
     out.append("TRANSPORT:")
     for name, (plain, shifted) in sorted(TRANSPORT.items()):
         out.append("  %-16s %-20s shift: %s" % (name, plain, shifted or "-"))
