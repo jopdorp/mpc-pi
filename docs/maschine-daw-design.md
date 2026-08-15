@@ -139,21 +139,40 @@ the lane goes silent for a bar instead of drifting.
 
 ## Synchronization
 
-The MPC emulator is the authority. The emulated MPC2000XL already transmits
-MIDI Clock and Song Position Pointer when its sequencer runs — authentic
-firmware behaviour, no patch needed. That stream leaves MAME through a
-virmidi port; Ardour's transport master is set to MIDI Clock on that port.
+The MPC emulator is the authority — but **Ardour does not chase it**.
 
-- Play/stop/position: MIDI start/stop/continue + SPP.
-- BPM: clock rate; Ardour follows tempo drift continuously (DLL).
-- Quantization: Ardour quantizes cue launches to its bar grid, which the
-  clock sync keeps aligned to the MPC's bars.
+The original design slaved Ardour's transport to the MPC's MIDI clock.
+Phase 3 falsified that over ten instrumented runs: the chase collapses
+whenever the emulator shares the PipeWire graph (Ardour's pw-jack client
+misses cycles once it is scheduled against MAME's stream; the MIDI-clock
+DLL reads the gap as clock death and freezes the transport at a frozen
+position with `rolling=true`). Each mitigation — CPU pinning, quantum 256,
+`node.want-driver=false`, a server-side tap — moved the failure without
+removing it, and the surviving configuration was too fragile to ship
+(exact link timing, zombie-port hygiene, no direct links).
 
-This is deliberately the least invasive design. If measured jitter is ever
-musically significant, the escalation path is a shared-memory sample clock
-published by patch 0004's audio-clock code and consumed by a small Ardour
-transport-master plugin — sample-accurate, but only built if the measurement
-says the MIDI path is not good enough.
+Chasing is also unnecessary: **the emulator and Ardour run on the same
+hardware audio clock**, so there is no drift between them — only a fixed
+offset. Sample-locked sync falls out for free. The design is therefore:
+
+- **Ardour's transport free-runs internally** (rock solid under full
+  emulator load — Phase 2 recorded 7/7 this way even at quantum 32).
+- **daw-ctl consumes the MPC's MIDI clock directly** (ALSA sequencer
+  subscription, outside Ardour): counts clocks for tempo, Start/SPP for
+  bar phase, and computes bar boundaries in its own clock domain.
+- **The bar grid is arithmetic**: at the session tempo, one bar is an exact
+  sample count (120 BPM 4/4 → 96 000 samples at 48 kHz). daw-ctl anchors
+  the grid once (first record start) and issues record start/stop at bar
+  boundaries; captured regions are trimmed to exact bar multiples, so loop
+  lengths stay sample-locked to the MPC's audible tempo forever.
+- Play/stop follow the MPC via the same MIDI stream, handled by daw-ctl
+  issuing transport requests.
+
+MIDI-clock jitter therefore affects only the one-shot phase measurement
+(averaged over many clocks), never ongoing playback. The escalation path
+if bar-phase accuracy ever measures short: a shared-memory sample clock
+published by the emulator's audio-clock code, read by daw-ctl — still no
+Ardour transport master involved.
 
 ## Mixer and routing
 
@@ -205,13 +224,24 @@ channel 2 guitar (later 4 inputs). Each capture port links in parallel to
 sources — again taps, no serial chaining.
 
 Ardour-side this is just two port links. MPC-side it is an open emulator
-work item: the MPC2000XL's RECORD path (ADC → DSP record DMA) is not
-implemented in MAME's L7A1045 device (playback only, inherited from hng64).
-Plan: wire a `MICROPHONE(config, ...)` sound-input device (native PipeWire
-capture in the same graph) into the DSP's sampling input and implement the
-record DMA the firmware drives from the SAMPLE screen. Until that lands,
-sampling into the MPC works the hardware way — resample a loop Ardour
-recorded — or not at all; the DAW records regardless.
+work item — **sampling into the emulated MPC does not work today**
+(verified in source, 2026-08-15):
+
+- `WADCSN` (I/O 0x00c0, the Xilinx-FPGA sampling control the firmware
+  drives: `0xD2` start, `0x1A` stop, bits 6/7 = L/R input enable, bit 3 =
+  analog input disable) is a pure read-back stub in `mpc2000.cpp` — writes
+  are stored, nothing happens.
+- The L7A1045 sound device is `stream_alloc(0, 10, …)` — zero input
+  streams. Wave-DMA plumbing exists (it is how sample data moves), but no
+  record direction.
+
+Plan: wire a `MICROPHONE(config, ...)` sound-input device (a PipeWire
+capture stream in the same graph, fed from the I2S inputs) and implement
+the record DMA the firmware expects from the SAMPLE screen (start/stop via
+WADCSN, sampled words DMA'd into main RAM, level metering readable during
+record). Same effort class as the panel HLE. Until it lands, sampling into
+the MPC means resampling a loop the DAW recorded; the DAW itself records
+everything regardless.
 
 Mixer surface (encoders 1-8): per-page volume/pan across the five groups,
 mute/solo/rec-arm on buttons, sends on a shift layer. All of it is existing
@@ -384,3 +414,34 @@ recording recovery plus flush-on-stop.
   deletes its aarch64 `mpc` from the checkout after installing to the
   overlay, otherwise every desktop harness dies with `Syntax error: "("
   unexpected` (shell interpreting an ARM ELF).
+
+## Phase 3 findings
+
+- **Never slave Ardour's transport in this graph** — see the
+  Synchronization section for the full falsification (10 runs). Internal
+  transport is unconditionally stable under emulator load.
+- **Never link a pw-jack client directly to the emulator's stream node**:
+  the client starts missing cycles (pw-top shows `+++` and a climbing ERR
+  count on the blank-named Ardour node). Interpose a
+  `pactl load-module module-null-sink` tap and record from its monitor
+  ports. pw-loopback's virtual nodes are NOT visible in the JACK view; the
+  pactl null sink is.
+- The emulator's streams set `node.want-driver=true` (it is its own timing
+  master); in DAW mode export `PIPEWIRE_PROPS='{ node.want-driver =
+  false }'` so the ALSA device stays the only graph driver.
+- DAW mode runs the emulator at quantum 256 (`DAW_QUANTUM`): at the live
+  preset's 32, every other client in the forced 0.67 ms graph dies.
+- **Punch-in mid-roll captures, but the region materializes only at
+  transport stop** (`Track::transport_stopped_wallclock` consumes
+  `capture_info`; `DiskWriter::finish_capture` on punch-out only records
+  bookkeeping). The PoC therefore stops+re-rolls (~1.5 s gap) to finalize
+  each take, and stopping while Recording also disables session record —
+  re-engage before re-rolling. **Production looper needs one of:** (a) a
+  small Ardour patch (built from source for the Pi anyway) exposing
+  `finalize captures now` to Lua — preferred, upstreamable; (b) daw-ctl
+  records loop wavs itself (own PipeWire capture), imports them as sources
+  and places whole-file regions via the Lua-bound `ARDOUR.RegionFactory`.
+- `maybe_enable_record` is a toggle; calling it while Recording disables
+  record. Engage once, before rolling.
+- A killed luasession can linger holding its ports ("zombie" `MIDI Clock
+  in`); guard runs against leftover processes before starting.

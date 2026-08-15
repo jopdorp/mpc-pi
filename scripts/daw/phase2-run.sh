@@ -14,6 +14,12 @@ export ARDOUR_CONFIG_PATH=${ARDOUR_CONFIG_PATH:-/etc/$(basename "$ardour_prefix"
 export ARDOUR_DLL_PATH=${ARDOUR_DLL_PATH:-$ardour_prefix}
 export LD_LIBRARY_PATH=$ardour_prefix${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
+# The emulator is its own timing master and asks PipeWire for the graph
+# driver role (node.want-driver). With Ardour slaved to MIDI clock the
+# driver role then flaps and the chase collapses (proven by run 8 of the
+# phase 3 debug). In DAW mode the ALSA device stays the only driver.
+export PIPEWIRE_PROPS='{ node.want-driver = false }'
+
 echo "=== starting emulator (playing demo project, pipewire out)"
 env MAME_BIN=$repo_root/.cache/mame/mpc MAME_RUNTIME_DIR=$runtime \
 	MAME_CPUSET=0-11 MAME_TIMING_MASTER=audio PIPEWIRE_RATE_HZ=48000 \

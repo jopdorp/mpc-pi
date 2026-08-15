@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Phase 3: one loop lane on the linear timeline — record, loop by region
-# duplication, overdub on the layer pair, undo. MAME provides the audio,
-# mclk the MIDI clock. See docs/maschine-daw-design.md.
+# duplication, overdub on the layer pair, undo. MAME provides the audio.
+# The Ardour transport free-runs internally: the emulator and Ardour share
+# one hardware clock so there is nothing to chase; tempo/bar phase reaches
+# daw-ctl straight from the MPC's MIDI clock, outside Ardour (see the
+# synchronization section of docs/maschine-daw-design.md).
 set -uo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 lua=${LUASESSION:-/usr/lib/ardour9/luasession}
@@ -15,13 +18,14 @@ export ARDOUR_CONFIG_PATH=${ARDOUR_CONFIG_PATH:-/etc/$(basename "$ardour_prefix"
 export ARDOUR_DLL_PATH=$ardour_prefix
 export LD_LIBRARY_PATH=$ardour_prefix${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
-mclk=$base/mclk
-gcc -O2 -o "$mclk" "$repo_root/scripts/daw/mclk.c" -lasound || exit 1
+# The emulator is its own timing master and asks PipeWire for the graph
+# driver role (node.want-driver); the flapping driver role destabilizes
+# other clients' scheduling. In DAW mode the ALSA device stays the driver.
+export PIPEWIRE_PROPS='{ node.want-driver = false }'
 
 echo "=== starting emulator"
-# MAME stays off cores 8-11: it runs SCHED_RR and a free-running emulator
-# starves the SCHED_OTHER clock sender and luasession, which stalls the
-# slaved transport (measured: position froze at 0.7 s).
+# MAME stays off cores 8-11: it runs SCHED_RR and starves SCHED_OTHER audio
+# helpers; luasession is pinned opposite.
 env MAME_BIN=$repo_root/.cache/mame/mpc MAME_RUNTIME_DIR=$runtime \
 	MAME_CPUSET=0-7 MAME_TIMING_MASTER=audio PIPEWIRE_RATE_HZ=48000 \
 	MPC_VIDEO_MODE=none MPC_OUTPUT_MODE=stereo \
@@ -48,43 +52,31 @@ until grep -q "PHASE2_PLAYBACK_READY" "$base/mame.log" 2>/dev/null; do
 done
 echo "=== emulator playing"
 
+# Interpose a server-side null sink between the emulator and Ardour:
+# linking a pw-jack client directly to MAME's stream node makes the client
+# miss cycles (phase 3 runs 7/9; run 8 without links held). The null sink
+# is processed punctually every cycle regardless of the emulator stream's
+# own pacing; Ardour records from its monitor ports. (pw-loopback's virtual
+# nodes never appear in the JACK view — the pactl null sink does.)
+tap_module=$(pactl load-module module-null-sink sink_name=mpc_tap channels=2)
+sleep 2
+for ch in FL FR; do
+	pw-link ":speaker:output_$ch" "mpc_tap:playback_$ch" \
+		|| echo "WARN: tap link $ch rc=$?"
+done
+export MPC_PORT_PATTERN=mpc_tap
+
 # Straight to a file: a grep in the pipeline buffers the live output and
 # hides where a hang happens.
-# Pinned opposite MAME: Ardour's butler/disk threads are SCHED_OTHER, and on
-# MAME's SCHED_RR cores they starve — the slaved transport then freezes the
-# moment recording engages (proven by the no-MAME isolation probe, which
-# records fine).
 taskset -c 8-11 "$lua" "$repo_root/scripts/daw/phase3-poc.lua" > "$base/lua.log" 2>&1 &
 lua_pid=$!
 tail -f "$base/lua.log" --pid=$lua_pid 2>/dev/null | \
 	grep -vE "WARNING|Falling|buffer of size" &
 
-n=0
-until [ -f "$base/ready" ]; do
-	sleep 1; n=$((n+1))
-	if [ $n -gt 90 ] || ! kill -0 $lua_pid 2>/dev/null; then
-		echo "FAIL: luasession never became ready"
-		kill $lua_pid 2>/dev/null; kill -9 -- -$mame_pid 2>/dev/null; exit 1
-	fi
-done
-
-taskset -c 8-11 "$mclk" "${SYNC_BPM:-120}" 8 &
-clk_pid=$!
-sleep 2
-out_port=$(pw-link -o 2>/dev/null | grep -i "mclk" | head -1)
-in_port=$(pw-link -i 2>/dev/null | grep -i "MIDI Clock in" | head -1)
-echo "=== linking clock: ${out_port:-NONE} -> ${in_port:-NONE}"
-if [ -z "$out_port" ] || [ -z "$in_port" ]; then
-	echo "FAIL: clock or sync port missing"
-	kill $clk_pid $lua_pid 2>/dev/null; kill -9 -- -$mame_pid 2>/dev/null
-	exit 1
-fi
-pw-link "$out_port" "$in_port" || echo "WARN: pw-link rc=$?"
-
 wait $lua_pid
 rc=$?
 
-kill $clk_pid 2>/dev/null
+[ -n "${tap_module:-}" ] && pactl unload-module "$tap_module" 2>/dev/null
 kill -- -$mame_pid 2>/dev/null
 for _ in $(seq 10); do
 	kill -0 $mame_pid 2>/dev/null || break

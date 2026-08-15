@@ -54,17 +54,25 @@ step("connect lane inputs to emulator", function()
 		say("  (inputs left unconnected by request)")
 		return
 	end
-	local all = C.StringVector()
-	AudioEngine:get_backend_ports("", ARDOUR.DataType("audio"),
-		ARDOUR.PortFlags.IsOutput, all)
+	-- With node.want-driver=false the emulator's node registers its ports
+	-- lazily; retry enumeration rather than failing on the first look.
+	local want = (os.getenv("MPC_PORT_PATTERN") or "speaker"):lower()
 	local candidates = {}
-	for i = 1, all:size() do
-		local name = all:at(i - 1)
-		if name:lower():find("speaker") then
-			candidates[#candidates + 1] = name
+	for attempt = 1, 20 do
+		local all = C.StringVector()
+		AudioEngine:get_backend_ports("", ARDOUR.DataType("audio"),
+			ARDOUR.PortFlags.IsOutput, all)
+		candidates = {}
+		for i = 1, all:size() do
+			local name = all:at(i - 1)
+			if name:lower():find(want, 1, true) then
+				candidates[#candidates + 1] = name
+			end
 		end
+		if #candidates >= 2 then break end
+		ARDOUR.LuaAPI.usleep(500 * 1000)
 	end
-	assert(#candidates >= 2, "emulator :speaker ports not found")
+	assert(#candidates >= 2, "emulator ports matching '" .. want .. "' not found")
 	for _, lane in pairs(lanes) do
 		for ch = 0, 1 do
 			assert(lane:input():audio(ch):connect(candidates[ch + 1]) == 0,
@@ -73,19 +81,21 @@ step("connect lane inputs to emulator", function()
 	end
 end)
 
-step("enable external sync", function()
-	session:cfg():set_external_sync(true)
-	assert(session:cfg():get_external_sync())
-end)
-
-local f = assert(io.open(sync_dir .. "/ready", "w"))
-f:write("ready\n")
-f:close()
-say("  ready marker written; waiting for clock")
-
-step("transport rolls under MIDI clock", function()
-	for i = 1, 60 do
-		ARDOUR.LuaAPI.usleep(500 * 1000)
+-- The transport free-runs internally. Ten debug runs proved chasing MIDI
+-- clock through the shared PipeWire graph is fragile (see the design doc's
+-- synchronization section), and it buys nothing: the emulator and Ardour
+-- share one hardware clock, so there is no drift. Tempo/bar phase comes to
+-- daw-ctl straight from the MPC's MIDI clock, outside Ardour.
+step("roll transport (internal, record-engaged)", function()
+	session:cfg():set_external_sync(false)
+	-- Engage session record once, before rolling: maybe_enable_record is a
+	-- toggle (a second call while Recording disables it), and punching in
+	-- purely track-side against an already-record-engaged rolling session
+	-- is the shape Phase 2 proved. Lanes punch with their rec_enable only.
+	session:maybe_enable_record()
+	session:request_roll(ARDOUR.TransportRequestSource.TRS_UI)
+	for i = 1, 20 do
+		ARDOUR.LuaAPI.usleep(250 * 1000)
 		if session:transport_rolling() then return end
 	end
 	error("transport never rolled")
@@ -131,17 +141,43 @@ local function wait_until(target)
 end
 
 local function record_bars(lane, bars)
-	-- Arm and capture whole bars; returns the captured region.
+	-- Punch in/out with the track's rec-enable only; the session stays
+	-- record-engaged and rolling. Returns the captured region.
 	local before = lane:playlist():region_list():size()
-	lane:rec_enable_control():set_value(1, PBD.GroupControlDisposition.NoGroup)
-	session:maybe_enable_record()
 	local start = next_bar_sample()
 	wait_until(start)
-	-- Recording follows the rolling transport once the track is armed and
-	-- the session record-enabled; stop capture by disarming at the bar line.
+	lane:rec_enable_control():set_value(1, PBD.GroupControlDisposition.NoGroup)
+	ARDOUR.LuaAPI.usleep(200 * 1000)
+	say(string.format("  armed=%s record_status=%s rolling=%s",
+		tostring(lane:rec_enable_control():get_value()),
+		tostring(session:record_status()),
+		tostring(session:transport_rolling())))
 	wait_until(start + bars * BAR)
 	lane:rec_enable_control():set_value(0, PBD.GroupControlDisposition.NoGroup)
-	ARDOUR.LuaAPI.usleep(500 * 1000)
+	ARDOUR.LuaAPI.usleep(1500 * 1000)
+	say(string.format("  after punch-out: armed=%s regions=%d",
+		tostring(lane:rec_enable_control():get_value()),
+		lane:playlist():region_list():size()))
+	-- Discriminate "capture never started" from "finalize-on-punch-out
+	-- broken": any wav on disk means audio was being captured.
+	local wavs = io.popen("find '" .. sync_dir ..
+		"' -name '*.wav' -size +100k 2>/dev/null | wc -l"):read("*n")
+	say("  capture wavs on disk: " .. tostring(wavs))
+	if lane:playlist():region_list():size() == before and wavs and wavs > 0 then
+		-- Finalize: Ardour materializes regions from capture_info only at
+		-- transport stop (Track::transport_stopped_wallclock), so stop and
+		-- immediately re-roll. Stopping while Recording also disables
+		-- session record (Session::start/stop state machine), so re-engage
+		-- it for the next punch. The production looper removes this stop
+		-- with an Ardour patch (see design doc).
+		say("  stop-based finalize")
+		session:request_stop(false, false, ARDOUR.TransportRequestSource.TRS_UI)
+		ARDOUR.LuaAPI.usleep(1500 * 1000)
+		say("  after stop: regions=" .. lane:playlist():region_list():size())
+		session:maybe_enable_record()
+		session:request_roll(ARDOUR.TransportRequestSource.TRS_UI)
+		ARDOUR.LuaAPI.usleep(500 * 1000)
+	end
 	local pl = lane:playlist()
 	assert(pl:region_list():size() > before, "no new region captured")
 	-- newest region = the one whose position is latest
@@ -228,11 +264,10 @@ step("save session", function()
 	session:save_state("", false, false, false, false, false)
 end)
 
--- Disengage record and external sync before closing: close_session hangs
--- when the session is still record-engaged under a rolling external master.
+-- Disengage record before closing: close_session hangs when the session is
+-- still record-engaged and rolling.
 pcall(function()
 	session:disable_record(false, false)
-	session:cfg():set_external_sync(false)
 	session:request_stop(false, false, ARDOUR.TransportRequestSource.TRS_UI)
 end)
 ARDOUR.LuaAPI.usleep(500 * 1000)

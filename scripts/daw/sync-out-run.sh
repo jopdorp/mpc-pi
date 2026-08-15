@@ -12,6 +12,12 @@ runtime=$base/runtime; mkdir -p "$runtime"
 aseqdump -p "Midi Through" > "$base/midi.log" 2>&1 &
 dump_pid=$!
 
+# The emulator is its own timing master and asks PipeWire for the graph
+# driver role (node.want-driver). With Ardour slaved to MIDI clock the
+# driver role then flaps and the chase collapses (proven by run 8 of the
+# phase 3 debug). In DAW mode the ALSA device stays the only driver.
+export PIPEWIRE_PROPS='{ node.want-driver = false }'
+
 echo "=== starting emulator (midiout1 -> Midi Through Port-0)"
 env MAME_BIN=$repo_root/.cache/mame/mpc MAME_RUNTIME_DIR=$runtime \
 	MAME_CPUSET=0-11 MAME_TIMING_MASTER=audio PIPEWIRE_RATE_HZ=48000 \
