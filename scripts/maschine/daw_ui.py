@@ -50,14 +50,42 @@ def draw_header(f, st):
         else:
             x = f.text(x + 1, 1, name, DIM) + 3
 
-    # Transport block, right aligned: play state, tempo, bar position.
-    pos = st.get("position", "001.1")
-    f.text_right(254, 1, pos, NORMAL)
-    tempo = "%.1f" % st.get("bpm", 120.0)
-    f.text_right(254 - f.text_width(pos) - 5, 1, tempo, BRIGHT)
-    # A filled triangle for rolling, two bars for stopped: shape carries
-    # the state even when the eye is elsewhere.
-    tx = 254 - f.text_width(pos) - f.text_width(tempo) - 14
+    # The MPC's own LCD sits immediately to the left and already shows
+    # tempo and bar position, so repeating them here would spend this
+    # screen's scarcest resource - width - on information the performer
+    # can already see. The right side carries what only the DAW knows.
+    x_right = 254
+
+    # Xruns: a live rig needs to know it is glitching before the take is
+    # ruined. Dim at zero so a healthy system stays quiet.
+    xruns = st.get("xruns", 0)
+    label = "XR%d" % xruns
+    f.text_right(x_right, 1, label, BRIGHT if xruns else DIM)
+    x_right -= f.text_width(label) + 6
+
+    # A recording count, inverted, because arming the wrong lane is the
+    # expensive mistake in live looping.
+    recording = st.get("recording", 0)
+    if recording:
+        badge = "REC%d" % recording
+        f.text_inverted(x_right - f.text_width(badge) + 1, 1, badge)
+        x_right -= f.text_width(badge) + 6
+
+    # The space the tempo used to occupy becomes a transient message
+    # zone: confirmations ("LOOP1 ARMED"), warnings and undo feedback
+    # appear here and fade, so the rig never needs a modal dialog that a
+    # performer would have to dismiss mid-bar.
+    msg = st.get("message")
+    if msg:
+        # Starts clear of the tab strip, which is 95px wide at most.
+        zone_x = 100
+        # Leave the transport glyph its 8px plus a gap on the right.
+        width = max(0, x_right - zone_x - 16)
+        if width > 0:
+            f.text_center(zone_x, width, 1, msg[:width // 6], MUTED)
+
+    # Shape carries transport state even when the eye is elsewhere.
+    tx = x_right - 8
     if st.get("playing"):
         for i in range(6):
             f.vline(tx + i, 1 + i // 2, GLYPH_H - (i // 2) * 2, BRIGHT)
@@ -270,7 +298,8 @@ def render(st):
 
 
 def sample_state(page):
-    st = {"page": page, "playing": True, "bpm": 86.0, "position": "005.3"}
+    st = {"page": page, "playing": True, "bpm": 86.0, "position": "005.3",
+          "recording": 1, "xruns": 0, "message": "GTR2 REC 2 BARS"}
     st["lanes"] = [
         {"name": "GTR1", "state": "play", "bars": 4, "bar": 3,
          "bars_remaining": 1, "level": 0.55, "key": "STOP"},
