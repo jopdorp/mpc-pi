@@ -194,19 +194,228 @@ def self_test():
           "pads, knobs, shift and hold-modes")
 
 
+class Mk1:
+    """The USB side: one owner for both screens and all input.
+
+    Report formats come from cabl (see docs/maschine-mk1-display-protocol.md):
+    endpoint 0x84 carries pads, 0x81 carries buttons and encoders with the
+    first byte selecting which. Pads report 12-bit pressure continuously
+    rather than note on/off, so a hit is a threshold crossing and velocity
+    is taken from the leading edge.
+    """
+
+    VENDOR, PRODUCT = 0x17CC, 0x0808
+    PAD_THRESHOLD = 200
+
+    def __init__(self):
+        import usb.core                                   # noqa: F401
+        import usb.util                                   # noqa: F401
+        self.usb = usb
+        self.dev = usb.core.find(idVendor=self.VENDOR, idProduct=self.PRODUCT)
+        if self.dev is None:
+            raise RuntimeError("no Maschine MK1 (17cc:0808) found")
+        if self.dev.is_kernel_driver_active(0):
+            self.dev.detach_kernel_driver(0)
+        self.dev.set_configuration()
+        self.pad_state = [0] * 16
+        self.buttons = 0
+        self.encoders = [None] * 11
+        self.frames = {}
+
+    # --- output ---
+
+    def push_screen(self, index, mpcl_path, packer):
+        """Send a screen if its frame changed. The USB write is the
+        expensive part, so an unchanged frame is skipped entirely."""
+        try:
+            with open(mpcl_path, "rb") as f:
+                data = f.read()
+        except OSError:
+            return False
+        if len(data) < 16 or data[:4] != b"MPCL":
+            return False
+        if self.frames.get(index) == data:
+            return False
+        self.frames[index] = data
+        w = int.from_bytes(data[8:10], "little")
+        h = int.from_bytes(data[10:12], "little")
+        packer(self.dev, index, data[16:], w, h)
+        return True
+
+    # --- input ---
+
+    def poll(self, router, timeout=4):
+        """Read whatever is pending and return routed events."""
+        events = []
+        try:
+            data = self.dev.read(EP_PADS, 64, timeout=timeout)
+            events += self._pads(data, router)
+        except Exception:
+            pass
+        try:
+            data = self.dev.read(EP_CTRL, 64, timeout=timeout)
+            events += self._ctrl(data, router)
+        except Exception:
+            pass
+        return events
+
+    def _pads(self, data, router):
+        out = []
+        for i in range(1, len(data) - 1, 2):
+            hi, lo = data[i], data[i + 1]
+            pad = (hi & 0xF0) >> 4
+            pressure = ((hi & 0x0F) << 8) | lo
+            if pad > 15:
+                continue
+            was = self.pad_state[pad]
+            self.pad_state[pad] = pressure
+            if pressure > self.PAD_THRESHOLD and was <= self.PAD_THRESHOLD:
+                # Velocity from the leading edge: the stream is pressure,
+                # not note-on, so the first crossing is the hit.
+                out += router.pad(pad, min(127, pressure >> 5))
+            elif pressure <= self.PAD_THRESHOLD and was > self.PAD_THRESHOLD:
+                out += router.pad(pad, 0)
+        return out
+
+    def _ctrl(self, data, router):
+        if not data:
+            return []
+        kind = data[0]
+        out = []
+        if kind == 0x04:
+            # Button bitfield. Byte 6 bit 6 gates validity, per cabl.
+            if len(data) > 6 and not (data[6] & 0x40):
+                return []
+            bits = int.from_bytes(bytes(data[1:6]), "little")
+            changed = bits ^ self.buttons
+            self.buttons = bits
+            for pos, name in enumerate(control_map_buttons()):
+                if name and (changed >> pos) & 1:
+                    out += router.button(name, bool((bits >> pos) & 1))
+        elif kind == 0x02:
+            # Eleven absolute encoders, 16-bit each. They are endless
+            # pots rather than quadrature, so a delta is a wrapped
+            # difference and we never need a pickup mode.
+            for i in range(11):
+                off = 1 + i * 2
+                if off + 1 >= len(data):
+                    break
+                val = (data[off] << 8) | data[off + 1]
+                prev = self.encoders[i]
+                self.encoders[i] = val
+                if prev is None or val == prev:
+                    continue
+                delta = val - prev
+                if delta > 32768:
+                    delta -= 65536
+                elif delta < -32768:
+                    delta += 65536
+                out += router.knob(i, delta)
+        return out
+
+
+def control_map_buttons():
+    """Bit order for the button report, from the input bridge."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "mk1in", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "mpc-mk1-input.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m.MK1_BUTTONS
+    except Exception:
+        return []
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fifo", default=FIFO)
     ap.add_argument("--midi", default="/dev/snd/midiC1D0")
+    ap.add_argument("--left", default=LCD_L)
+    ap.add_argument("--right", default=LCD_R)
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--no-usb", action="store_true",
                     help="route only, do not open the controller")
     args = ap.parse_args()
     if args.self_test:
         return self_test()
-    print("maschine-hub: USB bring-up is hardware-dependent; run with "
-          "--self-test to verify routing.", file=sys.stderr)
-    return 1
+    if args.no_usb:
+        print("routing only; no controller opened")
+        return 0
+
+    router = Router()
+    try:
+        mk1 = Mk1()
+    except Exception as exc:
+        print("maschine-hub: %s" % exc, file=sys.stderr)
+        return 1
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "disp", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "mpc-mk1-display.py"))
+    disp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(disp)
+
+    def packer(dev, index, px, w, h):
+        frame = disp.pack_display(w, h, px)
+        # The display bridge owns the wire format; reuse it rather than
+        # duplicating the chunking here, so a protocol fix lands once.
+        saved = disp.Mk1Usb.__new__(disp.Mk1Usb)
+        saved.dev, saved.d = dev, index << 1
+        saved._w = disp.Mk1Usb._w.__get__(saved)
+        disp.Mk1Usb.send_frame(saved, frame)
+
+    fifo = None
+    if os.path.exists(args.fifo):
+        fifo = os.open(args.fifo, os.O_WRONLY | os.O_NONBLOCK)
+
+    midi = None
+    try:
+        midi = open(args.midi, "wb", buffering=0)
+    except OSError:
+        print("maschine-hub: no MIDI port at %s" % args.midi, file=sys.stderr)
+
+    while True:
+        for events in (mk1.poll(router),):
+            for kind, payload in events:
+                if kind == "cmd" and fifo is not None:
+                    os.write(fifo, (payload + "\n").encode())
+                elif kind == "midi" and midi is not None:
+                    midi.write(encode_midi(payload))
+        mk1.push_screen(0, args.left, packer)
+        mk1.push_screen(1, args.right, packer)
+        time.sleep(0.002)
+
+
+def encode_midi(target):
+    """Turn a routed MIDI target into bytes for the emulator's port."""
+    if target.startswith("pad:"):
+        _, pad, vel = target.split(":")
+        note = 36 + int(pad)
+        vel = int(vel)
+        return bytes([0x90 if vel else 0x80, note, vel])
+    # Panel keys ride notes 52..97, matching the emulator's injection.
+    name = target.split(":", 1)[1] if ":" in target else target
+    codes = control_map_keycodes()
+    code = codes.get(name)
+    if code is None:
+        return b""
+    return bytes([0x90, 52 + code - 1, 100])
+
+
+def control_map_keycodes():
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "mk1in", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "mpc-mk1-input.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m.KEY
+    except Exception:
+        return {}
 
 
 if __name__ == "__main__":
