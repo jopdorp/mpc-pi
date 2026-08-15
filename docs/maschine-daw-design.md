@@ -365,21 +365,70 @@ Ardour processor lists saved as track templates; bypass per plugin is OSC.
 
 ## Frontend
 
-The second 255x64 screen renders from `/dev/shm/daw-ui`, same MPCL frame
-format as the MPC LCD export, produced by `daw-ctl`'s page renderer
-(1-bit text/blocks; font from the MPC export tooling). Pages:
+Two 255x64 panels, side by side behind one bezel. They are **graphical
+framebuffers, not character displays**: 5 bits per pixel, so 32 grey
+levels are available and the UI can use brightness as a language rather
+than drawing everything at full contrast.
 
-```text
-[LOOP]  cue grid + record state        pads = slot launch/arm
-[MIX]   5 strips, encoder-per-strip    encoders = gain, shift=pan
-[FX]    chain of focused strip         encoders = 8 mapped params
-[SONG]  timeline overview + locate     encoders = scrub/zoom
+- **Screen L** shows the emulated MPC2000XL LCD verbatim (the frame patch
+  0039 exports). The instrument is unchanged: an MPC user's muscle memory
+  and every screenshot in the MPC manual still apply.
+- **Screen R** is the DAW. `scripts/maschine/daw_ui.py` renders it from a
+  state dict; `scripts/maschine/ui.py` is the dependency-free framebuffer,
+  5x7 font and widget set underneath.
+
+Review the design without hardware:
+
+```sh
+scripts/maschine/daw_ui.py --snapshot outdir/          # the four pages
+scripts/maschine/preview-panel.py panel.png LOOP \
+    /dev/shm/mpc-lcd                                    # both screens
 ```
 
-Mode buttons on the Maschine switch pages; `maschine-hub` routes input by
-page (pads to MPC virmidi in MPC mode, to OSC bangs in LOOP mode; encoders
-always to the DAW). Both-screen modes (e.g. SONG spanning L+R) are possible
-later since the hub owns both framebuffers; the MPC screen resumes on exit.
+`preview-panel.py` composites a real exported MPC frame next to a DAW
+page. That is not a convenience — reviewing the panel as one surface is
+what caught the header duplication below, which no single-page snapshot
+would have shown.
+
+### The rules the pages follow
+
+1. **State before detail.** What a lane is doing must be readable without
+   focusing, so state is carried by brightness and shape, not words: a
+   bright filled name row is recording, a dim filled one is overdubbing,
+   an outline is armed, plain is playing, dim is empty.
+2. **One meaning per position.** The large number in a loop column always
+   means "bars until this comes round" — never sometimes-position,
+   sometimes-length. A caption would cost 7 vertical pixels to say what
+   consistency says for free.
+3. **Do not repeat the screen next door.** Tempo and bar position live on
+   the MPC's LCD, inches away. Screen R spends that width on what only the
+   DAW knows: an inverted recording count, an xrun counter that stays dim
+   while healthy, and a transient message zone.
+4. **No modals.** Confirmations, warnings and undo feedback appear in the
+   header message zone and fade. A performer must never have to dismiss
+   something mid-bar.
+5. **Widgets must not rhyme.** A fader is a knob on a thin track; a meter
+   is a solid column growing from the bottom. When both were thin vertical
+   lines they swapped identities at a glance.
+6. **Hardware alignment.** The eight body columns line up with the eight
+   encoders and the footer labels with the eight buttons, so the mapping
+   is read off the screen rather than remembered.
+7. **Footers say what buttons do**, never repeat the row above them. On
+   MIX they read MUTE and invert when engaged; on FX they navigate the
+   chain, because the encoders already own the parameters.
+
+### Pages
+
+| Page | Body | Encoders | Buttons |
+|---|---|---|---|
+| LOOP | 8 lane columns: name row (state), bars-remaining, bar ticks, level | lane level | per-lane REC / STOP / DUB / ARM |
+| MIX | 8 strips: fader, meter with peak hold, solo/mute in the name row | gain | MUTE per strip, inverted when muted |
+| FX | focused track + plugin, 8 parameter cells (dim label, bright value, bar) | the 8 parameters | chain navigation, bypass, preset |
+| SONG | arrangement ribbon with sections and playhead, loop count | scrub / zoom | section navigation, save |
+
+`maschine-hub` owns both framebuffers and routes input by page; the MPC
+screen resumes whenever the DAW page is left. Both-screen modes (SONG
+spanning L+R) stay possible because one process owns both panels.
 
 ## CPU budget (Pi 5, 4x A76)
 
