@@ -90,6 +90,20 @@ launcher's `internal-pads` mode (patch 0020) through a virtual MIDI port.
 - https://github.com/fzero/maschine-mk1 (Linux-focused MK1 notes)
 
 
+## Unresolved: display polarity
+
+Two reverse-engineering sources disagree, and it matters because the DAW
+pages use 32 grey levels as a hierarchy. cabl's `setPixel` stores the
+**complement** of the 5-bit level, which would make `0x1F` the *darkest*
+value and the panel dark-on-light — consistent with reviews describing
+the MK1 as "inverse video" next to the MK2's white-on-black. Macchina
+maps lit pixels straight to `0x1F` with no inversion.
+
+If cabl is right, every page renders with its brightness upside down.
+`scripts/maschine/mpc-mk1-display.py` therefore takes `MPC_MK1_INVERT=1`,
+so bring-up flips one flag instead of editing the renderer. Send one
+frame with a known gradient and record the answer here.
+
 ## Verified control inventory
 
 Taken from cabl's `MaschineMK1.cpp`/`.h` (the same reference this display
@@ -99,8 +113,8 @@ conflates MK1 with later models.
 | Control | Count | Notes |
 |---|---|---|
 | Displays | 2 | 255x64, 5 bpp (32 grey levels) |
-| Pads | 16 | 12-bit pressure, cabl's on-threshold is 200 |
-| Encoders | 11 | endless; a remap table converts report order to logical order |
+| Pads | 16 | 12-bit continuous pressure (velocity is synthesised from the leading edge), cabl's on-threshold is 200. LEDs are **single-colour amber, brightness only** - RGB is MK2, so animation is our only state channel |
+| Encoders | 11 | 8 display knobs + VOLUME/TEMPO/SWING. **No master/jog encoder and no encoder push-switch on MK1** - those are MK2. The knobs are endless absolute-position pots (~1000 steps/rev), not quadrature, and are **not touch-sensitive** (that is Studio/MK3) |
 | Buttons | 41 | named below; **bit 8 of the report is unused** |
 
 Buttons, in report bit order: Mute, Solo, Select, Duplicate, Navigate,
@@ -112,11 +126,17 @@ NoteRepeat, Play.
 
 Two consequences for the control map:
 
-- There are **eight display buttons in total, not eight per screen**, and
-  the MPC has six soft keys, so F1-F6 map straight across with two spare.
-  Whether buttons 1-4 sit above the left panel and 5-8 above the right
-  still needs a photo or the hardware to confirm; the map is a table so
-  re-pointing it is one edit.
+- **Buttons 1-4 sit above the LEFT display and 5-8 above the RIGHT**, and
+  knobs 1-4 / 5-8 divide the same way (NI's manual, and the kernel
+  driver's own comments say "4 under the left screen" / "4 under the
+  right screen"). So each screen owns four buttons and four encoders.
+  NI's own software treats the pair as one eight-column strip in Control
+  mode, but our screen L is the MPC LCD, so the DAW page is four columns
+  of 62px - which fits ten characters instead of five.
+- The eight display buttons are **unlabelled** on the panel; NI calls
+  them Button 1-8. MK1 shipped in **two silkscreen revisions** (1st gen
+  F1/F2/LOOP/KEYBOARD became SNAP/AUTO WRITE/RESTART/PAD MODE), same
+  hardware and protocol, so printed names must not be trusted in docs.
 - `Rec = 9` leaves bit 8 unused. An earlier version of
   `scripts/maschine/mpc-mk1-input.py` closed that gap, which shifted every
   button from Rec onwards by one position — Shift would have pressed Grid.

@@ -36,6 +36,15 @@ ROW_BYTES = TRIPLES_PER_ROW * 2  # 3 px pack into 2 bytes (5 bpp)
 # loop simply broke out when it ran past the end of the buffer.
 FRAME_BYTES = 21 * 502 + 338  # 10880 = DISPLAY_H * ROW_BYTES
 
+# Display polarity is genuinely unresolved between reverse-engineering
+# sources: cabl's setPixel stores the COMPLEMENT of the 5-bit level (so
+# 0x1F on the wire would be darkest and the MK1 renders dark-on-light,
+# matching reviews that call the MK1 "inverse video" against the MK2),
+# while Macchina maps lit pixels straight to 0x1F. If cabl is right, our
+# whole brightness hierarchy renders upside down. One frame on hardware
+# settles it; until then this is a single flag rather than a rewrite.
+INVERT = os.environ.get("MPC_MK1_INVERT", "0") not in ("0", "", "no")
+
 HEADER_FMT = "<4sIHHI"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
@@ -73,6 +82,8 @@ def pack_display(width, height, pixels, level=None):
             if x < width and y < height and pixels[y * width + x]:
                 lit = level if level is not None else min(
                     0x1F, pixels[y * width + x])
+            if INVERT:
+                lit = 0x1F - lit
             triple = x // 3
             block = x % 3
             byte_index = row_base + triple * 2

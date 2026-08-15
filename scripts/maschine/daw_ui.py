@@ -30,9 +30,22 @@ except ImportError:  # running from the repo root
 
 PAGES = ("LOOP", "MIX", "FX", "SONG")
 
-COLS = 8
-COL_W = 31
-COL_X = [i * 32 for i in range(COLS)]
+# Knobs 1-4 and Buttons 1-4 belong to the LEFT display, 5-8 to the RIGHT
+# (NI's manual and the kernel driver's own comments: "4 under the left
+# screen" / "4 under the right screen"). Screen R therefore owns four
+# encoders and four buttons, not eight.
+#
+# That is a gift, not a limit: four columns are 63px instead of 31, so a
+# cell fits ten characters rather than five - close to Push 1's budget,
+# whose five-character truncation was its most-cited flaw. It also lands
+# exactly on the four loop lanes (GTR1, GTR2, MIC, AUX).
+COLS = 4
+COL_W = 62
+COL_X = [i * 64 for i in range(COLS)]
+
+# More than four items page in banks of four, Elektron-style: press the
+# page button again to toggle. Dots in the button cell show which bank.
+BANK_SIZE = COLS
 
 # The MK1's eight buttons sit ABOVE the displays and its encoders BELOW
 # them, so the legend for the buttons hugs the top edge and the
@@ -56,13 +69,12 @@ def draw_button_bar(f, st):
     same eight cells rather than two competing rows - the page buttons
     are simply four of the eight buttons.
     """
-    labels = list(PAGES) + list(st.get("buttons", ("", "", "", "")))
+    labels = list(st.get("buttons", PAGES))
     for i, label in enumerate(labels[:COLS]):
         x = COL_X[i]
         if not label:
             continue
-        active = (i < len(PAGES) and label == st["page"]) or \
-            label in st.get("buttons_active", ())
+        active = label in st.get("buttons_active", ())
         if active:
             f.fill(x, 0, COL_W, GLYPH_H + 3, BRIGHT)
             f.text_center(x, COL_W, 1, label, OFF)
@@ -80,8 +92,14 @@ def draw_status(f, st):
     music rather than the panel.
     """
     y = HEADER_Y + 1
-    mode = st.get("mode", "DAW")
-    f.text(2, y, mode, MUTED)
+    # Page identity is permanent and lives in a fixed corner. Neither
+    # Push nor Maschine ships this - they rely on a lit button - but a
+    # lit button is the indicator that fails when attention is on the
+    # music rather than the panel.
+    f.text_inverted(3, y, st["page"])
+    mode = st.get("mode", "")
+    if mode:
+        f.text(6 + f.text_width(st["page"]), y, mode, MUTED)
 
     x_right = 254
     xruns = st.get("xruns", 0)
@@ -108,7 +126,7 @@ def draw_status(f, st):
     # what broke Push 1's heads-up premise; this is the documented fix.
     msg = st.get("message")
     if msg:
-        zone_x = f.text_width(mode) + 10
+        zone_x = f.text_width(st["page"]) + f.text_width(mode) + 14
         width = max(0, tx - zone_x - 6)
         if width > 0:
             f.text_center(zone_x, width, y, msg[:width // 6], MUTED)
@@ -151,50 +169,54 @@ def page_loop(f, st):
         x = COL_X[i]
         column_divider(f, i)
         state = lane.get("state", "empty")
-        name = lane.get("name", "-")[:5]
+        name = lane.get("name", "-")[:6]
 
         if state == "empty":
             f.text_center(x, COL_W, BODY_Y + 1, name, DIM)
-            f.hline(x + 8, BODY_Y + 14, COL_W - 16, DIM)
+            f.text_center(x, COL_W, BODY_Y + 14, "EMPTY", DIM)
             encoders.append(None)
             continue
 
-        # State is carried by fill, not hue - there is no hue here. Solid
-        # bright = recording, solid dim = overdub, outline = armed, plain
-        # = playing. "Empty" above is deliberately a different shape from
-        # all of them, which is the distinction BOSS had to retrofit.
+        # 62px fits the name and the state word on one row, so the state
+        # is written as well as shown - fill carries it at a glance, the
+        # word removes any doubt on a second look.
+        word = {"rec": "REC", "dub": "DUB", "armed": "ARM",
+                "play": "PLAY"}.get(state, "")
         if state == "rec":
             f.fill(x, BODY_Y, COL_W, GLYPH_H + 3, BRIGHT)
-            f.text_center(x, COL_W, BODY_Y + 1, name, OFF)
+            f.text(x + 3, BODY_Y + 1, name, OFF)
+            f.text_right(x + COL_W - 3, BODY_Y + 1, word, OFF)
         elif state == "dub":
             f.fill(x, BODY_Y, COL_W, GLYPH_H + 3, MUTED)
-            f.text_center(x, COL_W, BODY_Y + 1, name, OFF)
+            f.text(x + 3, BODY_Y + 1, name, OFF)
+            f.text_right(x + COL_W - 3, BODY_Y + 1, word, OFF)
         elif state == "armed":
             f.rect(x, BODY_Y, COL_W, GLYPH_H + 3, NORMAL)
-            f.text_center(x, COL_W, BODY_Y + 1, name, NORMAL)
+            f.text(x + 3, BODY_Y + 1, name, NORMAL)
+            f.text_right(x + COL_W - 3, BODY_Y + 1, word, NORMAL)
         else:
-            f.text_center(x, COL_W, BODY_Y + 1, name, NORMAL)
+            f.text(x + 3, BODY_Y + 1, name, NORMAL)
+            f.text_right(x + COL_W - 3, BODY_Y + 1, word, MUTED)
 
-        # The analogue position sweep is the primary channel, as on every
-        # looper surveyed, and it is never blanked during recording -
-        # going dark exactly when the player needs it is the RC-505's
-        # documented mistake.
+        # The sweep is the primary channel and is never blanked while
+        # recording; the ticks below answer the separate "where in the
+        # bar" question that BOSS gives a whole second ring.
         bars = lane.get("bars", 0)
         bar = lane.get("bar", 0)
         phase = lane.get("phase", 0.0)
         progress = (bar + phase) / bars if bars else 0.0
-        f.meter(x + 2, BODY_Y + 11, COL_W - 4, 5, progress,
+        f.meter(x + 2, BODY_Y + 12, COL_W - 4, 5, progress,
                 BRIGHT if state in ("rec", "dub") else NORMAL)
-        # Bar ticks under the sweep answer the second question - where in
-        # the bar - which BOSS gives a whole second indicator ring.
-        f.progress_ticks(x + 2, BODY_Y + 17, COL_W - 4, bars, bar)
+        f.progress_ticks(x + 2, BODY_Y + 18, COL_W - 4, bars, bar)
 
-        # The count is secondary to the sweep, so it is set at text size.
         remain = lane.get("bars_remaining")
         if remain is not None:
-            f.text_center(x, COL_W, BODY_Y + 20, "%d BAR" % remain, NORMAL)
+            # 62px is ten characters; "4 OF 4 BARS" is eleven and bled
+            # into the next column.
+            f.text_center(x, COL_W, BODY_Y + 21,
+                          "BAR %d/%d" % (bar + 1, bars), MUTED)
         else:
-            f.text_center(x, COL_W, BODY_Y + 20, "WAIT", MUTED)
+            f.text_center(x, COL_W, BODY_Y + 21, "WAITING", MUTED)
 
         encoders.append({"norm": lane.get("level", 0.0),
                          "level": BRIGHT if state in ("rec", "dub") else MUTED,
