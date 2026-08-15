@@ -445,6 +445,70 @@ Circuit/Launchpad, BOSS RC-505mkII/RC-600 and the HeadRush Looperboard:
   argument says that indicator fails precisely when attention is on the
   music, and we have the pixels.
 
+### WAVE: the take editor
+
+Reached by SELECT + pad (that lane's take) or NAVIGATE, not from the page
+row — editing is contextual to a selected loop, not a place the performer
+lives. The waveform fills the body; trim handles are bright rules with
+feet; the audio *outside* the trim stays visible but dim, because what a
+trim is about to discard is exactly what the eye needs to check. Encoders
+map to START / END / ZOOM / GAIN, buttons to TRIM / NORM / UNDO / BACK.
+The data comes from Ardour's own peak files for the captured region, so
+drawing it costs no extra DSP.
+
+### The mixer, fully specified
+
+Eight channels plus master. **Master is always visible in the fourth
+column** — a mixer whose master can scroll out of view fails at the one
+moment it matters — and channels bank through columns 1–3 in threes, with
+bank dots in the status line. At 27px of body height a vertical fader is
+a stub, so each strip is horizontal rows: gain bar with a unity tick and
+a knob block; the meter with a **peak-hold line** and a **clip block that
+latches bright** at the right end; sends A and B as two thin bars
+underneath (A = reverb bus, B = delay bus, pre-wired in the session
+template). The master strip shows L and R meters separately. Buttons:
+MUTE / SOLO / BANK / PIN; the encoder row edits gain, and the button row
+cycles the encoders between gain, send A and send B, Push-style.
+
+### Plugins: what "opening an effect" means here
+
+A plugin's own GUI is an X11 bitmap; it cannot exist on a 255x64 5-bpp
+panel, and no hardware controller ships one — Push, Elektron and
+Maschine all render their own parameter views. "Opening" an effect here
+focuses its chain slot on the FX page, and the body becomes a
+purpose-built micro-view per plugin kind:
+
+- **EQ** draws the actual response curve (log frequency, ±18 dB) with a
+  marker per band, the focused band bright; encoders edit the focused
+  band's FREQ / GAIN / Q / TYPE and the band buttons step through bands.
+  The curve is the UI — it reads faster than eight numbers.
+- **Compressor** draws the transfer curve (threshold and ratio as shape),
+  a wide **gain-reduction meter** — the display an engineer actually
+  watches — IN/OUT meters, and the **sidechain source by name**
+  (`SC:MPC`), because an invisible sidechain is a debugging trap.
+- Anything else falls back to banked parameter cells, four per bank.
+
+The preinstalled set — all LV2, all in Debian arm64, chosen for DSP
+quality and for parameter sets that map onto four encoders (native GUI
+size is irrelevant since those GUIs are never shown):
+
+| Role | Plugin | Notes |
+|---|---|---|
+| Parametric EQ | **LSP Parametric Equalizer x16** | per-band type includes HP/LP/shelves, so one plugin covers "lo-pass, hi-pass, parametric" |
+| Compact EQ + HP/LP | **x42 fil4** | lighter alternative, same micro-view |
+| Compressor | **LSP Sidechain Compressor** | the sidechain input is a real port; Ardour's pin connections route any track into it (MPC kick ducking the loops is the expected use) |
+| Compact compressor | **x42 darc** | when sidechain isn't needed |
+| Drive | GXAmplifier (guitarix) | already in the design |
+| Reverb / delay sends | a-Reverb, a-Delay | ship inside Ardour, zero install |
+| Utility | a-EQ, a-Compressor, a-High/Low Pass | Ardour built-ins, fallback set |
+
+**Sidechain routing**: Ardour exposes plugin sidechain pins headlessly
+(`ARDOUR.LuaAPI.connect_sidechain` / pin connection API), so daw-ctl
+wires "duck LOOP bus from MPC" as a named preset rather than a manual
+patch. **Instruments**: LV2 synths can sit on a MIDI track fed from the
+MPC's virmidi out exactly like an external module; that is future work
+and listed as such — the MPC remains the instrument brain.
+
 ### The rules the pages follow
 
 1. **State before detail.** What a lane is doing must be readable without

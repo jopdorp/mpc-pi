@@ -248,16 +248,25 @@ def page_loop(f, st):
 
 
 def page_mix(f, st):
+    """Eight channels plus master. Master is ALWAYS visible in the last
+    column - a mixer whose master can scroll out of view fails at the one
+    moment it matters - so channels bank through columns 1-3 in threes.
+
+    At 27px of body height a vertical fader is a stub, so gain and meter
+    are horizontal, stacked: gain bar with a unity tick, then the meter
+    with a peak-hold line and a clip block at the right end that latches
+    bright. Sends A/B are the two thin bars underneath.
+    """
     draw_header(f, st)
-    encoders = []
     bank = st.get("bank", 0)
-    strips = st["mixer"][bank * COLS:(bank + 1) * COLS]
-    for i, ch in enumerate(strips):
-        x = COL_X[i]
-        column_divider(f, i)
-        name = ch.get("name", "-")[:5]
+    strips = st["mixer"][bank * 3:bank * 3 + 3]
+    master = st.get("master", {"name": "MSTR"})
+    encoders = []
+
+    def strip(x, ch, is_master=False):
+        name = ch.get("name", "-")[:6]
         db = ch.get("db", "")
-        if ch.get("solo"):
+        if ch.get("solo") or is_master:
             f.fill(x, BODY_Y, COL_W, GLYPH_H + 3, BRIGHT)
             f.text(x + 3, BODY_Y + 1, name, OFF)
             f.text_right(x + COL_W - 3, BODY_Y + 1, db, OFF)
@@ -266,63 +275,216 @@ def page_mix(f, st):
             f.text(x + 3, BODY_Y + 1, name, ink)
             f.text_right(x + COL_W - 3, BODY_Y + 1, db, MUTED)
 
-        top, height = BODY_Y + 12, 20
-        # A fader is a knob on a thin track; a meter is a solid column.
-        # When both were thin vertical lines they swapped identities.
-        track_x = x + 8
-        f.vline(track_x, top, height, DIM)
-        f.hline(track_x - 3, top + int(height * 0.25), 7, DIM)
-        knob_y = top + int((1.0 - ch.get("gain", 0.8)) * (height - 3))
-        f.fill(track_x - 4, knob_y, 9, 3, BRIGHT)
+        # gain: track + knob + unity tick
+        gy = BODY_Y + 12
+        f.hline(x + 2, gy + 1, COL_W - 4, DIM)
+        ux = x + 2 + int((COL_W - 4) * 0.75)
+        f.vline(ux, gy - 1, 5, DIM)
+        kx = x + 2 + int(ch.get("gain", 0.8) * (COL_W - 7))
+        f.fill(kx, gy - 1, 3, 5, BRIGHT)
 
-        mx = x + COL_W - 11
-        level = ch.get("level", 0.0)
-        f.rect(mx, top, 5, height, DIM)
-        lit = int(level * (height - 2))
-        if lit:
-            f.fill(mx + 1, top + height - 1 - lit, 3, lit, BRIGHT)
-        peak = ch.get("peak")
-        if peak:
-            f.hline(mx - 1, top + height - 1 - int(peak * (height - 2)), 7,
-                    MUTED)
+        # meter: fill + peak line + clip latch
+        my = BODY_Y + 18
+        if is_master:
+            for j, side in enumerate(("l", "r")):
+                yy = my + j * 4
+                f.fill(x + 2, yy, COL_W - 8, 3, DIM)
+                lv = ch.get("level_%s" % side, ch.get("level", 0.0))
+                f.fill(x + 2, yy, int(lv * (COL_W - 8)), 3, BRIGHT)
+                pk = ch.get("peak_%s" % side, 0.0)
+                if pk:
+                    f.vline(x + 2 + int(pk * (COL_W - 9)), yy, 3, BRIGHT)
+        else:
+            f.fill(x + 2, my, COL_W - 8, 4, DIM)
+            f.fill(x + 2, my, int(ch.get("level", 0.0) * (COL_W - 8)), 4,
+                   BRIGHT)
+            pk = ch.get("peak", 0.0)
+            if pk:
+                f.vline(x + 2 + int(pk * (COL_W - 9)), my, 4, BRIGHT)
+        if ch.get("clip"):
+            f.fill(x + COL_W - 5, my, 3, 4 if not is_master else 7, BRIGHT)
+
+        # sends A/B, master shows none
+        if not is_master:
+            sy = my + 6
+            half = (COL_W - 8) // 2
+            for j, key in enumerate(("send_a", "send_b")):
+                sx = x + 2 + j * (half + 4)
+                f.fill(sx, sy, half, 2, DIM)
+                f.fill(sx, sy, int(ch.get(key, 0.0) * half), 2, MUTED)
 
         encoders.append({"norm": ch.get("gain", 0.0), "level": NORMAL,
-                         "text": name})
+                         "text": db or name})
+
+    for i, ch in enumerate(strips):
+        column_divider(f, i)
+        strip(COL_X[i], ch)
+    column_divider(f, 3)
+    strip(COL_X[3], master, is_master=True)
     draw_encoder_bar(f, st, encoders)
 
 
 # --- FX --------------------------------------------------------------
 
 
+def _fx_eq_view(f, fx):
+    """Parametric EQ drawn as its response curve - the shape IS the UI.
+
+    x is log frequency 20 Hz..20 kHz, the centre line is 0 dB. Band
+    markers sit on the curve; the focused band (the one the encoders are
+    editing) is the bright one.
+    """
+    import math
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    mid = (top + bot) // 2
+    f.hline(2, mid, 251, DIM)
+    bands = fx.get("bands", [])
+    scale = (bot - top) / 2 / 18.0        # +-18 dB full scale
+
+    def fx_x(freq):
+        lo, hi = math.log(20.0), math.log(20000.0)
+        return 2 + int((math.log(max(20.0, min(20000.0, freq))) - lo)
+                       / (hi - lo) * 250)
+
+    def gain_at(freq):
+        g = 0.0
+        for b in bands:
+            typ = b.get("type", "bell")
+            f0, bg, q = b["freq"], b.get("gain", 0.0), b.get("q", 1.0)
+            r = math.log(freq / f0) * q * 1.7
+            if typ == "bell":
+                g += bg * math.exp(-r * r)
+            elif typ == "hishelf":
+                g += bg / (1.0 + math.exp(-r * 2))
+            elif typ == "loshelf":
+                g += bg / (1.0 + math.exp(r * 2))
+            elif typ == "hipass" and freq < f0:
+                g -= 24.0 * math.log(f0 / freq) / math.log(4)
+            elif typ == "lopass" and freq > f0:
+                g -= 24.0 * math.log(freq / f0) / math.log(4)
+        return g
+
+    prev = None
+    for px in range(2, 253):
+        freq = 20.0 * (1000.0 ** ((px - 2) / 250.0))
+        y = mid - int(max(-18, min(18, gain_at(freq))) * scale)
+        y = max(top, min(bot, y))
+        if prev is not None:
+            lo, hi = sorted((prev, y))
+            for yy in range(lo, hi + 1):
+                f.point(px, yy, NORMAL)
+        else:
+            f.point(px, y, NORMAL)
+        prev = y
+
+    focus = fx.get("focus", 0)
+    for i, b in enumerate(bands):
+        bx = fx_x(b["freq"])
+        by = mid - int(max(-18, min(18, b.get("gain", 0.0))) * scale)
+        if i == focus:
+            f.fill(bx - 1, by - 1, 3, 3, BRIGHT)
+        else:
+            f.point(bx, by, MUTED)
+
+
+def _fx_comp_view(f, fx):
+    """Compressor: transfer curve, gain-reduction meter, in/out meters.
+
+    The GR meter is the working display on a compressor - it is what the
+    engineer watches - so it gets the width; the transfer curve carries
+    threshold and ratio as shape.
+    """
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    h = bot - top
+    # transfer curve box
+    bx, bw = 2, h
+    f.rect(bx, top, bw, h, DIM)
+    thr = fx.get("threshold_norm", 0.6)
+    ratio = fx.get("ratio", 4.0)
+    kx = bx + int(thr * (bw - 2))
+    ky = bot - int(thr * (h - 2))
+    for px in range(bx + 1, bx + bw - 1):
+        t = (px - bx - 1) / max(1, bw - 3)
+        if px <= kx:
+            y = bot - 1 - int(t * (h - 2))
+        else:
+            y = ky - int((px - kx) / max(1, bw - 2 - (kx - bx)) *
+                         (h - 2) * (1.0 - thr) / ratio)
+        f.point(px, max(top + 1, min(bot - 1, y)), NORMAL)
+    f.point(kx, ky, BRIGHT)
+
+    # gain reduction meter
+    gx = bx + bw + 10
+    gw = 150
+    f.text(gx, top, "GR", DIM)
+    gr = fx.get("gr_db", 0.0)
+    f.fill(gx + 16, top + 1, gw, 5, DIM)
+    f.fill(gx + 16, top + 1, int(min(1.0, gr / 20.0) * gw), 5, BRIGHT)
+    f.text(gx + 16 + gw + 4, top, "-%.1f" % gr, BRIGHT)
+    # in/out share one row - stacking them ran into the encoder strip
+    yy = top + 10
+    half = (gw - 30) // 2
+    f.text(gx, yy, "IN", DIM)
+    f.fill(gx + 16, yy + 1, half, 3, DIM)
+    f.fill(gx + 16, yy + 1, int(fx.get("in_level", 0.0) * half), 3, MUTED)
+    ox = gx + 16 + half + 8
+    f.text(ox, yy, "OUT", DIM)
+    f.fill(ox + 22, yy + 1, half, 3, DIM)
+    f.fill(ox + 22, yy + 1, int(fx.get("out_level", 0.0) * half), 3, MUTED)
+    # sidechain source, named: an invisible sidechain is a debugging trap
+    sc = fx.get("sidechain")
+    if sc:
+        f.text(gx + 16 + gw + 4, yy, "SC:" + sc[:5], BRIGHT)
+
+
 def page_fx(f, st):
+    """One track's plugin chain. The chain is slot chips on the context
+    row; the body is a purpose-built view per plugin kind - an EQ is a
+    curve, a compressor is a transfer function and a GR meter - because
+    plugin GUIs are X11 bitmaps that cannot exist on this panel, and a
+    curve reads faster than eight numbers anyway. The encoders always
+    edit the focused bank of four parameters, named in the bottom strip.
+    """
     draw_header(f, st)
     fx = st.get("fx", {})
 
-    # The context row lives inside the body, not on the status line - an
-    # earlier version drew it at the same y and the two overlapped.
-    badge = "BYPASS" if fx.get("bypass") else "ACTIVE"
-    badge_x = 254 - f.text_width(badge) - 4
     f.text(3, BODY_Y, fx.get("track", "-")[:5], BRIGHT)
-    name_x = 3 + f.text_width("XXXXX") + 6
-    f.text(name_x, BODY_Y, fx.get("name", "-")[:(badge_x - name_x) // 6],
-           NORMAL)
-    if fx.get("bypass"):
-        f.text_right(254, BODY_Y, badge, MUTED)
-    else:
-        f.text_inverted(badge_x, BODY_Y, badge)
+    cx = 3 + f.text_width("XXXXX") + 8
+    for i, slot in enumerate(fx.get("chain", [])[:4]):
+        label = slot.get("name", "-")[:4]
+        w = f.text_width(label) + 6
+        if i == fx.get("slot", 0):
+            f.fill(cx - 2, BODY_Y - 1, w, GLYPH_H + 3, BRIGHT)
+            f.text(cx + 1, BODY_Y, label, OFF)
+        elif slot.get("bypass"):
+            f.text(cx + 1, BODY_Y, label, DIM)
+            f.hline(cx, BODY_Y + 3, w - 3, DIM)
+        else:
+            f.rect(cx - 2, BODY_Y - 1, w, GLYPH_H + 3, DIM)
+            f.text(cx + 1, BODY_Y, label, NORMAL)
+        cx += w + 4
     f.hline(0, BODY_Y + 9, 255, DIM)
 
-    bank = st.get("bank", 0)
-    params = fx.get("params", [])[bank * COLS:(bank + 1) * COLS]
+    kind = fx.get("kind", "params")
+    if kind == "eq":
+        _fx_eq_view(f, fx)
+    elif kind == "comp":
+        _fx_comp_view(f, fx)
+    else:
+        bank = st.get("bank", 0)
+        params = fx.get("params", [])[bank * COLS:(bank + 1) * COLS]
+        for i, prm in enumerate(params):
+            x = COL_X[i]
+            column_divider(f, i, top=BODY_Y + 11)
+            f.text_center(x, COL_W, BODY_Y + 12, prm.get("name", "-")[:9],
+                          DIM)
+            f.text_center(x, COL_W, BODY_Y + 21, prm.get("value", "-")[:9],
+                          BRIGHT)
+
     encoders = []
-    for i, prm in enumerate(params):
-        x = COL_X[i]
-        column_divider(f, i, top=BODY_Y + 11)
-        f.text_center(x, COL_W, BODY_Y + 12, prm.get("name", "-")[:9], DIM)
-        f.text_center(x, COL_W, BODY_Y + 21, prm.get("value", "-")[:9],
-                      BRIGHT)
+    for prm in fx.get("knobs", fx.get("params", []))[:COLS]:
         encoders.append({"norm": prm.get("norm", 0.0), "level": NORMAL,
-                         "text": prm.get("value", "")[:5]})
+                         "text": prm.get("name", "")[:5]})
     draw_encoder_bar(f, st, encoders)
 
 
@@ -409,7 +571,67 @@ def draw_pad_overlay(f, st):
                 f.hline(x, y + 5, cell_w - 3, DIM)   # not just dimmer
 
 
-RENDERERS = {"LOOP": page_loop, "MIX": page_mix, "FX": page_fx,
+# --- WAVE ------------------------------------------------------------
+
+
+def page_wave(f, st):
+    """Audio take editor: the waveform, trim handles, playhead.
+
+    Reached by SELECT + a pad (edit that lane's take) or NAVIGATE. The
+    audio outside the trim is drawn dim rather than hidden - what a trim
+    is about to discard is exactly what the eye needs to check - and the
+    encoders map to START / END / ZOOM / GAIN with the values in the
+    bottom strip.
+    """
+    draw_header(f, st)
+    wv = st.get("wave", {})
+
+    f.text(3, BODY_Y, wv.get("lane", "-")[:5], BRIGHT)
+    f.text(40, BODY_Y, wv.get("region", "-")[:16], NORMAL)
+    f.text_right(254, BODY_Y, wv.get("length", ""), MUTED)
+
+    top, bot = BODY_Y + 10, ENCBAR_Y - 4
+    mid = (top + bot) // 2
+    half_h = (bot - top) // 2
+    f.hline(1, mid, 253, DIM)
+
+    data = wv.get("peaks", [])
+    n = len(data)
+    t0, t1 = wv.get("trim", (0.0, 1.0))
+    gain = wv.get("gain", 1.0)
+    for px in range(1, 254):
+        pos = (px - 1) / 252.0
+        if n:
+            amp = data[min(n - 1, int(pos * n))] * gain
+        else:
+            amp = 0.0
+        hh = max(0, min(half_h, int(amp * half_h)))
+        inside = t0 <= pos <= t1
+        level = NORMAL if inside else DIM
+        if hh:
+            f.vline(px, mid - hh, hh * 2 + 1, level)
+
+    # trim handles: bright rules with feet, unmistakably grabbable
+    for t in (t0, t1):
+        tx = 1 + int(t * 252)
+        f.vline(tx, top - 2, bot - top + 4, BRIGHT)
+        f.hline(tx - 2, top - 2, 5, BRIGHT)
+        f.hline(tx - 2, bot + 2, 5, BRIGHT)
+
+    ph = wv.get("playhead")
+    if ph is not None:
+        px = 1 + int(ph * 252)
+        f.vline(px, top, bot - top, MUTED)
+
+    draw_encoder_bar(f, st, [
+        {"norm": t0, "level": NORMAL, "text": "START"},
+        {"norm": t1, "level": NORMAL, "text": "END"},
+        {"norm": wv.get("zoom", 0.0), "level": NORMAL, "text": "ZOOM"},
+        {"norm": min(1.0, gain / 2.0), "level": NORMAL, "text": "GAIN"},
+    ])
+
+
+RENDERERS = {"WAVE": page_wave, "LOOP": page_loop, "MIX": page_mix, "FX": page_fx,
              "SONG": page_song}
 
 
@@ -455,29 +677,46 @@ def sample_state(page):
                  [1, 1, 1, 1],
                  [0, 1, 0, 0]],
     }
+    import math as _m
+    st["wave"] = {
+        "lane": "GTR2", "region": "TAKE 3", "length": "2 BARS  192000",
+        "trim": (0.08, 0.86), "playhead": 0.31, "zoom": 0.0, "gain": 1.0,
+        "peaks": [abs(_m.sin(i / 6.0)) * _m.exp(-((i % 63) / 40.0))
+                  * (0.35 + 0.65 * _m.exp(-i / 160.0)) + 0.04
+                  for i in range(252)],
+    }
+    st["master"] = {"name": "MSTR", "db": "0.0", "gain": 0.85,
+                    "level_l": 0.72, "level_r": 0.66,
+                    "peak_l": 0.81, "peak_r": 0.74}
     st["mixer"] = [
-        {"db": "-3.5", "name": "MPC", "gain": 0.80, "level": 0.62, "peak": 0.71},
-        {"db": "-8.0", "name": "GTR1", "gain": 0.65, "level": 0.44, "peak": 0.52},
-        {"db": "-6.5", "name": "GTR2", "gain": 0.70, "level": 0.05, "peak": 0.30},
-        {"db": "-12.0", "name": "MIC", "gain": 0.55, "level": 0.88, "peak": 0.96,
+        {"db": "-3.5", "send_a": 0.15, "send_b": 0.3, "name": "MPC", "gain": 0.80, "level": 0.62, "peak": 0.71},
+        {"db": "-8.0", "send_a": 0.45, "send_b": 0.1, "name": "GTR1", "gain": 0.65, "level": 0.44, "peak": 0.52},
+        {"db": "-6.5", "send_a": 0.35, "send_b": 0.2, "name": "GTR2", "gain": 0.70, "level": 0.05, "peak": 0.30},
+        {"db": "-12.0", "send_a": 0.6, "send_b": 0.25, "name": "MIC", "gain": 0.55, "level": 0.88, "peak": 0.96,
          "solo": True},
-        {"db": "-5.0", "name": "LOOP", "gain": 0.75, "level": 0.33, "peak": 0.40},
-        {"db": "-18.0", "name": "VERB", "gain": 0.40, "level": 0.20, "peak": 0.25},
-        {"db": "-20.0", "name": "DLY", "gain": 0.35, "level": 0.10, "peak": 0.18,
+        {"db": "-5.0", "send_a": 0.2, "send_b": 0.4, "name": "LOOP", "gain": 0.75, "level": 0.33, "peak": 0.40},
+        {"db": "-18.0", "send_a": 0.0, "send_b": 0.0, "name": "VERB", "gain": 0.40, "level": 0.20, "peak": 0.25},
+        {"db": "-20.0", "send_a": 0.0, "send_b": 0.0, "name": "DLY", "gain": 0.35, "level": 0.10, "peak": 0.18,
          "mute": True},
-        {"db": "0.0", "name": "MSTR", "gain": 0.85, "level": 0.70, "peak": 0.80},
+        {"db": "0.0", "send_a": 0.0, "send_b": 0.0, "name": "MSTR", "gain": 0.85, "level": 0.70, "peak": 0.80},
     ]
     st["fx"] = {
-        "track": "GTR1", "name": "GUITARIX DRIVE", "bypass": False,
-        "params": [
-            {"name": "DRIVE", "value": "6.5", "norm": 0.65},
-            {"name": "TONE", "value": "-2.0", "norm": 0.40},
-            {"name": "LEVEL", "value": "0.0", "norm": 0.50},
-            {"name": "LOW", "value": "+3.0", "norm": 0.65},
-            {"name": "MID", "value": "-1.5", "norm": 0.42},
-            {"name": "HIGH", "value": "+1.0", "norm": 0.55},
-            {"name": "MIX", "value": "100", "norm": 1.00},
-            {"name": "OUT", "value": "-3.0", "norm": 0.35},
+        "track": "GTR1", "kind": "eq", "slot": 0, "focus": 1,
+        "chain": [
+            {"name": "EQ"}, {"name": "COMP"}, {"name": "DRV"},
+            {"name": "VERB", "bypass": True},
+        ],
+        "bands": [
+            {"type": "hipass", "freq": 80, "q": 1.0},
+            {"type": "bell", "freq": 220, "gain": -3.5, "q": 1.4},
+            {"type": "bell", "freq": 2400, "gain": 4.0, "q": 0.8},
+            {"type": "hishelf", "freq": 8000, "gain": 2.0, "q": 0.7},
+        ],
+        "knobs": [
+            {"name": "FREQ", "norm": 0.35},
+            {"name": "GAIN", "norm": 0.30},
+            {"name": "Q", "norm": 0.55},
+            {"name": "TYPE", "norm": 0.25},
         ],
     }
     st["song"] = {
