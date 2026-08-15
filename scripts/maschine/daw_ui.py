@@ -417,19 +417,21 @@ def _fx_limiter_view(f, fx):
     top, bot = BODY_Y + 11, ENCBAR_Y - 4
     f.text(3, top, "IN", DIM)
     w = 190
-    f.fill(24, top, w, 6, DIM)
-    f.fill(24, top, int(min(1.0, fx.get("in_level", 0.0)) * w), 6, NORMAL)
+    f.fill(24, top, w, 5, DIM)
+    f.fill(24, top, int(min(1.0, fx.get("in_level", 0.0)) * w), 5, NORMAL)
     ceil = fx.get("ceiling_norm", 0.9)
     f.vline(24 + int(ceil * w), top - 2, 10, BRIGHT)
     f.text(24 + w + 6, top, fx.get("ceiling", "-0.3"), BRIGHT)
 
     gr = fx.get("gr_db", 0.0)
-    f.text(3, top + 11, "GR", DIM)
-    f.fill(24, top + 11, w, 6, DIM)
-    f.fill(24, top + 11, int(min(1.0, gr / 12.0) * w), 6, BRIGHT)
-    f.text(24 + w + 6, top + 11, "-%.1f" % gr, BRIGHT)
+    f.text(3, top + 9, "GR", DIM)
+    f.fill(24, top + 9, w, 5, DIM)
+    f.fill(24, top + 9, int(min(1.0, gr / 12.0) * w), 5, BRIGHT)
+    f.text(24 + w + 6, top + 9, "-%.1f" % gr, BRIGHT)
     if fx.get("over"):
-        f.text_inverted(24, top + 21, "OVER")
+        # OVER latches next to the ceiling readout rather than below the
+        # meters: a third row does not fit above the encoder strip.
+        f.text_inverted(24 + w + 6, top, "OVER")
 
 
 def _fx_multiband_view(f, fx):
@@ -576,13 +578,13 @@ def _fx_amp_view(f, fx):
     # bar per column, and carries no labels of its own: the encoder strip
     # already names GAIN / BASS / MID / MASTER, and repeating them here
     # cost the rows this view needs.
-    ty = top + 13
+    ty = top + 12
     vals = list(fx.get("tone", (0.5, 0.5, 0.5)))
     values = [fx.get("gain", 0.5)] + vals
     for i, v in enumerate(values[:COLS]):
         bx = COL_X[i] + 3
-        f.fill(bx, ty, COL_W - 8, 5, DIM)
-        f.fill(bx, ty, int(v * (COL_W - 8)), 5, BRIGHT)
+        f.fill(bx, ty, COL_W - 8, 4, DIM)
+        f.fill(bx, ty, int(v * (COL_W - 8)), 4, BRIGHT)
 
 
 def _fx_mod_view(f, fx):
