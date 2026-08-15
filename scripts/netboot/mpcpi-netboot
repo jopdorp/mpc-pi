@@ -17,7 +17,18 @@ set -uo pipefail
 REPO="/home/jopdorp/development/mpc-pi"
 BUILD="$REPO/.cache/br-rpi5"
 IMAGES="$BUILD/images"
-NFS_ROOT="$BUILD/target"
+# Which rootfs to serve. The appliance base is Raspberry Pi OS now, but
+# the Buildroot tree still boots the emulator half, so both are keepable
+# and a marker file picks one. Netboot is the iteration loop: edit on the
+# host, reboot the Pi, no card ever leaves the slot.
+ROOT_KIND_FILE="/etc/mpcpi-netboot.root"
+ROOT_KIND="$(cat "$ROOT_KIND_FILE" 2>/dev/null || echo pios)"
+PIOS_ROOT="/srv/nfs/mpcpi-pios"
+if [ "$ROOT_KIND" = "buildroot" ]; then
+	NFS_ROOT="$BUILD/target"
+else
+	NFS_ROOT="$PIOS_ROOT"
+fi
 TFTP_ROOT="/srv/tftp/mpcpi"
 SERVER_IP="192.168.7.1"
 SUBNET="192.168.7.0/24"
@@ -29,6 +40,29 @@ LOGFILE="/srv/tftp/mpcpi-netboot.log"   # world-readable: the
 IFACE_FILE="/etc/mpcpi-netboot.iface"
 
 die() { echo "mpcpi-netboot: $*" >&2; exit 1; }
+
+# The Pi 5 boots from EEPROM: it needs a kernel, the DTBs, the overlays
+# and a config/cmdline pair. No start.elf or bootcode.bin.
+populate_tftp() {
+	if [ "$ROOT_KIND" = "buildroot" ]; then
+		cp "$IMAGES/Image" "$TFTP_ROOT/Image" || die "no kernel in $IMAGES"
+		cp "$IMAGES/Image" "$TFTP_ROOT/kernel_2712.img"
+		cp "$IMAGES"/bcm2712*.dtb "$TFTP_ROOT/" 2>/dev/null
+		[ -d "$IMAGES/rpi-firmware/overlays" ] &&
+			cp -r "$IMAGES/rpi-firmware/overlays" "$TFTP_ROOT/"
+		cp "$REPO/board/rpi5/config.txt" "$TFTP_ROOT/config.txt" 2>/dev/null
+	else
+		# A Pi OS root carries its own kernel and firmware in /boot.
+		local b="$NFS_ROOT/boot/firmware"
+		[ -d "$b" ] || b="$NFS_ROOT/boot"
+		[ -d "$b" ] || die "no Pi OS root yet - run: mpcpi-netboot fetch-pios"
+		cp "$b"/kernel*.img "$TFTP_ROOT/" 2>/dev/null
+		cp "$b"/*.dtb "$TFTP_ROOT/" 2>/dev/null
+		cp "$b"/start*.elf "$b"/fixup*.dat "$TFTP_ROOT/" 2>/dev/null
+		[ -d "$b/overlays" ] && cp -r "$b/overlays" "$TFTP_ROOT/"
+		cp "$b/config.txt" "$TFTP_ROOT/config.txt" 2>/dev/null
+	fi
+}
 
 # Interface choice, in order: the pinned one, else the wired link that
 # actually has a cable in it. Picking by carrier is what stops the
@@ -108,15 +142,7 @@ start() {
 	ip link set "$IFACE" up
 
 	mkdir -p "$TFTP_ROOT"
-	# The Pi 5 boots from EEPROM: it needs the kernel, the DTBs, the
-	# overlays and a config/cmdline pair. No start.elf or bootcode.bin.
-	cp "$IMAGES/Image" "$TFTP_ROOT/Image" 2>/dev/null ||
-		die "no kernel Image in $IMAGES"
-	cp "$IMAGES/Image" "$TFTP_ROOT/kernel_2712.img"
-	cp "$IMAGES"/bcm2712*.dtb "$TFTP_ROOT/" 2>/dev/null
-	[ -d "$IMAGES/rpi-firmware/overlays" ] &&
-		cp -r "$IMAGES/rpi-firmware/overlays" "$TFTP_ROOT/"
-	cp "$REPO/board/rpi5/config.txt" "$TFTP_ROOT/config.txt" 2>/dev/null
+	populate_tftp
 
 	# Root over NFS, and keep the appliance's own isolcpus/threadirqs
 	# tuning so a netbooted rig behaves like a flashed one.
@@ -172,6 +198,51 @@ case "${1:-status}" in
 	stop) stop ;;
 	status) status ;;
 	log) tail -n "${2:-40}" "$LOGFILE" 2>/dev/null || echo "no log yet" ;;
+	root)
+		# Switch which rootfs is served. Fixed set of values, so this
+		# stays safe to expose through a passwordless rule.
+		[ "$(id -u)" -eq 0 ] || die "must run as root"
+		case "${2:-}" in
+			pios|buildroot) echo "$2" > "$ROOT_KIND_FILE"
+				echo "serving $2 root on next start" ;;
+			*) echo "current: $ROOT_KIND (pios|buildroot)" ;;
+		esac
+		;;
+	fetch-pios)
+		# Unpack a Raspberry Pi OS arm64 image into an NFS root. Needs
+		# root for the loop mount and to preserve ownership, which is
+		# exactly why it lives in this helper rather than a user script.
+		[ "$(id -u)" -eq 0 ] || die "must run as root"
+		img="${MPCPI_PIOS_IMG:-/var/tmp/pios-arm64-lite.img.xz}"
+		url="https://downloads.raspberrypi.com/raspios_lite_arm64_latest"
+		mkdir -p "$PIOS_ROOT" /var/tmp
+		if [ ! -s "$img" ]; then
+			echo "downloading Raspberry Pi OS Lite arm64..."
+			curl -fL --progress-bar "$url" -o "$img" || die "download failed"
+		fi
+		raw="${img%.xz}"
+		[ -s "$raw" ] || { echo "decompressing..."; xz -dk -T0 "$img" || die "xz failed"; }
+		# Partition 2 is the root filesystem on every Pi OS image.
+		off=$(partx -g -o START -s -n 2:2 "$raw" | tr -d ' ')
+		[ -n "$off" ] || die "could not find the root partition"
+		mnt=$(mktemp -d)
+		mount -o loop,offset=$((off * 512)) "$raw" "$mnt" || die "mount failed"
+		echo "copying rootfs (this takes a few minutes)..."
+		cp -a "$mnt/." "$PIOS_ROOT/" 2>/dev/null
+		umount "$mnt"; rmdir "$mnt"
+		# And the boot partition, which carries the kernel and firmware.
+		boff=$(partx -g -o START -s -n 1:1 "$raw" | tr -d ' ')
+		mnt=$(mktemp -d)
+		mount -o loop,offset=$((boff * 512)) "$raw" "$mnt" 2>/dev/null &&
+			{ mkdir -p "$PIOS_ROOT/boot/firmware"
+			  cp -a "$mnt/." "$PIOS_ROOT/boot/firmware/" 2>/dev/null
+			  umount "$mnt"; }
+		rmdir "$mnt" 2>/dev/null
+		# NFS root must not fsck or mount its own SD partitions.
+		sed -i "s/^[^#].*[[:space:]]\/[[:space:]].*//" "$PIOS_ROOT/etc/fstab" 2>/dev/null
+		sed -i "s/^[^#].*\/boot.*//" "$PIOS_ROOT/etc/fstab" 2>/dev/null
+		echo "Pi OS root ready at $PIOS_ROOT"
+		;;
 	deploy)
 		# Refresh what the Pi will fetch, without disturbing a running
 		# server: kernel and rootfs change far more often than the
@@ -186,5 +257,5 @@ case "${1:-status}" in
 		"$REPO/scripts/netboot/deploy-daw.sh" "$NFS_ROOT" || true
 		echo "redeployed kernel, dtbs, overlays and DAW layer"
 		;;
-	*) die "usage: mpcpi-netboot start|stop|status|log [n]|deploy" ;;
+	*) die "usage: mpcpi-netboot start|stop|status|log [n]|deploy|root [pios|buildroot]|fetch-pios" ;;
 esac
