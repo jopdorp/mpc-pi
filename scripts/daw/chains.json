@@ -1,0 +1,210 @@
+{
+ "MPC": [
+  {
+   "name": "EQ",
+   "kind": "eq",
+   "bypass": true,
+   "why": "corrective only",
+   "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+  }
+ ],
+ "GTR1": [
+  {
+   "name": "TUNE",
+   "kind": "tuner",
+   "bypass": true,
+   "why": "reads the dry string before anything colours it",
+   "uri": "http://gareus.org/oss/lv2/tuna#one"
+  },
+  {
+   "name": "OD",
+   "kind": "drive",
+   "role": 0,
+   "bypass": true,
+   "why": "into the amp, never after it",
+   "uri": "http://guitarix.sourceforge.net/plugins/gxts9#ts9sim"
+  },
+  {
+   "name": "AMP",
+   "kind": "amp",
+   "why": "the voicing; five combos selectable",
+   "uri": "http://guitarix.sourceforge.net/plugins/gx_amp_stereo#GUITARIX_ST"
+  },
+  {
+   "name": "CAB",
+   "kind": "amp",
+   "cab": true,
+   "why": "guitarix models the cab as its own stage",
+   "uri": "http://guitarix.sourceforge.net/plugins/gx_cabinet#CABINET"
+  },
+  {
+   "name": "EQ",
+   "kind": "eq",
+   "why": "shapes the finished tone, not the raw pickup",
+   "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+  },
+  {
+   "name": "COMP",
+   "kind": "comp",
+   "bypass": true,
+   "why": "after the cab so it acts on what you hear",
+   "uri": "http://lsp-plug.in/plugins/lv2/sc_compressor_stereo"
+  },
+  {
+   "name": "CHOR",
+   "kind": "mod",
+   "role": 0,
+   "bypass": true,
+   "uri": "http://guitarix.sourceforge.net/plugins/gx_chorus_stereo#_chorus_stereo"
+  },
+  {
+   "name": "FLNG",
+   "kind": "mod",
+   "role": 1,
+   "bypass": true,
+   "uri": "http://guitarix.sourceforge.net/plugins/gx_flanger#_flanger"
+  },
+  {
+   "name": "CHOP",
+   "kind": "chop",
+   "bypass": true,
+   "uri": "http://guitarix.sourceforge.net/plugins/gx_switched_tremolo_#_switched_tremolo_"
+  }
+ ],
+ "GTR2": [
+  {
+   "name": "TUNE",
+   "kind": "tuner",
+   "bypass": true,
+   "why": "reads the dry string before anything colours it",
+   "uri": "http://gareus.org/oss/lv2/tuna#one"
+  },
+  {
+   "name": "OD",
+   "kind": "drive",
+   "role": 0,
+   "bypass": true,
+   "why": "into the amp, never after it",
+   "uri": "http://guitarix.sourceforge.net/plugins/gxts9#ts9sim"
+  },
+  {
+   "name": "AMP",
+   "kind": "amp",
+   "why": "the voicing; five combos selectable",
+   "uri": "http://guitarix.sourceforge.net/plugins/gx_amp_stereo#GUITARIX_ST"
+  },
+  {
+   "name": "CAB",
+   "kind": "amp",
+   "cab": true,
+   "why": "guitarix models the cab as its own stage",
+   "uri": "http://guitarix.sourceforge.net/plugins/gx_cabinet#CABINET"
+  },
+  {
+   "name": "EQ",
+   "kind": "eq",
+   "why": "shapes the finished tone, not the raw pickup",
+   "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+  },
+  {
+   "name": "COMP",
+   "kind": "comp",
+   "bypass": true,
+   "why": "after the cab so it acts on what you hear",
+   "uri": "http://lsp-plug.in/plugins/lv2/sc_compressor_stereo"
+  },
+  {
+   "name": "CHOR",
+   "kind": "mod",
+   "role": 0,
+   "bypass": true,
+   "uri": "http://guitarix.sourceforge.net/plugins/gx_chorus_stereo#_chorus_stereo"
+  },
+  {
+   "name": "FLNG",
+   "kind": "mod",
+   "role": 1,
+   "bypass": true,
+   "uri": "http://guitarix.sourceforge.net/plugins/gx_flanger#_flanger"
+  },
+  {
+   "name": "CHOP",
+   "kind": "chop",
+   "bypass": true,
+   "uri": "http://guitarix.sourceforge.net/plugins/gx_switched_tremolo_#_switched_tremolo_"
+  }
+ ],
+ "MIC": [
+  {
+   "name": "EQ",
+   "kind": "eq",
+   "why": "hi-pass out the room rumble",
+   "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+  },
+  {
+   "name": "COMP",
+   "kind": "comp",
+   "why": "sidechain-capable; ducks against the MPC when wanted",
+   "uri": "http://lsp-plug.in/plugins/lv2/sc_compressor_stereo"
+  },
+  {
+   "name": "DEESS",
+   "kind": "eq",
+   "bypass": true,
+   "why": "a narrow band on the parametric does the job",
+   "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+  }
+ ],
+ "AUX": [
+  {
+   "name": "EQ",
+   "kind": "eq",
+   "why": "hi-pass out the room rumble",
+   "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+  },
+  {
+   "name": "COMP",
+   "kind": "comp",
+   "why": "sidechain-capable; ducks against the MPC when wanted",
+   "uri": "http://lsp-plug.in/plugins/lv2/sc_compressor_stereo"
+  },
+  {
+   "name": "DEESS",
+   "kind": "eq",
+   "bypass": true,
+   "why": "a narrow band on the parametric does the job",
+   "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+  }
+ ],
+ "FX A": [
+  {
+   "name": "VERB",
+   "kind": "reverb",
+   "why": "Dragonfly hall",
+   "uri": "https://github.com/michaelwillis/dragonfly-reverb"
+  }
+ ],
+ "FX B": [
+  {
+   "name": "DELAY",
+   "kind": "delay",
+   "why": "tempo-synced",
+   "uri": "urn:ardour:a-delay"
+  }
+ ],
+ "MASTER": [
+  {
+   "name": "MBAND",
+   "kind": "multiband",
+   "bypass": true,
+   "why": "glue; off by default because it is easy to overdo",
+   "uri": "http://lsp-plug.in/plugins/lv2/mb_compressor_stereo"
+  },
+  {
+   "name": "LIMIT",
+   "kind": "limiter",
+   "why": "last in the chain, always: nothing follows the ceiling",
+   "uri": "http://lsp-plug.in/plugins/lv2/limiter_stereo"
+  }
+ ]
+}
