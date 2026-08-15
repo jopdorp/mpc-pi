@@ -20,7 +20,7 @@ session build time by trying them in order.
 
 # kind -> which micro-view in daw_ui renders it
 KINDS = ("eq", "comp", "limiter", "multiband", "delay", "reverb",
-         "drive", "amp", "mod", "chop", "params")
+         "drive", "amp", "mod", "chop", "tuner", "params")
 
 ROLES = [
     {
@@ -153,6 +153,17 @@ ROLES = [
                 "chop always lands on the grid; one knob owns it live",
     },
     {
+        "role": "Tuner",
+        "kind": "tuner",
+        "uris": [
+            "http://gareus.org/oss/lv2/tuna#one",                        # verified
+            "http://guitarix.sourceforge.net/plugins/gxtuner#tuner",     # verified
+        ],
+        "knobs": ("REF", "", "", ""),
+        "note": "the only effect whose display IS the product, so it gets "
+                "the whole panel; mutes the channel while open",
+    },
+    {
         "role": "Guitar amp + cab (combo models)",
         "kind": "amp",
         "uris": [
@@ -189,6 +200,14 @@ AMP_MODELS = [
      "gx_amp": "Mesa Boogie Style", "gx_cab": "4x12",
      "tubes": "cascaded 12AX7 into 6L6",
      "for": "Metallica, Slipknot, SOAD"},
+    {"name": "AC30", "full": "Vox AC30, chime and crunch",
+     "gx_amp": "AC-30 Style", "gx_cab": "2x12",
+     "tubes": "EF86/12AX7 into cathode-biased EL84",
+     "for": "British rock, Beatles, Queen, U2, indie jangle"},
+    {"name": "5150", "full": "Peavey 5150, modern high gain",
+     "gx_amp": "Peavey Style", "gx_cab": "4x12",
+     "tubes": "cascaded 12AX7 into 6L6, tight low end",
+     "for": "modern and heavier metal, djent, metalcore"},
 ]
 
 # The same three as Neural Amp Modeler captures. NAM is offered as an
@@ -203,6 +222,8 @@ NAM_MODELS = [
     {"name": "DLX", "file": "fender-deluxe-reverb-clean.nam"},
     {"name": "PLEXI", "file": "marshall-plexi-1959.nam"},
     {"name": "IIC+", "file": "mesa-mark-iic-plus.nam"},
+    {"name": "AC30", "file": "vox-ac30-top-boost.nam"},
+    {"name": "5150", "file": "peavey-5150-lead.nam"},
 ]
 NAM_TIER = "nano"      # A2 quality tier; nano is the cheapest that still
                        # sounds like the amp, and is what fits beside a
@@ -229,15 +250,24 @@ def self_test():
         assert len(r["knobs"]) == 4, "%s needs exactly 4 knobs" % r["role"]
         # Every role must end in something that ships with Ardour or in
         # a package we install, so a bare boot is never silent.
-        assert r["uris"][-1].startswith(("urn:ardour:", "http://zamaudio")), \
-            "%s has no safe fallback" % r["role"]
+        if r["kind"] != "tuner":
+            # A tuner is a monitor rather than an audible effect, so it
+            # needs no silent-boot fallback; everything else does.
+            assert r["uris"][-1].startswith(
+                ("urn:ardour:", "http://zamaudio")), \
+                "%s has no safe fallback" % r["role"]
     kinds = {r["kind"] for r in ROLES}
     missing = kinds - set(KINDS)
     assert not missing, missing
-    assert len(AMP_MODELS) == 3
+    assert len(AMP_MODELS) == len(NAM_MODELS), \
+        "the two amp engines must offer the same voicings, or switching " \
+        "engines would silently change the rig"
+    for a, n in zip(AMP_MODELS, NAM_MODELS):
+        assert a["name"] == n["name"], (a["name"], n["name"])
+        assert a["gx_cab"], a["name"]
     print("plugins self-test PASS: %d roles, %d kinds, %d amp models, "
-          "every role has a fallback" % (len(ROLES), len(kinds),
-                                         len(AMP_MODELS)))
+          "every role has a fallback, both engines offer the same "
+          "voicings" % (len(ROLES), len(kinds), len(AMP_MODELS)))
 
 
 if __name__ == "__main__":

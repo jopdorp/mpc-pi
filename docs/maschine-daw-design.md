@@ -537,23 +537,40 @@ installed rather than silent.
 | Reverb | **Dragonfly Reverb** (Hall/Room/Plate) | exponential tail whose length is the decay, early reflections as taps |
 | Overdrive | **guitarix Tube Screamer** | the clipping curve — soft, mid-humped |
 | Distortion | **guitarix Distortion** (DS-1 voicing) | same view, visibly harder knee |
-| Guitar amp + cab | **guitarix amp** | three combo voicings, cab, tone stack above the encoders that set it |
+| Guitar amp + cab | **guitarix amp + cabinet** | five voicings, cab, tone stack above the encoders that set it |
+| Chorus / flanger | guitarix chorus, flanger | the LFO drawn as the waveform it is, marker on the curve |
+| Chopper / repeater | guitarix **switched** tremolo | gate pattern as a square wave, snapped to note divisions of the MPC tempo |
+| Tuner | x42 tuna (gxtuner fallback) | big note, needle on a cents scale, wide IN TUNE box |
 
-Amp voicings, chosen for the styles asked for:
+Amp voicings. These are concrete guitarix amp + cabinet selections read
+out of the installed `.ttl` files, so they are selectable values rather
+than aspirations — and guitarix models the cab as its own stage, which is
+what makes the pairing meaningful:
 
-| | Amp | For |
-|---|---|---|
-| DLX | Fender Deluxe Reverb, clean | jazz, singer-songwriter, funk |
-| PLEXI | Marshall Plexi, edge of breakup | Hendrix, RHCP, classic rock |
-| IIC+ | Mesa Boogie Mark IIC+, high gain | Metallica, Slipknot, SOAD |
+| | Amp model | Cab | For |
+|---|---|---|---|
+| DLX | Fender Style | 2x12 | jazz, singer-songwriter, funk |
+| PLEXI | JTM-45 Style | 4x12 | Hendrix, RHCP, classic rock |
+| IIC+ | Mesa Boogie Style | 4x12 | Metallica, Slipknot, SOAD |
+| AC30 | AC-30 Style | 2x12 | British rock, indie jangle, Queen, U2 |
+| 5150 | Peavey Style | 4x12 | modern and heavier metal, djent, metalcore |
 
-**On neural amp modelling**: NAM and AIDA-X are the obvious modern
-choice, and neither is packaged for Debian arm64 — they would have to be
-built from source and their inference cost is real on a Pi 5 next to a
-1600%-speed emulator. guitarix's tube-stage models are analytic, cheap
-and genuinely good, so they are the dependency; NAM stays a documented
-option for later, and the manifest's URI-list design means swapping it in
-is one line.
+**Two amp engines, same voicings.** guitarix is the default because it is
+a complete single-app chain — tube stage, tone stack and a real cabinet
+model — it is analytic rather than neural, and it is packaged for arm64.
+**NAM is offered as an alternative**, not a replacement: a capture sounds
+closer to one specific rig, at the cost of neural inference per instance
+and model files shipped in the image. `plugins.py` keeps both lists the
+same length with matching names and the self-test enforces it, so
+switching engines can never silently change which amps exist. The panel's
+amp view is identical either way, so the engine is invisible to the
+player.
+
+NAM's **A2** generation is the target rather than classic NAM: its nano
+tier is dramatically cheaper than the original WaveNet models, which is
+what makes it viable beside a 1600%-speed emulator. Note that A2 is newer
+than the WaveNet implementation in the neighbouring `rpi-pedal` project,
+so that code is a proven ARM inference path but not an A2 one.
 
 **Packages** (`sudo apt install lsp-plugins-lv2 dragonfly-reverb guitarix
 x42-plugins zam-plugins`) — LSP, x42 and Zam are already present on the

@@ -555,10 +555,12 @@ def _fx_amp_view(f, fx):
     an amp's panel reads - you set a shape, not a list of values.
     """
     top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    # Five voicings fit across 255px at five characters each; the chips
+    # are the whole selector, so no paging and nothing hidden.
     models = fx.get("models", [])
     cur = fx.get("model_index", 0)
     x = 3
-    for i, m in enumerate(models[:3]):
+    for i, m in enumerate(models[:5]):
         label = m[:5]
         w = f.text_width(label) + 6
         if i == cur:
@@ -568,7 +570,7 @@ def _fx_amp_view(f, fx):
             f.rect(x, top, w, GLYPH_H + 3, DIM)
             f.text(x + 3, top + 1, label, MUTED)
         x += w + 4
-    f.text_right(254, top + 1, fx.get("cab", "")[:12], MUTED)
+    f.text_right(254, top + 1, fx.get("cab", "")[:8], MUTED)
 
     # The tone stack sits directly above the encoders that set it, one
     # bar per column, and carries no labels of its own: the encoder strip
@@ -632,6 +634,50 @@ def _fx_chop_view(f, fx):
         f.vline(min(252, bx), bot + 1, 2, NORMAL)
 
 
+def _fx_tuner_view(f, fx):
+    """Tuner: the one effect whose display *is* the product.
+
+    A big note name, and a needle on a centre-marked scale with a wide
+    in-tune window drawn as a box. Cents are shown as a number too, but
+    the needle is what a player reads - and the IN TUNE box is what they
+    read from three metres away with a guitar in their hands.
+    """
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    note = fx.get("note", "-")
+    cents = fx.get("cents", 0.0)
+    in_tune = abs(cents) <= 4
+
+    # Note name at double size on the left; the octave rides small.
+    f.text(4, top + 2, note[:2], BRIGHT, scale=2)
+    if fx.get("octave") is not None:
+        f.text(4 + f.text_width(note[:2], 2), top + 10,
+               str(fx["octave"]), MUTED)
+
+    # Scale: -50..+50 cents across the remaining width.
+    sx, sw = 56, 196
+    mid = sx + sw // 2
+    f.hline(sx, bot - 4, sw, DIM)
+    for c in range(-50, 51, 10):
+        x = mid + int(c / 50.0 * (sw // 2))
+        f.vline(x, bot - 7, 4, NORMAL if c == 0 else DIM)
+    # the in-tune window, drawn as a box so it reads at a distance
+    win = int(4 / 50.0 * (sw // 2))
+    f.rect(mid - win, top, win * 2, bot - top - 6,
+           BRIGHT if in_tune else DIM)
+
+    nx = mid + int(max(-50.0, min(50.0, cents)) / 50.0 * (sw // 2))
+    f.vline(nx, top, bot - top - 6, BRIGHT)
+    f.fill(nx - 1, top, 3, 3, BRIGHT)
+
+    # The readout sits left of the scale so it never covers the needle
+    # it is describing.
+    if in_tune:
+        f.text_inverted(sx + 2, top + 2, "IN TUNE")
+    else:
+        f.text(sx + 2, top + 2, "%+d" % round(cents), NORMAL)
+    f.text_right(252, top + 2, fx.get("hz", ""), MUTED)
+
+
 def page_fx(f, st):
     """One track's plugin chain. The chain is slot chips on the context
     row; the body is a purpose-built view per plugin kind - an EQ is a
@@ -665,7 +711,8 @@ def page_fx(f, st):
              "limiter": _fx_limiter_view, "multiband": _fx_multiband_view,
              "delay": _fx_delay_view, "reverb": _fx_reverb_view,
              "drive": _fx_drive_view, "amp": _fx_amp_view,
-             "mod": _fx_mod_view, "chop": _fx_chop_view}
+             "mod": _fx_mod_view, "chop": _fx_chop_view,
+             "tuner": _fx_tuner_view}
     if kind in views:
         views[kind](f, fx)
     else:
@@ -682,7 +729,7 @@ def page_fx(f, st):
     encoders = []
     for prm in fx.get("knobs", fx.get("params", []))[:COLS]:
         encoders.append({"norm": prm.get("norm", 0.0), "level": NORMAL,
-                         "text": prm.get("name", "")[:5]})
+                         "text": prm.get("name", "")[:10]})
     draw_encoder_bar(f, st, encoders)
 
 
