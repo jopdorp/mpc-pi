@@ -20,8 +20,17 @@ working implementation; to be confirmed on hardware.
 5 bits per pixel grayscale; **3 pixels pack into 2 bytes** (15 bits used of
 16). `blockIndex = x % 3` selects the position within the pair. Full white
 is `0x1F`, black `0x00`. A framebuffer row is 255 px = 85 triples = 170
-bytes; the frame buffer cabl transmits is 5,358 bytes
-(10 chunks x 502 + 338), matching the windowed region set below.
+bytes, and the window below is 64 rows, so a full frame is
+**64 x 170 = 10,880 bytes**, transmitted as 21 chunks of 502 plus a final
+338 (21 x 502 + 338 = 10,880 exactly).
+
+An earlier revision of this document said 5,358 bytes (10 chunks + 338),
+which is arithmetically impossible for a 64-row window at 170 bytes per
+row - it covers only 31 rows. The bridge inherited that number and
+silently dropped the bottom half of every frame, since its packing loop
+breaks out once it runs past the end of the buffer. Corrected here and in
+`scripts/maschine/mpc-mk1-display.py`; still unverified against hardware,
+so confirm the chunk count during MK1 bring-up.
 
 ## Init sequence (per display, after claiming the interface)
 
@@ -50,11 +59,11 @@ Command packets are `{d, 0x00, length, bytes...}`:
 {d, 00, 03, 75 00 3F}          ; row window 0..63
 {d, 00, 03, 15 00 54}          ; column window 0..84 (85 triples)
 {d,   01, F7 5C} + 502 bytes   ; first chunk
-{d+1, 01, F6}    + 502 bytes   ; middle chunks (repeat)
+{d+1, 01, F6}    + 502 bytes   ; middle chunks (repeat 20x)
 {d+1, 01, 52}    + 338 bytes   ; final chunk
 ```
 
-Total payload 10 x 502 + 338 = 5,358 bytes per display per frame.
+Total payload 21 x 502 + 338 = 10,880 bytes per display per frame.
 
 ## Mapping the MPC2000XL LCD
 

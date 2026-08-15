@@ -30,7 +30,11 @@ DISPLAY_W = 255
 DISPLAY_H = 64
 TRIPLES_PER_ROW = 85          # 255 px / 3
 ROW_BYTES = TRIPLES_PER_ROW * 2  # 3 px pack into 2 bytes (5 bpp)
-FRAME_BYTES = 10 * 502 + 338  # 5358, cabl's exact chunking
+# 64 rows x 170 bytes = 10880, which is exactly 21 * 502 + 338. The
+# earlier value of 5358 (10 chunks) could only carry 31 of the 64 rows,
+# so the bottom half of every frame was silently dropped - the packing
+# loop simply broke out when it ran past the end of the buffer.
+FRAME_BYTES = 21 * 502 + 338  # 10880 = DISPLAY_H * ROW_BYTES
 
 HEADER_FMT = "<4sIHHI"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -50,9 +54,15 @@ def read_frame(path):
     return seq, width, height, pixels
 
 
-def pack_display(width, height, pixels, level=0x1F):
-    """Pack a 1-bpp-ish frame into the MK1's 5-bpp 3-pixels-per-2-bytes
-    layout, placed at the top-left of the 255x64 panel."""
+def pack_display(width, height, pixels, level=None):
+    """Pack a frame into the MK1's 5-bpp 3-pixels-per-2-bytes layout,
+    placed at the top-left of the 255x64 panel.
+
+    The panel has 32 brightness levels and the DAW pages use them as a
+    hierarchy (dim labels, bright values), so a source byte is taken as a
+    level 0..31 rather than a flag. Pass an explicit `level` to force
+    every lit pixel to one brightness, which is what the MPC's own 1-bit
+    LCD wants."""
     out = bytearray(FRAME_BYTES)
     for y in range(DISPLAY_H):
         row_base = y * ROW_BYTES
@@ -61,7 +71,8 @@ def pack_display(width, height, pixels, level=0x1F):
         for x in range(DISPLAY_W):
             lit = 0
             if x < width and y < height and pixels[y * width + x]:
-                lit = level
+                lit = level if level is not None else min(
+                    0x1F, pixels[y * width + x])
             triple = x // 3
             block = x % 3
             byte_index = row_base + triple * 2
@@ -120,10 +131,11 @@ class Mk1Usb:
         self._w([d, 0x00, 0x03, 0x15, 0x00, 0x54])
         self._w([d, 0x01, 0xF7, 0x5C], frame[0:502])
         offset = 502
-        for _ in range(9):
+        # 20 middle chunks: first + 20 middle + final 338 = 10880.
+        while offset + 502 <= FRAME_BYTES - 338:
             self._w([d + 1, 0x01, 0xF6], frame[offset:offset + 502])
             offset += 502
-        self._w([d + 1, 0x01, 0x52], frame[offset:offset + 338])
+        self._w([d + 1, 0x01, 0x52], frame[offset:FRAME_BYTES])
 
 
 def preview_png(width, height, pixels, path):
