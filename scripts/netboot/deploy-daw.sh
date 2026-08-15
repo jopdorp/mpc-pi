@@ -92,3 +92,91 @@ chmod 0755 "$TARGET/etc/init.d/S41dawui"
 echo "deployed DAW control layer to $DEST"
 find "$DEST" -type f | wc -l | xargs echo "files:"
 echo "init scripts: S40dawctl (needs Ardour), S41dawui (runs regardless)"
+
+# ---------------------------------------------------------------------
+# Raspberry Pi OS roots need more than a payload drop: they are systemd,
+# and they ship with no login at all. Everything below is a no-op on the
+# Buildroot target, which has its own init and its own console.
+# ---------------------------------------------------------------------
+[ -x "$TARGET/lib/systemd/systemd" ] || exit 0
+echo
+echo "Raspberry Pi OS root detected - provisioning access"
+
+# SSH, because an appliance with no login cannot be iterated on. Pi OS
+# Lite ships sshd installed, disabled, and with no host keys and no user,
+# so all three have to be supplied from here. Host keys are ordinary
+# files with no architecture, so generating them on the build host is
+# both legitimate and much faster than a first-boot service.
+mkdir -p "$TARGET/etc/ssh"
+for t in rsa ecdsa ed25519; do
+	k="$TARGET/etc/ssh/ssh_host_${t}_key"
+	[ -s "$k" ] || ssh-keygen -q -t "$t" -N "" -f "$k" -C "mpc-pi" </dev/null
+done
+
+# Key-only root login. The alternative is inventing a password for an
+# appliance that should never have one.
+PUBKEY=""
+for c in /home/jopdorp/.ssh/id_ed25519.pub /home/jopdorp/.ssh/id_rsa.pub; do
+	[ -s "$c" ] && { PUBKEY="$c"; break; }
+done
+if [ -n "$PUBKEY" ]; then
+	mkdir -p "$TARGET/root/.ssh"
+	cat "$PUBKEY" > "$TARGET/root/.ssh/authorized_keys"
+	chmod 700 "$TARGET/root/.ssh"
+	chmod 600 "$TARGET/root/.ssh/authorized_keys"
+	echo "  authorized_keys <- $(basename "$PUBKEY")"
+else
+	echo "  WARNING: no public key found; ssh will refuse every login" >&2
+fi
+
+# Two independent switches, because they fail differently: the unit
+# symlink is what actually starts sshd, and the /boot marker is what Pi
+# OS's own sshswitch honours if the unit is ever reset.
+mkdir -p "$TARGET/etc/systemd/system/multi-user.target.wants"
+ln -sf /lib/systemd/system/ssh.service \
+	"$TARGET/etc/systemd/system/multi-user.target.wants/ssh.service"
+touch "$TARGET/boot/firmware/ssh" 2>/dev/null || true
+
+# The panel daemon as a real unit. Restart=always because a renderer
+# that dies silently leaves a frozen screen, which reads as a hung
+# instrument rather than a crashed process.
+cat > "$TARGET/etc/systemd/system/mpcpi-daw-ui.service" <<'EOF'
+[Unit]
+Description=MPC-Pi panel renderer (screen R)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mpc-pi/maschine/daw-ui-daemon.py --out /dev/shm/daw-ui --hz 30
+Restart=always
+RestartSec=1
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/mpcpi-daw-ui.service \
+	"$TARGET/etc/systemd/system/multi-user.target.wants/mpcpi-daw-ui.service"
+
+echo "mpc-pi" > "$TARGET/etc/hostname"
+sed -i 's/^127\.0\.1\.1.*/127.0.1.1\tmpc-pi/' "$TARGET/etc/hosts" 2>/dev/null || true
+
+# Put the Pi OS kernel and firmware back into TFTP. `deploy` copies the
+# Buildroot kernel unconditionally, which would hand a Pi OS root a
+# Buildroot kernel on the next boot - a mismatch that only shows up as a
+# board that comes up without its rootfs.
+TFTP="/srv/tftp/mpcpi"
+if [ -d "$TARGET/boot/firmware" ] && [ -d "$TFTP" ]; then
+	cp "$TARGET/boot/firmware"/kernel*.img "$TFTP/" 2>/dev/null || true
+	cp "$TARGET/boot/firmware"/*.dtb "$TFTP/" 2>/dev/null || true
+	[ -d "$TARGET/boot/firmware/overlays" ] &&
+		cp -r "$TARGET/boot/firmware/overlays" "$TFTP/" 2>/dev/null || true
+	echo "  restored the Pi OS kernel into $TFTP"
+fi
+
+# Enabling a unit in the rootfs does nothing to an already-running
+# system, so a board that booted before this ran still has no sshd and
+# needs one power cycle. Only the first one: from then on the reboot is
+# `ssh root@mpc-pi reboot` and iteration needs nobody in the room.
+echo "ssh: root@<pi> with your key; hostname mpc-pi"
+echo "a board already running from before this deploy needs one reboot"
