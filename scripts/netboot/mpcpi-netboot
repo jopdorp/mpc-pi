@@ -23,7 +23,9 @@ SERVER_IP="192.168.7.1"
 SUBNET="192.168.7.0/24"
 DHCP_RANGE="192.168.7.100,192.168.7.200,12h"
 PIDFILE="/run/mpcpi-netboot.pid"
-LOGFILE="/var/log/mpcpi-netboot.log"
+LOGFILE="/srv/tftp/mpcpi-netboot.log"   # world-readable: the
+                                        # whole point is that
+                                        # diagnosis needs no root
 IFACE_FILE="/etc/mpcpi-netboot.iface"
 
 die() { echo "mpcpi-netboot: $*" >&2; exit 1; }
@@ -169,5 +171,20 @@ case "${1:-status}" in
 	start) start ;;
 	stop) stop ;;
 	status) status ;;
-	*) die "usage: mpcpi-netboot start|stop|status" ;;
+	log) tail -n "${2:-40}" "$LOGFILE" 2>/dev/null || echo "no log yet" ;;
+	deploy)
+		# Refresh what the Pi will fetch, without disturbing a running
+		# server: kernel and rootfs change far more often than the
+		# DHCP/TFTP daemon needs restarting.
+		[ "$(id -u)" -eq 0 ] || die "must run as root"
+		cp "$IMAGES/Image" "$TFTP_ROOT/Image" && \
+		cp "$IMAGES/Image" "$TFTP_ROOT/kernel_2712.img" && \
+		cp "$IMAGES"/bcm2712*.dtb "$TFTP_ROOT/" 2>/dev/null
+		[ -d "$IMAGES/rpi-firmware/overlays" ] &&
+			cp -r "$IMAGES/rpi-firmware/overlays" "$TFTP_ROOT/"
+		cp "$REPO/board/rpi5/config.txt" "$TFTP_ROOT/config.txt" 2>/dev/null
+		"$REPO/scripts/netboot/deploy-daw.sh" "$NFS_ROOT" || true
+		echo "redeployed kernel, dtbs, overlays and DAW layer"
+		;;
+	*) die "usage: mpcpi-netboot start|stop|status|log [n]|deploy" ;;
 esac
