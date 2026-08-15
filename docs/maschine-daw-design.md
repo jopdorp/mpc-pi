@@ -464,43 +464,57 @@ track's playlist**, and the playlist spans the whole MPC song because the
 timeline and the sequencer share one hardware clock. Editing a rap vocal
 works exactly as it would on a desktop, driven from the panel:
 
-1. **Get to the syllable** — scrub (SONG page or EDIT's MOVE encoder) or
-   step with the MPC's own STEP/BAR keys, which are already mapped.
-2. **Cut** — SPLIT (Button 5, and also the MPC's printed SHIFT+Pad 4)
-   splits the selected region at the playhead.
-3. **Move** — the MOVE encoder slides the selected region snapped to the
-   grid shown on screen; SHIFT+MOVE is fine (sample-level). The MPC's
-   printed NUDGE ‹ / › (SHIFT+Pads 7/8) nudge by one snap unit.
+1. **Get to the syllable** — scrub with MOVE, or step with the MPC's own
+   STEP/BAR keys, which are already mapped.
+2. **Cut** — SPLIT (Button 5, and the MPC's printed SHIFT+Pad 4) splits
+   the selected region at the playhead.
+3. **Move** — MOVE slides the selected region snapped to the grid;
+   SHIFT+MOVE is sample-fine; the MPC's printed NUDGE ‹ / › nudge by one
+   snap unit.
 4. **Crossfade** — slide a region into its neighbour: Ardour crossfades
-   overlaps natively. The XF IN / XF OUT encoders shape the two fade
-   lengths, drawn as corner diagonals on the blocks, and the overlap zone
-   gets the crossing-diagonals crossfade glyph.
-5. **Level the phrase** — GAIN is per-region gain, so one hot syllable is
-   turned down without touching the track fader.
+   overlaps natively, so the picture and the audio agree. XFADE shapes
+   the fade, drawn as corner diagonals with the crossing-diagonals glyph
+   in the overlap.
+5. **Level the phrase** — GAIN is per-region, so one hot syllable comes
+   down without touching the track fader.
 6. COPY / PASTE / CLEAR / UNDO ride the MPC's printed shift-pad
    functions. The silkscreen on the panel is literally the edit menu.
 
-The snap setting is always on screen (`SNAP 1/16`) because editing
-against an invisible grid is a trap. NAVIGATE opens EDIT; from there
-SELECT+pad drills into one take's WAVE view. Everything the view drives
-is stock Ardour region editing — split, position, fades, gain are all in
-the Lua bindings — so the wiring is command plumbing, not new audio code.
+**Lanes stack and the view zooms.** Three or more lanes at once are
+plain blocks, which is the right density for moving parts around; zoomed
+in to one or two lanes the regions **draw their waveforms**, because
+aligning a syllable is done against the wave, not against a label. ZOOM
+is an encoder, so the same view covers both jobs.
 
-### The mixer, fully specified
+Text is deliberately scarce here: lane tags are two characters in a
+narrow gutter, the selected region's name and the snap setting ride the
+status line, and nothing is written on the audio. Every pixel that is not
+text is lane height.
 
-Eight channels plus master. **Master is always visible in the fourth
-column** — a mixer whose master can scroll out of view fails at the one
-moment it matters — and channels bank through columns 1–3 in threes, with
-bank dots in the status line. At 27px of body height a vertical fader is
-a stub, so each strip is horizontal rows: gain bar with a unity tick and
-a knob block; the meter with a **peak-hold line** and a **clip block that
-latches bright** at the right end; sends A and B as two thin bars
-underneath (A = reverb bus, B = delay bus, pre-wired in the session
-template). The master strip shows L and R meters separately. Buttons:
-MUTE / SOLO / BANK / PIN; the encoder row edits gain, and the button row
-cycles the encoders between gain, send A and send B, Push-style.
+### One geometry for LOOP and MIX
 
-### Plugins: what "opening an effect" means here
+Both pages are the same vertical-strip view through two lenses, because
+a channel and a loop lane are the same object seen from different sides.
+**A channel occupies the same column on both**, so the hand that just
+muted GTR2 on MIX finds GTR2's loop in the same place on LOOP.
+
+All nine strips — eight channels plus master — fit at once at 28px each.
+That beats banking three 62px strips, because on this panel a fader is a
+*readout*, not a touch target: the encoders set gain. The four encoders
+own a moving four-strip focus frame (the bright rule beneath the strips),
+BANK slides it, and the encoder row prints the dB of exactly those four.
+
+What differs between the lenses is only what the columns inside a strip
+mean:
+
+| | MIX | LOOP |
+|---|---|---|
+| Meter column | audio level, peak-hold line, clip block that latches | loop position sweep |
+| Right columns | sends A and B | bars remaining, as a digit |
+| Name row | solo inverts, mute dims | recording inverts bright, overdub dim-fills, armed outlines |
+| Non-lane strips | normal | drawn quiet — they have no loop to show |
+
+### Plugins:### Plugins: what "opening an effect" means here
 
 A plugin's own GUI is an X11 bitmap; it cannot exist on a 255x64 5-bpp
 panel, and no hardware controller ships one — Push, Elektron and

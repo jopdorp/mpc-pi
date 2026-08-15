@@ -185,146 +185,113 @@ def column_divider(f, i, top=BODY_Y):
 
 
 def page_loop(f, st):
-    draw_header(f, st)
-    encoders = []
-    for i, lane in enumerate(st["lanes"][:COLS]):
-        x = COL_X[i]
-        column_divider(f, i)
-        state = lane.get("state", "empty")
-        name = lane.get("name", "-")[:6]
-
-        if state == "empty":
-            f.text_center(x, COL_W, BODY_Y + 1, name, DIM)
-            f.text_center(x, COL_W, BODY_Y + 14, "EMPTY", DIM)
-            encoders.append(None)
-            continue
-
-        # 62px fits the name and the state word on one row, so the state
-        # is written as well as shown - fill carries it at a glance, the
-        # word removes any doubt on a second look.
-        word = {"rec": "REC", "dub": "DUB", "armed": "ARM",
-                "play": "PLAY"}.get(state, "")
-        if state == "rec":
-            f.fill(x, BODY_Y, COL_W, GLYPH_H + 3, BRIGHT)
-            f.text(x + 3, BODY_Y + 1, name, OFF)
-            f.text_right(x + COL_W - 3, BODY_Y + 1, word, OFF)
-        elif state == "dub":
-            f.fill(x, BODY_Y, COL_W, GLYPH_H + 3, MUTED)
-            f.text(x + 3, BODY_Y + 1, name, OFF)
-            f.text_right(x + COL_W - 3, BODY_Y + 1, word, OFF)
-        elif state == "armed":
-            f.rect(x, BODY_Y, COL_W, GLYPH_H + 3, NORMAL)
-            f.text(x + 3, BODY_Y + 1, name, NORMAL)
-            f.text_right(x + COL_W - 3, BODY_Y + 1, word, NORMAL)
-        else:
-            f.text(x + 3, BODY_Y + 1, name, NORMAL)
-            f.text_right(x + COL_W - 3, BODY_Y + 1, word, MUTED)
-
-        # The sweep is the primary channel and is never blanked while
-        # recording; the ticks below answer the separate "where in the
-        # bar" question that BOSS gives a whole second ring.
-        bars = lane.get("bars", 0)
-        bar = lane.get("bar", 0)
-        phase = lane.get("phase", 0.0)
-        progress = (bar + phase) / bars if bars else 0.0
-        f.meter(x + 2, BODY_Y + 12, COL_W - 4, 5, progress,
-                BRIGHT if state in ("rec", "dub") else NORMAL)
-        f.progress_ticks(x + 2, BODY_Y + 18, COL_W - 4, bars, bar)
-
-        remain = lane.get("bars_remaining")
-        if remain is not None:
-            # 62px is ten characters; "4 OF 4 BARS" is eleven and bled
-            # into the next column.
-            f.text_center(x, COL_W, BODY_Y + 21,
-                          "BAR %d/%d" % (bar + 1, bars), MUTED)
-        else:
-            f.text_center(x, COL_W, BODY_Y + 21, "WAITING", MUTED)
-
-        encoders.append({"norm": lane.get("level", 0.0),
-                         "level": BRIGHT if state in ("rec", "dub") else MUTED,
-                         "text": name})
-
-    draw_encoder_bar(f, st, encoders)
+    _strips_view(f, st, "LOOP")
 
 
 # --- MIX -------------------------------------------------------------
 
 
-def page_mix(f, st):
-    """Eight channels plus master. Master is ALWAYS visible in the last
-    column - a mixer whose master can scroll out of view fails at the one
-    moment it matters - so channels bank through columns 1-3 in threes.
+def _strips_view(f, st, lens):
+    """The shared vertical-strip view behind both MIX and LOOP.
 
-    At 27px of body height a vertical fader is a stub, so gain and meter
-    are horizontal, stacked: gain bar with a unity tick, then the meter
-    with a peak-hold line and a clip block at the right end that latches
-    bright. Sends A/B are the two thin bars underneath.
+    One geometry, two lenses: a channel occupies the same column on both
+    pages, so the hand that just muted GTR2 on MIX finds GTR2's loop in
+    the same place on LOOP. What changes per lens is only the meaning of
+    the columns inside a strip: MIX shows the audio meter with peak and
+    clip plus the two send bars; LOOP swaps the meter for the loop
+    position sweep and a bars-remaining digit, and strips that are not
+    loop lanes go quiet instead of pretending.
     """
     draw_header(f, st)
-    bank = st.get("bank", 0)
-    strips = st["mixer"][bank * 3:bank * 3 + 3]
+    strips = list(st["mixer"][:8])
     master = st.get("master", {"name": "MSTR"})
-    encoders = []
+    lanes = {l.get("name"): l for l in st.get("lanes", [])}
+    n = len(strips) + 1
+    sw = 255 // n
+    focus = st.get("focus_bank", 0) * 4
 
-    def strip(x, ch, is_master=False):
-        name = ch.get("name", "-")[:6]
-        db = ch.get("db", "")
-        if ch.get("solo") or is_master:
-            f.fill(x, BODY_Y, COL_W, GLYPH_H + 3, BRIGHT)
-            f.text(x + 3, BODY_Y + 1, name, OFF)
-            f.text_right(x + COL_W - 3, BODY_Y + 1, db, OFF)
+    top = BODY_Y + 9
+    bot = ENCBAR_Y - 4
+    travel = bot - top - 2
+
+    def vmeter(mx, level, peak, clip, ink=NORMAL):
+        f.fill(mx, top, 3, travel + 2, OFF)
+        f.vline(mx - 1, top, travel + 2, DIM)
+        f.vline(mx + 3, top, travel + 2, DIM)
+        lit = int(level * travel)
+        if lit:
+            f.fill(mx, top + travel + 1 - lit, 3, lit, ink)
+        if peak:
+            f.hline(mx, top + travel + 1 - int(peak * travel), 3, BRIGHT)
+        if clip:
+            f.fill(mx, top - 3, 3, 2, BRIGHT)
+
+    def strip(i, x, ch, is_master=False):
+        lane = lanes.get(ch.get("name"))
+        state = lane.get("state") if lane else None
+        name = ch.get("name", "-")[:4]
+
+        if is_master or ch.get("solo") or state == "rec":
+            f.fill(x, BODY_Y, sw - 2, GLYPH_H + 2, BRIGHT)
+            f.text_center(x, sw - 2, BODY_Y + 1, name, OFF)
+        elif state == "dub":
+            f.fill(x, BODY_Y, sw - 2, GLYPH_H + 2, MUTED)
+            f.text_center(x, sw - 2, BODY_Y + 1, name, OFF)
+        elif state == "armed":
+            f.rect(x, BODY_Y, sw - 2, GLYPH_H + 2, NORMAL)
+            f.text_center(x, sw - 2, BODY_Y + 1, name, NORMAL)
         else:
-            ink = DIM if ch.get("mute") else NORMAL
-            f.text(x + 3, BODY_Y + 1, name, ink)
-            f.text_right(x + COL_W - 3, BODY_Y + 1, db, MUTED)
+            quiet = (lens == "LOOP" and not is_master and lane is None)
+            f.text_center(x, sw - 2, BODY_Y + 1, name,
+                          DIM if (ch.get("mute") or quiet) else NORMAL)
 
-        # gain: track + knob + unity tick
-        gy = BODY_Y + 12
-        f.hline(x + 2, gy + 1, COL_W - 4, DIM)
-        ux = x + 2 + int((COL_W - 4) * 0.75)
-        f.vline(ux, gy - 1, 5, DIM)
-        kx = x + 2 + int(ch.get("gain", 0.8) * (COL_W - 7))
-        f.fill(kx, gy - 1, 3, 5, BRIGHT)
+        fx_ = x + 4
+        f.vline(fx_, top, travel + 2, DIM)
+        f.hline(fx_ - 2, top + int(travel * 0.25), 5, DIM)
+        ky = top + int((1.0 - ch.get("gain", 0.8)) * travel)
+        f.fill(fx_ - 3, ky, 7, 3, BRIGHT)
 
-        # meter: fill + peak line + clip latch
-        my = BODY_Y + 18
         if is_master:
-            for j, side in enumerate(("l", "r")):
-                yy = my + j * 4
-                f.fill(x + 2, yy, COL_W - 8, 3, DIM)
-                lv = ch.get("level_%s" % side, ch.get("level", 0.0))
-                f.fill(x + 2, yy, int(lv * (COL_W - 8)), 3, BRIGHT)
-                pk = ch.get("peak_%s" % side, 0.0)
-                if pk:
-                    f.vline(x + 2 + int(pk * (COL_W - 9)), yy, 3, BRIGHT)
+            vmeter(x + 12, master.get("level_l", 0.0),
+                   master.get("peak_l", 0.0), master.get("clip"))
+            vmeter(x + 18, master.get("level_r", 0.0),
+                   master.get("peak_r", 0.0), False)
+        elif lens == "LOOP":
+            if lane:
+                bars = lane.get("bars", 0)
+                pos = ((lane.get("bar", 0) + lane.get("phase", 0.0)) / bars
+                       if bars else 0.0)
+                vmeter(x + 12, pos, 0.0, False,
+                       BRIGHT if state in ("rec", "dub") else NORMAL)
+                remain = lane.get("bars_remaining")
+                if remain is not None:
+                    f.text(x + 19, top + 1, str(remain)[:1], BRIGHT)
         else:
-            f.fill(x + 2, my, COL_W - 8, 4, DIM)
-            f.fill(x + 2, my, int(ch.get("level", 0.0) * (COL_W - 8)), 4,
-                   BRIGHT)
-            pk = ch.get("peak", 0.0)
-            if pk:
-                f.vline(x + 2 + int(pk * (COL_W - 9)), my, 4, BRIGHT)
-        if ch.get("clip"):
-            f.fill(x + COL_W - 5, my, 3, 4 if not is_master else 7, BRIGHT)
-
-        # sends A/B, master shows none
-        if not is_master:
-            sy = my + 6
-            half = (COL_W - 8) // 2
+            vmeter(x + 12, ch.get("level", 0.0), ch.get("peak", 0.0),
+                   ch.get("clip"))
             for j, key in enumerate(("send_a", "send_b")):
-                sx = x + 2 + j * (half + 4)
-                f.fill(sx, sy, half, 2, DIM)
-                f.fill(sx, sy, int(ch.get(key, 0.0) * half), 2, MUTED)
+                sx = x + 19 + j * 4
+                f.vline(sx, top, travel + 2, DIM)
+                lit = int(ch.get(key, 0.0) * travel)
+                if lit:
+                    f.fill(sx, top + travel + 1 - lit, 2, lit, MUTED)
 
-        encoders.append({"norm": ch.get("gain", 0.0), "level": NORMAL,
-                         "text": db or name})
+        if not is_master and focus <= i < focus + 4:
+            f.hline(x, bot + 2, sw - 2, BRIGHT)
 
     for i, ch in enumerate(strips):
-        column_divider(f, i)
-        strip(COL_X[i], ch)
-    column_divider(f, 3)
-    strip(COL_X[3], master, is_master=True)
-    draw_encoder_bar(f, st, encoders)
+        strip(i, 1 + i * sw, ch)
+    strip(8, 1 + 8 * sw, master, is_master=True)
+
+    focused = strips[focus:focus + 4]
+    draw_encoder_bar(f, st, [
+        {"norm": ch.get("gain", 0.0), "level": NORMAL,
+         "text": "%s %s" % (ch.get("name", "")[:4], ch.get("db", ""))}
+        for ch in focused])
+
+
+def page_mix(f, st):
+    _strips_view(f, st, "MIX")
 
 
 # --- FX --------------------------------------------------------------
@@ -638,93 +605,121 @@ def page_wave(f, st):
 
 
 def page_edit(f, st):
-    """One track's regions across the timeline: the rap-edit view.
+    """The arrangement editor: stacked lanes, zoomable in and out.
 
-    The workflow this serves: scrub to a syllable, SPLIT at the playhead,
-    nudge the pieces, overlap the boundary and shape the crossfade. Split,
-    nudge, copy, paste, clear and undo ride the MPC's own printed
-    shift-pad functions, so the panel silkscreen stays true; the encoders
-    carry what must be continuous - MOVE, the two fade lengths, gain.
-
-    Regions are blocks with their fades drawn as corner diagonals; where
-    two regions overlap, the overlap zone gets the crossing diagonals of
-    the classic crossfade glyph. The snap setting is always on screen:
-    editing against an invisible grid is a trap.
+    Zoomed out, three or more lanes stack as plain blocks for moving
+    parts around; zoomed in to one or two lanes, the regions draw their
+    waveforms, because aligning a syllable is done against the wave, not
+    against a label. Text follows the same rule: lane tags live in a
+    narrow gutter, and only the selected region's name is written, in the
+    context row rather than on the audio.
     """
     draw_header(f, st)
     ed = st.get("edit", {})
-    regions = ed.get("regions", [])
+    lanes = ed.get("lanes", [])
     win0, win1 = ed.get("window", (0.0, 8.0))
     span = max(0.001, win1 - win0)
+    show = max(1, min(len(lanes), ed.get("zoom_lanes", len(lanes))))
+    first = max(0, min(ed.get("first_lane", 0), len(lanes) - show))
 
-    sel = next((r for r in regions if r.get("sel")), None)
-    f.text(3, BODY_Y, ed.get("track", "-")[:5], BRIGHT)
-    if sel:
-        f.text(42, BODY_Y, sel.get("name", "-")[:10], NORMAL)
-        f.text(110, BODY_Y, ed.get("sel_pos", ""), MUTED)
-    f.text_right(254, BODY_Y, "SNAP %s" % ed.get("snap", "1/16"), MUTED)
+    sel = None
+    for ln in lanes:
+        for r in ln.get("regions", []):
+            if r.get("sel"):
+                sel = r
+    # No text row inside the page: the selected region's name and the
+    # snap setting ride the status line, and every reclaimed pixel goes
+    # to lane height - the waveform is the alignment tool, not labels.
+    st.setdefault("message",
+                  "%s  SNAP %s" % ((sel.get("name", "") if sel else ""),
+                                   ed.get("snap", "1/16")))
+
+    GUTTER = 14
 
     def tx(bar):
-        return 1 + int((bar - win0) / span * 252)
+        return GUTTER + int((bar - win0) / span * (253 - GUTTER))
 
-    # bar ruler: a tick per bar, a taller one every four
-    ry = BODY_Y + 10
+    ry = BODY_Y
     bar = int(win0)
     while bar <= win1:
         x = tx(bar)
-        if 1 <= x <= 253:
+        if GUTTER <= x <= 253:
             f.vline(x, ry, 3 if bar % 4 == 0 else 2,
                     NORMAL if bar % 4 == 0 else DIM)
-        bar += 1
+        bar += int(max(1, span // 16))
 
-    top, bot = BODY_Y + 14, ENCBAR_Y - 4
-    h = bot - top
+    area_top, area_bot = BODY_Y + 5, ENCBAR_Y - 3
+    lane_h = (area_bot - area_top - (show - 1)) // show
+    draw_waves = show <= 2 and lane_h >= 10
 
-    # regions, unselected first so the selected one draws over overlaps
-    for r in sorted(regions, key=lambda r: bool(r.get("sel"))):
-        x0, x1 = tx(r["start"]), tx(r["start"] + r["len"])
-        x0c, x1c = max(1, x0), min(253, x1)
-        if x1c <= x0c:
-            continue
-        selr = r.get("sel")
-        f.fill(x0c, top, x1c - x0c, h, MUTED if selr else DIM)
-        f.rect(x0c, top, x1c - x0c, h, BRIGHT if selr else NORMAL)
-        # fades as corner diagonals, in bars of timeline like the data
-        fi = tx(r["start"] + r.get("fade_in", 0.0)) - x0
-        fo = x1 - tx(r["start"] + r["len"] - r.get("fade_out", 0.0))
-        for i in range(min(fi, x1c - x0c)):
-            y = bot - 1 - int(i / max(1, fi) * (h - 2))
-            f.point(x0 + i, y, BRIGHT if selr else NORMAL)
-        for i in range(min(fo, x1c - x0c)):
-            y = bot - 1 - int(i / max(1, fo) * (h - 2))
-            f.point(x1 - i, y, BRIGHT if selr else NORMAL)
-        if x1c - x0c > 14:
-            f.text(x0c + 3, top + 3, r.get("name", "")[:max(1, (x1c - x0c - 6) // 6)],
-                   OFF if selr else MUTED)
+    for li in range(show):
+        lane = lanes[first + li]
+        top = area_top + li * (lane_h + 1)
+        bot = top + lane_h
+        mid = (top + bot) // 2
+        # lane tag in the gutter: two characters, no more text than that
+        f.text(1, top + (lane_h - GLYPH_H) // 2, lane.get("tag", "?")[:2],
+               BRIGHT if lane.get("sel") else DIM)
+        f.hline(GUTTER - 3, mid, 2, DIM)
 
-    # crossfade glyph where consecutive regions overlap
-    ordered = sorted(regions, key=lambda r: r["start"])
-    for a, b in zip(ordered, ordered[1:]):
-        oa, ob = tx(b["start"]), tx(a["start"] + a["len"])
-        if ob > oa:
-            w = ob - oa
-            for i in range(w):
-                y1 = bot - 1 - int(i / max(1, w - 1) * (h - 2))
-                y2 = top + 1 + int(i / max(1, w - 1) * (h - 2))
-                f.point(oa + i, y1, BRIGHT)
-                f.point(oa + i, y2, BRIGHT)
+        ordered = sorted(lane.get("regions", []), key=lambda r: r["start"])
+        for r in ordered:
+            x0, x1 = tx(r["start"]), tx(r["start"] + r["len"])
+            x0c, x1c = max(GUTTER, x0), min(253, x1)
+            if x1c <= x0c:
+                continue
+            selr = r.get("sel")
+            if draw_waves:
+                f.rect(x0c, top, x1c - x0c, lane_h,
+                       BRIGHT if selr else DIM)
+                peaks = r.get("peaks")
+                half = (lane_h - 4) // 2
+                for px in range(x0c + 1, x1c - 1):
+                    pos = (px - x0) / max(1, x1 - x0)
+                    if peaks:
+                        amp = peaks[min(len(peaks) - 1,
+                                        int(pos * len(peaks)))]
+                    else:
+                        amp = 0.3
+                    hh = max(1, int(amp * half))
+                    f.vline(px, mid - hh, hh * 2,
+                            NORMAL if selr else MUTED)
+            else:
+                f.fill(x0c, top, x1c - x0c, lane_h,
+                       MUTED if selr else DIM)
+                if selr:
+                    f.rect(x0c, top, x1c - x0c, lane_h, BRIGHT)
+            # fades as corner diagonals at any zoom
+            fi = tx(r["start"] + r.get("fade_in", 0.0)) - x0
+            fo = x1 - tx(r["start"] + r["len"] - r.get("fade_out", 0.0))
+            for i in range(min(fi, x1c - x0c)):
+                y = bot - 1 - int(i / max(1, fi) * (lane_h - 2))
+                f.point(x0 + i, y, BRIGHT if selr else NORMAL)
+            for i in range(min(fo, x1c - x0c)):
+                y = bot - 1 - int(i / max(1, fo) * (lane_h - 2))
+                f.point(x1 - i, y, BRIGHT if selr else NORMAL)
+
+        for a, b in zip(ordered, ordered[1:]):
+            oa, ob = tx(b["start"]), tx(a["start"] + a["len"])
+            if ob > oa:
+                w = ob - oa
+                for i in range(w):
+                    y1 = bot - 1 - int(i / max(1, w - 1) * (lane_h - 2))
+                    y2 = top + 1 + int(i / max(1, w - 1) * (lane_h - 2))
+                    f.point(oa + i, y1, BRIGHT)
+                    f.point(oa + i, y2, BRIGHT)
 
     ph = ed.get("playhead")
     if ph is not None and win0 <= ph <= win1:
-        f.vline(tx(ph), ry, bot - ry, BRIGHT)
+        f.vline(tx(ph), ry, area_bot - ry, BRIGHT)
 
     g = sel.get("gain", 1.0) if sel else 1.0
+    zoom_norm = 1.0 - min(1.0, span / 32.0)
     draw_encoder_bar(f, st, [
         {"norm": ed.get("move_norm", 0.5), "level": NORMAL, "text": "MOVE"},
-        {"norm": (sel.get("fade_in", 0.0) / 2.0) if sel else 0, "level": NORMAL,
-         "text": "XF IN"},
-        {"norm": (sel.get("fade_out", 0.0) / 2.0) if sel else 0, "level": NORMAL,
-         "text": "XF OUT"},
+        {"norm": zoom_norm, "level": NORMAL, "text": "ZOOM"},
+        {"norm": (sel.get("fade_out", 0.0) / 2.0) if sel else 0,
+         "level": NORMAL, "text": "XFADE"},
         {"norm": min(1.0, g / 2.0), "level": NORMAL, "text": "GAIN"},
     ])
 
@@ -783,18 +778,38 @@ def sample_state(page):
                   * (0.35 + 0.65 * _m.exp(-i / 160.0)) + 0.04
                   for i in range(252)],
     }
+    import math as _m2
+    def _pk(seed, n=64):
+        return [abs(_m2.sin(i * 0.55 + seed)) *
+                _m2.exp(-((i * 7 + seed * 13) % n) / (n * 0.8)) + 0.08
+                for i in range(n)]
     st["edit"] = {
-        "track": "VOX", "snap": "1/16", "playhead": 3.25,
-        "window": (0.0, 8.0), "sel_pos": "BAR 2.3",
-        "regions": [
-            {"name": "VERSE A", "start": 0.0, "len": 1.9,
-             "fade_in": 0.05, "fade_out": 0.3},
-            {"name": "FIX", "start": 2.1, "len": 1.2, "sel": True,
-             "fade_in": 0.25, "fade_out": 0.25, "gain": 1.1},
-            {"name": "VERSE B", "start": 3.1, "len": 2.4,
-             "fade_in": 0.3, "fade_out": 0.1},
-            {"name": "TAG", "start": 6.0, "len": 1.5,
-             "fade_in": 0.05, "fade_out": 0.05},
+        "snap": "1/16", "playhead": 3.25, "window": (0.0, 8.0),
+        "zoom_lanes": 3, "first_lane": 0,
+        "lanes": [
+            {"tag": "VX", "sel": True, "regions": [
+                {"name": "VERSE A", "start": 0.0, "len": 1.9,
+                 "fade_in": 0.05, "fade_out": 0.3, "peaks": _pk(1)},
+                {"name": "FIX", "start": 2.1, "len": 1.2, "sel": True,
+                 "fade_in": 0.25, "fade_out": 0.25, "gain": 1.1,
+                 "peaks": _pk(2)},
+                {"name": "VERSE B", "start": 3.1, "len": 2.4,
+                 "fade_in": 0.3, "fade_out": 0.1, "peaks": _pk(3)},
+                {"name": "TAG", "start": 6.0, "len": 1.5,
+                 "fade_in": 0.05, "fade_out": 0.05, "peaks": _pk(4)},
+            ]},
+            {"tag": "G1", "regions": [
+                {"name": "GTR", "start": 0.0, "len": 4.0,
+                 "fade_in": 0.1, "fade_out": 0.1, "peaks": _pk(5)},
+                {"name": "GTR2", "start": 4.0, "len": 4.0,
+                 "fade_in": 0.1, "fade_out": 0.1, "peaks": _pk(6)},
+            ]},
+            {"tag": "MI", "regions": [
+                {"name": "HOOK", "start": 1.0, "len": 2.0,
+                 "fade_in": 0.1, "fade_out": 0.4, "peaks": _pk(7)},
+                {"name": "HOOK2", "start": 2.7, "len": 2.0,
+                 "fade_in": 0.4, "fade_out": 0.1, "peaks": _pk(8)},
+            ]},
         ],
     }
     st["master"] = {"name": "MSTR", "db": "0.0", "gain": 0.85,
@@ -810,7 +825,7 @@ def sample_state(page):
         {"db": "-18.0", "send_a": 0.0, "send_b": 0.0, "name": "VERB", "gain": 0.40, "level": 0.20, "peak": 0.25},
         {"db": "-20.0", "send_a": 0.0, "send_b": 0.0, "name": "DLY", "gain": 0.35, "level": 0.10, "peak": 0.18,
          "mute": True},
-        {"db": "0.0", "send_a": 0.0, "send_b": 0.0, "name": "MSTR", "gain": 0.85, "level": 0.70, "peak": 0.80},
+        {"db": "-9.0", "send_a": 0.1, "send_b": 0.35, "name": "AUX", "gain": 0.6, "level": 0.25, "peak": 0.33},
     ]
     st["fx"] = {
         "track": "GTR1", "kind": "eq", "slot": 0, "focus": 1,
