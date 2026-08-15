@@ -472,6 +472,63 @@ Circuit/Launchpad, BOSS RC-505mkII/RC-600 and the HeadRush Looperboard:
    MIX they read MUTE and invert when engaged; on FX they navigate the
    chain, because the encoders already own the parameters.
 
+### Control map
+
+`scripts/maschine/control_map.py` holds it as data (`python3
+control_map.py` prints it). The design position is that **the MPC keeps
+its identity**: transport, pads and banks map straight onto their MPC
+equivalents, and the DAW is reached through a mode rather than by
+stealing controls.
+
+| Control | Plain | With SHIFT |
+|---|---|---|
+| PLAY / REC / ERASE / RESTART | MPC play, record, erase, play-start | play-start, overdub, undo, go-to |
+| STEP ◀ ▶ | MPC step left/right | bar left/right |
+| GRID | MPC 16 Levels | Full Level |
+| Group A–D | MPC pad banks A–D | — |
+| Group E–H | DAW page: LOOP, MIX, FX, SONG | — |
+| Buttons 1–4 (left screen) | MPC soft keys F1–F4 | F5, F6, —, PIN |
+| Buttons 5–8 (right screen) | contextual, labelled on screen | — |
+| Knobs 1–4 (left screen) | MPC data wheel, note variation, rec gain, main volume | fine |
+| Knobs 5–8 (right screen) | per page: lane level, gain, plugin parameter, scrub | fine |
+| Pads | MPC pads (bank-switched) | the MPC's own printed pad functions: undo, redo, quantize, copy, paste, semitone/octave |
+
+Two places the hardware cannot match the MPC one-for-one, both resolved
+explicitly rather than silently:
+
+- The MPC has **six** soft keys under its LCD but only **four** buttons
+  sit above that screen, so F5 and F6 move onto SHIFT.
+- MK1's pad LEDs are single-colour with brightness only, so pad state
+  cannot use hue the way every grid controller does. It is carried by
+  brightness and by the on-screen pad map instead.
+
+### Modes and the pad map
+
+Modes are **momentary by default and latched only by an explicit,
+labelled gesture** — hold the mode button and press Button 1, which the
+screen labels PIN. That is Maschine's own idiom, and it matters because a
+held mode cannot be forgotten (the muscular effort is the reminder)
+whereas a latched one is a mode error waiting for the moment attention
+goes to the music.
+
+| Mode | Pads |
+|---|---|
+| MPC (default) | the MPC's own 4x4, banked by Group A–D |
+| LOOP | four columns of four: column = lane, rows are REC / PLAY / STOP / CLEAR |
+| MUTE | pad mutes its lane |
+
+Holding PAD MODE draws the **4×4 pad map** over the current page and
+releasing reverts it. It is an overlay rather than a page precisely
+because holding to preview is what stops a performer getting lost. Its
+columns are lanes — the same arrangement as the four screen columns above
+and as Akai's own Clip programs — so "column = lane" is simultaneously
+true on the pads, on the screen and in the MPC's idiom.
+
+The map draws three genuinely distinct pad states: filled = active,
+outlined = available, a thin rule = unavailable. Ableton's own manual
+documents the ambiguity this avoids — an inert pad and an empty pad
+looking identical.
+
 ### Pages
 
 | Page | Body | Encoders | Buttons |

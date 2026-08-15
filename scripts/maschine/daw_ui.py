@@ -321,6 +321,48 @@ def page_song(f, st):
     draw_encoder_bar(f, st, [None] * COLS)
 
 
+def draw_pad_overlay(f, st):
+    """The 4x4 pad map, drawn over the page while PAD MODE is held.
+
+    This is the single most direct answer to "what do my pads do right
+    now", and it is an overlay rather than a page because holding a mode
+    button to preview it - and reverting on release - is what keeps a
+    performer from getting lost. A held mode cannot be forgotten; the
+    muscular effort is the reminder.
+
+    Columns are lanes, matching both the four screen columns above and
+    the MPC's own Clip-program convention, so "column = lane" is true on
+    the pads, on the screen and in the MPC idiom at the same time.
+    """
+    pads = st.get("pads", {})
+    rows = pads.get("rows", ("REC", "PLAY", "STOP", "CLEAR"))
+    grid = pads.get("grid", [[0] * COLS for _ in rows])
+
+    # Opaque, not translucent. A first attempt dimmed the page and drew
+    # the grid over it; the two layers landed on the same rows and the
+    # result was illegible. What makes this a peek is that it is
+    # momentary - held, not entered - not that you can see through it.
+    f.fill(0, BTNBAR_H + 1, f.w, f.h - BTNBAR_H - 1, OFF)
+
+    gutter = 34
+    cell_w = (f.w - gutter - 4) // COLS
+    f.text(2, HEADER_Y + 1, "PADS", BRIGHT)
+    f.text(34, HEADER_Y + 1, pads.get("mode", "")[:24], MUTED)
+
+    for r, label in enumerate(rows[:4]):
+        y = BODY_Y + 2 + r * 9
+        f.text(2, y, label[:5], MUTED)
+        for c in range(COLS):
+            x = gutter + c * cell_w
+            state = grid[r][c] if r < len(grid) and c < len(grid[r]) else 0
+            if state == 2:        # active
+                f.fill(x, y, cell_w - 3, 6, BRIGHT)
+            elif state == 1:      # available
+                f.rect(x, y, cell_w - 3, 6, NORMAL)
+            else:                 # unavailable - visibly a third state,
+                f.hline(x, y + 5, cell_w - 3, DIM)   # not just dimmer
+
+
 RENDERERS = {"LOOP": page_loop, "MIX": page_mix, "FX": page_fx,
              "SONG": page_song}
 
@@ -328,6 +370,8 @@ RENDERERS = {"LOOP": page_loop, "MIX": page_mix, "FX": page_fx,
 def render(st):
     f = Frame()
     RENDERERS[st["page"]](f, st)
+    if st.get("pad_overlay"):
+        draw_pad_overlay(f, st)
     return f
 
 
@@ -355,6 +399,15 @@ def sample_state(page):
         {"name": "L7", "state": "empty"},
         {"name": "L8", "state": "empty"},
     ]
+    st["pads"] = {
+        "mode": "LOOP - COLUMN IS LANE",
+        "rows": ("REC", "PLAY", "STOP", "CLEAR"),
+        # 0 unavailable, 1 available, 2 active
+        "grid": [[1, 2, 1, 1],
+                 [2, 1, 2, 2],
+                 [1, 1, 1, 1],
+                 [0, 1, 0, 0]],
+    }
     st["mixer"] = [
         {"name": "MPC", "gain": 0.80, "level": 0.62, "peak": 0.71},
         {"name": "GTR1", "gain": 0.65, "level": 0.44, "peak": 0.52},
