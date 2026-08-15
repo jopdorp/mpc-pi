@@ -198,6 +198,46 @@ case "${1:-status}" in
 	stop) stop ;;
 	status) status ;;
 	log) tail -n "${2:-40}" "$LOGFILE" 2>/dev/null || echo "no log yet" ;;
+	sniff)
+		# Capture on the netboot link and summarise who is talking.
+		#
+		# The DHCP log answers "did the Pi ask for an address"; it cannot
+		# answer "is the Pi sending anything at all". When a board links
+		# up at 1Gb but never appears in the lease log, the difference
+		# between a silent PHY and a bootloader speaking some other
+		# protocol is the whole diagnosis, and only a capture shows it.
+		#
+		# Capture is read-only, bounded by a duration, and confined to
+		# the netboot interface, so it is safe behind a passwordless
+		# rule: it can see nothing but the cable to the Pi.
+		[ "$(id -u)" -eq 0 ] || die "must run as root"
+		[ -n "$IFACE" ] || die "no interface with a carrier"
+		command -v tcpdump >/dev/null || die "tcpdump not installed"
+		secs="${2:-20}"
+		case "$secs" in *[!0-9]*) die "sniff <seconds>" ;; esac
+		pcap="/srv/tftp/mpcpi-link.pcap"
+		echo "capturing ${secs}s on $IFACE ..."
+		timeout $((secs + 3)) tcpdump -i "$IFACE" -n -s 256 -c 2000 \
+			-G "$secs" -W 1 -w "$pcap" >/dev/null 2>&1
+		chmod 644 "$pcap" 2>/dev/null
+		n=$(tcpdump -r "$pcap" -n 2>/dev/null | wc -l)
+		echo "packets: $n  ($pcap)"
+		[ "$n" -eq 0 ] && {
+			echo "the link is silent: the board sent nothing at all,"
+			echo "so it is not attempting any boot over this cable."
+			exit 0
+		}
+		echo "-- source MACs --"
+		tcpdump -r "$pcap" -n -e 2>/dev/null |
+			grep -oE '^[0-9:.]+ [0-9a-f:]{17}' |
+			awk '{print $2}' | sort | uniq -c | sort -rn | head -8
+		echo "-- protocols --"
+		tcpdump -r "$pcap" -n 2>/dev/null |
+			awk '{for(i=1;i<=NF;i++) if($i ~ /^(ARP|BOOTP\/DHCP|ICMP6?|UDP|TCP|IP6?)$/){print $i; break}}' |
+			sort | uniq -c | sort -rn | head -8
+		echo "-- first lines --"
+		tcpdump -r "$pcap" -n 2>/dev/null | head -12
+		;;
 	root)
 		# Switch which rootfs is served. Fixed set of values, so this
 		# stays safe to expose through a passwordless rule.
