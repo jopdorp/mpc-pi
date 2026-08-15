@@ -92,38 +92,50 @@ glue for ARM64) is not paid until something forces it.
 
 ## Live looping design
 
-Ardour's cue grid is the loop engine. One Ardour track per loop lane
-(GTR1-L, GTR2-L, MIC-L, AUX-L), 8 slots per lane, launch quantization set to
-1 bar, follow-action loop.
+**Phase 3 falsified the cue-grid plan.** Ardour's TriggerBox has *no*
+headless control path: zero Lua bindings (verified in the installed binary
+and upstream `luabindings.cc`), and the OSC surface only exposes
+`/trigger_bang`, `/trigger_unbang`, `/trigger_stop`, `/trigger_stop_all`,
+`/trigger_cue_row` — playback of already-filled slots, no record-arm, no
+region-into-slot. Slot recording is driven only by the GUI and the C++
+grid surfaces (Launchpad etc.). Patching the OSC surface stays possible
+later, but the loop engine cannot depend on it.
+
+The loop engine is therefore built from what is fully Lua-bound and already
+proven: normal tracks, recording under external sync, playlists, and region
+placement. Each loop lane is a **track pair** (L base, L+ overdub); the
+transport rolls linearly, slaved to the MPC clock, and "looping" is the
+daw-ctl daemon laying the captured region repeatedly ahead of the playhead
+on the timeline.
 
 ```text
-             A     B     C     D   ...
-GTR1-L      [●]   [▶]   [ ]   [ ]      ● record-armed slot
-GTR2-L      [▶]   [▶]   [ ]   [ ]      ▶ playing
-MIC-L       [ ]   [●]   [ ]   [ ]
-AUX-L       [▶]   [ ]   [ ]   [ ]
+timeline ──────────────────────────────────────▶
+GTR1-L    [rec●][r][r][r][r][r][r]...        base layer, duplicated ahead
+GTR1-L+           [rec●][o][o][o]...         overdub layer
+MIC-L                   [rec●][r][r]...
 ```
 
 | Requirement | Mechanism |
 |---|---|
-| Arm / record / quantized start-end / play | Native cue recording, length in bars |
-| Stop, start, mute, launch | `/trigger_bang`, `/trigger_unbang`, slot isolate |
-| Scenes | Cue rows; one bang launches the row |
-| Replace | Re-record the slot |
-| Duplicate | Lua: copy region to another slot |
-| **Overdub** | **Layer pairs**: each lane is two Ardour tracks (L, L+). Overdub records into the paired track's same slot while the base keeps looping; both play together. Undo = clear the top layer. Deeper stacks bounce L+L+ into L (Lua region combine) and free the overdub lane |
+| Arm / record / quantized start-end | daw-ctl arms the track and starts/stops capture on MPC bar boundaries (bar position derived from counted MIDI clocks) |
+| Loop playback | `playlist:add_region(region, pos, times)` lays N repetitions ahead of the playhead; daw-ctl tops up before the playhead catches up |
+| Stop / mute lane | stop topping up (region row simply ends), or `mute_control` on the lane |
+| Scenes | a scene is a set of lanes topping up vs. ended; daw-ctl state, regions in session |
+| Replace | re-record; new region replaces in the top-up schedule |
+| **Overdub** | **Layer pairs**: record into L+ while L's repetitions play; both audible. Undo = remove L+'s regions. Deeper stacks bounce L+L+ into L (Lua region combine) and free the overdub lane |
 | Undo/redo | Layer discard for overdubs; Ardour undo for everything else |
 | Tempo lock | Ardour transport slaved to MPC clock (below) |
-| Persistence | Slots are ordinary regions in the session — saved with it |
-| **Arrangement integration** | The same regions are dragged to the timeline by Lua (`playlist:add_region`) — no export/import, no second audio model |
+| Persistence | Loops are ordinary regions on the timeline — saved with the session |
+| **Arrangement integration** | There is no separate loop store at all: the performance *is* the arrangement, exactly as played, region by region |
 | Record the live performance | The master or a bus records to a normal track while performing |
 
-The layer-pair design is the one place we add looper logic on top of Ardour,
-and it stays inside Ardour's own object model: every layer is a normal region
-on a normal track, so arrangement, saving, undo and disk formats are all
-Ardour's problem, not ours. This is the direct answer to the "no isolated
-looper objects" requirement, and why SooperLooper is not used: it would own
-its audio outside the session.
+This is looper logic on top of Ardour, but it stays inside Ardour's own
+object model: every layer is a normal region on a normal track, so
+arrangement, saving, undo and disk formats are all Ardour's problem, not
+ours. This is the direct answer to the "no isolated looper objects"
+requirement, and why SooperLooper is not used: it would own its audio
+outside the session. It also degrades gracefully: if a top-up is ever late,
+the lane goes silent for a bar instead of drifting.
 
 ## Synchronization
 
@@ -149,13 +161,57 @@ PipeWire is the single graph (already the emulator's environment; Ardour uses
 its JACK API). Physical inputs land on Ardour tracks; the MPC's stereo out is
 just another Ardour input track.
 
+The emulator also models the MPC2000XL's **8 individual outs** (the IB-M208P
+board): with `MPC_OUTPUT_MODE=all` (run-mpc.sh's default) MAME exposes a
+second PipeWire node `:outputs` with 8 channels next to `:speaker`, fed by
+the DSP's OUT0–7 buses. Sounds are assigned to individual outs in the MPC
+project, exactly like the hardware. Each lands on its own Ardour track
+(MPC1–MPC8) so the MPC's drums can be mixed/mastered per-voice-group in
+Ardour. (`MPC_OUTPUT_MODE=stereo` compiles them out for the
+latency-first live preset; the DAW stack runs with `all`.)
+
 ```text
 in1 (gtr1) ─► GTR1  ─ chain ─┐            GTR1-L/L+ (loop lanes) ─┐
 in2 (gtr2) ─► GTR2  ─ chain ─┤            GTR2-L/L+ ──────────────┤
 in3 (mic1) ─► MIC1  ─ chain ─┼─► master ◄─ MIC-L/L+ ──────────────┤
 in4 (mic2) ─► MIC2  ─ chain ─┤            AUX-L/L+ ───────────────┘
-MPC out    ─► MPC   ─────────┘                 ▲ reverb/delay send bus
+MPC out    ─► MPC   ─────────┤                 ▲ reverb/delay send bus
+MPC ind. 1-8 ► MPC1..MPC8 ───┘   (:outputs node, MPC_OUTPUT_MODE=all)
 ```
+
+**The MPC's monitor path never routes through Ardour.** The emulator's
+`:speaker` node keeps its own direct link to the hardware sink, exactly as
+in the live preset; Ardour's tracks *tap* the same ports in parallel for
+recording/looping, and Ardour's master is a second independent route into
+the sink. Neither adds serial latency to the other. The one coupling
+PipeWire imposes is the **per-device quantum**: every node on one hardware
+driver shares its period, and the emulator's quantum-32 request forces
+Ardour's client into 0.67 ms cycles it cannot survive (measured: ~490k
+cycle errors, clock master starved, slaved transport frozen). So:
+
+- DAW mode runs the shared graph at a compromise quantum (start 256,
+  measure 128): the MPC path stays direct, its device period just grows by
+  a few ms relative to the solo live preset.
+- If the direct path must keep quantum 32, put Ardour's master on a
+  *second* audio device (per-driver quantum is independent) — on the Pi,
+  e.g. DAC for the direct/live mix, USB interface for the Ardour mix.
+
+### Physical inputs fan out to both recorders
+
+Start with the one stereo I2S capture pair (PCM1808): channel 1 mic,
+channel 2 guitar (later 4 inputs). Each capture port links in parallel to
+(a) its Ardour input track (GTR1 / MIC1 chains, loop lanes) and
+(b) **the MPC's record-in**, so the emulated sampler can record the same
+sources — again taps, no serial chaining.
+
+Ardour-side this is just two port links. MPC-side it is an open emulator
+work item: the MPC2000XL's RECORD path (ADC → DSP record DMA) is not
+implemented in MAME's L7A1045 device (playback only, inherited from hng64).
+Plan: wire a `MICROPHONE(config, ...)` sound-input device (native PipeWire
+capture in the same graph) into the DSP's sampling input and implement the
+record DMA the firmware drives from the SAMPLE screen. Until that lands,
+sampling into the MPC works the hardware way — resample a loop Ardour
+recorded — or not at all; the DAW records regardless.
 
 Mixer surface (encoders 1-8): per-page volume/pan across the five groups,
 mute/solo/rec-arm on buttons, sends on a shift layer. All of it is existing

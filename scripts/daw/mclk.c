@@ -58,14 +58,17 @@ int main(int argc, char **argv)
 	snd_seq_ev_schedule_tick(&ev, queue, 0, 0);
 	snd_seq_event_output(seq, &ev);
 
-	/* Keep ~2 s of clocks queued ahead; top up twice a second. */
+	/* Keep ~6 s of clocks queued ahead; top up twice a second. The queue
+	 * is kernel-timed, so a starved process only matters once the queue
+	 * drains — size it to survive scheduling storms (a free-running MAME
+	 * at SCHED_RR can starve us for seconds). */
 	unsigned tick = 0;
 	for (;;) {
 		snd_seq_queue_status_t *st;
 		snd_seq_queue_status_alloca(&st);
 		snd_seq_get_queue_status(seq, queue, st);
 		unsigned now = snd_seq_queue_status_get_tick_time(st);
-		while (tick < now + (unsigned)(2.0 * bpm / 60.0 * 24.0)) {
+		while (tick < now + (unsigned)(6.0 * bpm / 60.0 * 24.0)) {
 			ev.type = SND_SEQ_EVENT_CLOCK;
 			snd_seq_ev_schedule_tick(&ev, queue, 0, tick++);
 			snd_seq_event_output(seq, &ev);

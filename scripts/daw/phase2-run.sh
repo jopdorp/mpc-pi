@@ -24,7 +24,7 @@ env MAME_BIN=$repo_root/.cache/mame/mpc MAME_RUNTIME_DIR=$runtime \
 	MPC_V53_EVENT_SERVICE_MODE=hle MPC_V53_FEED_FLAG_MODE=hle \
 	MPC_V53_TICK_READ_MODE=hle MPC_V53_DIVIDE_MODE=superblock \
 	MAME_BIOS=default \
-	setsid "$repo_root/scripts/run-mpc.sh" mpc2000xl 32 \
+	setsid "$repo_root/scripts/run-mpc.sh" mpc2000xl "${DAW_QUANTUM:-256}" \
 	-flop "$repo_root/results/projects/mpc-tutor-logic-mpc2000xl.img" \
 	-skip_gameinfo -video none \
 	-autoboot_script "$repo_root/scripts/daw/phase2-autoboot.lua" \
