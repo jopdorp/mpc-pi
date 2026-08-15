@@ -514,44 +514,52 @@ mean:
 | Name row | solo inverts, mute dims | recording inverts bright, overdub dim-fills, armed outlines |
 | Non-lane strips | normal | drawn quiet — they have no loop to show |
 
-### Plugins:### Plugins: what "opening an effect" means here
+### Effects: the set, and a custom view for every one
 
-A plugin's own GUI is an X11 bitmap; it cannot exist on a 255x64 5-bpp
-panel, and no hardware controller ships one — Push, Elektron and
-Maschine all render their own parameter views. "Opening" an effect here
-focuses its chain slot on the FX page, and the body becomes a
-purpose-built micro-view per plugin kind:
+A plugin's own GUI is an X11 window and cannot exist on a 255x64 5-bpp
+panel, so **every effect gets a purpose-built view here** — which is what
+Push, Elektron and Maschine all do, for the same reason. Views are chosen
+by *kind*, so kinds are shared: every compressor draws the same way and
+adding one costs nothing.
 
-- **EQ** draws the actual response curve (log frequency, ±18 dB) with a
-  marker per band, the focused band bright; encoders edit the focused
-  band's FREQ / GAIN / Q / TYPE and the band buttons step through bands.
-  The curve is the UI — it reads faster than eight numbers.
-- **Compressor** draws the transfer curve (threshold and ratio as shape),
-  a wide **gain-reduction meter** — the display an engineer actually
-  watches — IN/OUT meters, and the **sidechain source by name**
-  (`SC:MPC`), because an invisible sidechain is a debugging trap.
-- Anything else falls back to banked parameter cells, four per bank.
+`scripts/maschine/plugins.py` holds the manifest (`python3 plugins.py`
+prints it). Each role lists URIs in preference order, ending in something
+that ships inside Ardour, so the appliance boots usable on whatever is
+installed rather than silent.
 
-The preinstalled set — all LV2, all in Debian arm64, chosen for DSP
-quality and for parameter sets that map onto four encoders (native GUI
-size is irrelevant since those GUIs are never shown):
-
-| Role | Plugin | Notes |
+| Role | Plugin | View |
 |---|---|---|
-| Parametric EQ | **LSP Parametric Equalizer x16** | per-band type includes HP/LP/shelves, so one plugin covers "lo-pass, hi-pass, parametric" |
-| Compact EQ + HP/LP | **x42 fil4** | lighter alternative, same micro-view |
-| Compressor | **LSP Sidechain Compressor** | the sidechain input is a real port; Ardour's pin connections route any track into it (MPC kick ducking the loops is the expected use) |
-| Compact compressor | **x42 darc** | when sidechain isn't needed |
-| Drive | GXAmplifier (guitarix) | already in the design |
-| Reverb / delay sends | a-Reverb, a-Delay | ship inside Ardour, zero install |
-| Utility | a-EQ, a-Compressor, a-High/Low Pass | Ardour built-ins, fallback set |
+| Parametric EQ, hi-pass, lo-pass | **LSP Parametric Equalizer x16** | response curve, marker per band, focused band bright |
+| Compressor + sidechain | **LSP Sidechain Compressor** | transfer curve, wide GR meter, sidechain source named |
+| Limiter | **LSP Limiter** (x42 dpl fallback) | input bar against a fixed ceiling line, GR, OVER latch |
+| Multiband comp / limiter | **LSP Multiband Compressor** | one GR column per band, threshold line, selected band bright |
+| Delay | a-Delay | decaying taps spaced by the delay time; ms **and** note division |
+| Reverb | **Dragonfly Reverb** (Hall/Room/Plate) | exponential tail whose length is the decay, early reflections as taps |
+| Overdrive | **guitarix Tube Screamer** | the clipping curve — soft, mid-humped |
+| Distortion | **guitarix Distortion** (DS-1 voicing) | same view, visibly harder knee |
+| Guitar amp + cab | **guitarix amp** | three combo voicings, cab, tone stack above the encoders that set it |
 
-**Sidechain routing**: Ardour exposes plugin sidechain pins headlessly
-(`ARDOUR.LuaAPI.connect_sidechain` / pin connection API), so daw-ctl
-wires "duck LOOP bus from MPC" as a named preset rather than a manual
-patch. **Instruments**: LV2 synths can sit on a MIDI track fed from the
-MPC's virmidi out exactly like an external module; that is future work
-and listed as such — the MPC remains the instrument brain.
+Amp voicings, chosen for the styles asked for:
+
+| | Amp | For |
+|---|---|---|
+| DLX | Fender Deluxe Reverb, clean | jazz, singer-songwriter, funk |
+| PLEXI | Marshall Plexi, edge of breakup | Hendrix, RHCP, classic rock |
+| IIC+ | Mesa Boogie Mark IIC+, high gain | Metallica, Slipknot, SOAD |
+
+**On neural amp modelling**: NAM and AIDA-X are the obvious modern
+choice, and neither is packaged for Debian arm64 — they would have to be
+built from source and their inference cost is real on a Pi 5 next to a
+1600%-speed emulator. guitarix's tube-stage models are analytic, cheap
+and genuinely good, so they are the dependency; NAM stays a documented
+option for later, and the manifest's URI-list design means swapping it in
+is one line.
+
+**Packages** (`sudo apt install lsp-plugins-lv2 dragonfly-reverb guitarix
+x42-plugins zam-plugins`) — LSP, x42 and Zam are already present on the
+build host; dragonfly-reverb and guitarix are packaged for arm64 but not
+yet installed here, so their URIs are the manifest's first choice and are
+resolved at session-build time rather than assumed.
 
 ### The rules the pages follow
 

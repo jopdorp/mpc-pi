@@ -407,6 +407,182 @@ def _fx_comp_view(f, fx):
         f.text(gx + 16 + gw + 4, yy, "SC:" + sc[:5], BRIGHT)
 
 
+def _fx_limiter_view(f, fx):
+    """Limiter: the ceiling, and how hard we are hitting it.
+
+    A limiter has one question - am I clipping the ceiling, and by how
+    much - so the gain-reduction meter is the whole display, with the
+    ceiling as a fixed line the input bar cannot cross.
+    """
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    f.text(3, top, "IN", DIM)
+    w = 190
+    f.fill(24, top, w, 6, DIM)
+    f.fill(24, top, int(min(1.0, fx.get("in_level", 0.0)) * w), 6, NORMAL)
+    ceil = fx.get("ceiling_norm", 0.9)
+    f.vline(24 + int(ceil * w), top - 2, 10, BRIGHT)
+    f.text(24 + w + 6, top, fx.get("ceiling", "-0.3"), BRIGHT)
+
+    gr = fx.get("gr_db", 0.0)
+    f.text(3, top + 11, "GR", DIM)
+    f.fill(24, top + 11, w, 6, DIM)
+    f.fill(24, top + 11, int(min(1.0, gr / 12.0) * w), 6, BRIGHT)
+    f.text(24 + w + 6, top + 11, "-%.1f" % gr, BRIGHT)
+    if fx.get("over"):
+        f.text_inverted(24, top + 21, "OVER")
+
+
+def _fx_multiband_view(f, fx):
+    """Multiband: one column per band, each with its own GR bar.
+
+    Bands are drawn left to right as frequency, so the picture matches
+    the EQ view's axis; the selected band is bright and its crossover
+    frequencies are written under it.
+    """
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    bands = fx.get("bands", [])
+    if not bands:
+        return
+    n = len(bands)
+    bw = (250 - (n - 1) * 3) // n
+    sel = fx.get("focus", 0)
+    # Labels first, bars below them: putting the labels underneath left
+    # the bars 7px tall, which is not a meter.
+    for i, b in enumerate(bands):
+        x = 3 + i * (bw + 3)
+        ink = BRIGHT if i == sel else MUTED
+        f.text_center(x, bw, top, b.get("name", "")[:5],
+                      BRIGHT if i == sel else DIM)
+        by = top + 9
+        h = bot - by
+        f.rect(x, by, bw, h, DIM)
+        gr = min(1.0, b.get("gr_db", 0.0) / 18.0)
+        lit = int(gr * (h - 2))
+        if lit:
+            f.fill(x + 1, by + 1, bw - 2, lit, ink)
+        thr = b.get("threshold_norm", 0.5)
+        f.hline(x, by + h - int(thr * (h - 2)), bw, NORMAL)
+
+
+def _fx_delay_view(f, fx):
+    """Delay: the repeats, spaced by the actual delay time.
+
+    Drawn as decaying taps on a timeline, which shows feedback and time
+    at once. The time is written in both ms and note division, because
+    against an MPC sequence the division is what a musician means.
+    """
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    base = bot - 2
+    f.text(3, top, fx.get("time", "375 MS"), BRIGHT)
+    f.text(70, top, fx.get("division", "1/8"), NORMAL)
+    f.text_right(254, top, "MIX %s" % fx.get("mix", "30%"), MUTED)
+    spacing = max(8, int(fx.get("time_norm", 0.3) * 90))
+    level = 1.0
+    x = 8
+    while x < 250 and level > 0.05:
+        h = max(2, int(level * (bot - top - 12)))
+        f.fill(x, base - h, 3, h, BRIGHT if x == 8 else NORMAL)
+        level *= fx.get("feedback", 0.5)
+        x += spacing
+    f.hline(3, base, 250, DIM)
+
+
+def _fx_reverb_view(f, fx):
+    """Reverb: an exponential tail whose length is the decay.
+
+    Size shifts the early reflections drawn under the tail, so the two
+    parameters a player actually reaches for are visible as shape.
+    """
+    import math
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    base = bot - 2
+    # Name and mix ride the status line's message zone instead of a row
+    # of their own; the tail needs every pixel of the 15px body.
+    f.text(3, top, fx.get("preset", "HALL")[:5], BRIGHT)
+    decay = max(0.05, fx.get("decay_norm", 0.5))
+    height = bot - top - 2
+    for i in range(240):
+        env = math.exp(-i / (decay * 210.0))
+        h = int(env * height)
+        if h > 0:
+            f.vline(10 + i, base - h, h, NORMAL)
+    # early reflections: a few discrete taps whose spread is "size"
+    size = fx.get("size_norm", 0.5)
+    for k in range(4):
+        x = 10 + int((k + 1) * size * 26)
+        if x < 250:
+            f.fill(x, base - height, 2, height, BRIGHT)
+
+
+def _fx_drive_view(f, fx):
+    """Overdrive / distortion: the clipping curve itself.
+
+    The transfer curve says everything a drive pedal does - how early it
+    breaks up and how hard it squares off - and one look distinguishes a
+    Tube Screamer's soft mid-hump from a DS-1's harder edge.
+    """
+    import math
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    h = bot - top
+    mid = (top + bot) // 2
+    box = h
+    f.rect(3, top, box, h, DIM)
+    f.hline(3, mid, box, DIM)
+    f.vline(3 + box // 2, top, h, DIM)
+    drive = 1.0 + fx.get("drive_norm", 0.5) * 12.0
+    hard = fx.get("hard", False)
+    for i in range(1, box - 1):
+        xin = (i / (box - 2)) * 2 - 1
+        if hard:
+            y = max(-1.0, min(1.0, xin * drive))
+        else:
+            y = math.tanh(xin * drive)
+        py = mid - int(y * (h / 2 - 2))
+        f.point(3 + i, max(top + 1, min(bot - 1, py)), BRIGHT)
+    # Name and clip character only: DRIVE/TONE/LEVEL/MIX are already
+    # named in the encoder strip, and repeating them here overflowed it.
+    x = 3 + box + 10
+    f.text(x, top + 2, fx.get("model", "")[:16], BRIGHT)
+    f.text_right(253, top + 2,
+                 "HARD" if fx.get("hard") else "SOFT", MUTED)
+
+
+def _fx_amp_view(f, fx):
+    """Amp: which combo, its tone stack, and the cab.
+
+    The three voicings are named on screen rather than hidden behind a
+    number, and the tone stack is drawn as three bars because that is how
+    an amp's panel reads - you set a shape, not a list of values.
+    """
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    models = fx.get("models", [])
+    cur = fx.get("model_index", 0)
+    x = 3
+    for i, m in enumerate(models[:3]):
+        label = m[:5]
+        w = f.text_width(label) + 6
+        if i == cur:
+            f.fill(x, top, w, GLYPH_H + 3, BRIGHT)
+            f.text(x + 3, top + 1, label, OFF)
+        else:
+            f.rect(x, top, w, GLYPH_H + 3, DIM)
+            f.text(x + 3, top + 1, label, MUTED)
+        x += w + 4
+    f.text_right(254, top + 1, fx.get("cab", "")[:12], MUTED)
+
+    # The tone stack sits directly above the encoders that set it, one
+    # bar per column, and carries no labels of its own: the encoder strip
+    # already names GAIN / BASS / MID / MASTER, and repeating them here
+    # cost the rows this view needs.
+    ty = top + 13
+    vals = list(fx.get("tone", (0.5, 0.5, 0.5)))
+    values = [fx.get("gain", 0.5)] + vals
+    for i, v in enumerate(values[:COLS]):
+        bx = COL_X[i] + 3
+        f.fill(bx, ty, COL_W - 8, 5, DIM)
+        f.fill(bx, ty, int(v * (COL_W - 8)), 5, BRIGHT)
+
+
 def page_fx(f, st):
     """One track's plugin chain. The chain is slot chips on the context
     row; the body is a purpose-built view per plugin kind - an EQ is a
@@ -436,10 +612,12 @@ def page_fx(f, st):
     f.hline(0, BODY_Y + 9, 255, DIM)
 
     kind = fx.get("kind", "params")
-    if kind == "eq":
-        _fx_eq_view(f, fx)
-    elif kind == "comp":
-        _fx_comp_view(f, fx)
+    views = {"eq": _fx_eq_view, "comp": _fx_comp_view,
+             "limiter": _fx_limiter_view, "multiband": _fx_multiband_view,
+             "delay": _fx_delay_view, "reverb": _fx_reverb_view,
+             "drive": _fx_drive_view, "amp": _fx_amp_view}
+    if kind in views:
+        views[kind](f, fx)
     else:
         bank = st.get("bank", 0)
         params = fx.get("params", [])[bank * COLS:(bank + 1) * COLS]
