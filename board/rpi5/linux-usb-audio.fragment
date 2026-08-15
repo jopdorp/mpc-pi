@@ -25,3 +25,26 @@ CONFIG_SND_SIMPLE_CARD_UTILS=y
 CONFIG_PREEMPT=y
 CONFIG_HIGH_RES_TIMERS=y
 CONFIG_HZ_1000=y
+
+# ===== USB AUDIO INTERFACE, BOTH DIRECTIONS =====
+# Host side: class-compliant USB interfaces plugged into the type-A ports
+# are handled by SND_USB_AUDIO above; the two type-A controllers are
+# separate dwc3 host instances, so an external interface and the gadget
+# below run at the same time.
+#
+# Device side: the BCM2712 has its own DWC2 OTG behind the USB-C
+# connector (usb@480000 in the Pi 5 DTB, disabled until config.txt enables
+# dtoverlay=dwc2). With the UAC2 function the appliance appears to a
+# computer as a class-compliant USB 2.0 audio interface, so the MPC's ten
+# channels (stereo plus the eight individual outs) or Ardour's mix can be
+# recorded on a host with no extra drivers on macOS, Windows 10+ or Linux.
+CONFIG_USB_DWC2=y
+CONFIG_USB_DWC2_DUAL_ROLE=y
+CONFIG_USB_GADGET=y
+CONFIG_USB_LIBCOMPOSITE=y
+CONFIG_USB_CONFIGFS=y
+CONFIG_USB_CONFIGFS_F_UAC2=y
+CONFIG_USB_F_UAC2=y
+# The gadget's audio endpoints are exposed to userspace as an ordinary ALSA
+# card, which is what lets PipeWire route emulator or DAW channels into it.
+CONFIG_SND_USB_AUDIO_USE_MEDIA_CONTROLLER=n

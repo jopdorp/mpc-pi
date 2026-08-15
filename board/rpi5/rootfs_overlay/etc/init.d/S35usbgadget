@@ -1,0 +1,26 @@
+#!/bin/sh
+# Bring up the USB audio gadget before the emulator, so PipeWire sees the
+# card when it enumerates devices.
+case "$1" in
+start)
+	printf 'Starting USB audio gadget: '
+	if /usr/bin/mpc-usb-gadget.sh start >/tmp/usb-gadget.log 2>&1; then
+		echo "OK"
+	else
+		# A missing UDC (no USB-C host attached, or dwc2 not enabled) must
+		# not stop the appliance from booting into the instrument.
+		echo "skipped (see /tmp/usb-gadget.log)"
+	fi
+	;;
+stop)
+	/usr/bin/mpc-usb-gadget.sh stop >/dev/null 2>&1
+	;;
+restart|reload)
+	"$0" stop
+	"$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+	;;
+esac

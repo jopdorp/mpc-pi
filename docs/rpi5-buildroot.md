@@ -60,6 +60,33 @@ Wiring the overlay assumes, on the Pi 5 40-pin header:
 The PCM1808 must be strapped to slave mode so it takes the Pi's clocks rather
 than driving them.
 
+## USB audio, both directions
+
+The appliance can use a USB audio interface and be one.
+
+*Using one*: class-compliant interfaces on the type-A ports bind to
+`snd-usb-audio` (built in, so card ordering is stable) and appear in
+PipeWire like any other device.
+
+*Being one*: `dtoverlay=dwc2,dr_mode=peripheral` enables the BCM2712's own
+DWC2 OTG behind the USB-C connector — `usb@480000` in the Pi 5 DTB, which
+ships `status = "disabled"`. That the overlay binds here is checked, not
+assumed: the base DTB exports the `usb` symbol the overlay targets, and
+`fdtoverlay` applies it cleanly, producing `dr_mode = "otg"` with gadget
+FIFO sizes.
+
+`S35usbgadget` then runs `mpc-usb-gadget.sh`, which builds a UAC2 function
+through configfs: 10 channels to the host (MPC stereo plus the eight
+individual outs), 2 back, 24-bit/48 kHz, and a **125 µs** isochronous
+service interval (`p_hs_bint=1`) so a 32-sample host buffer is realistic.
+A missing UDC — nothing plugged into the USB-C port — is logged and
+skipped rather than failing the boot. `mpc-usb-route.sh {mpc|ardour|off}`
+selects the source.
+
+Note the USB-C port is also the Pi 5's power input: power the appliance
+separately and use a data-only cable, since a computer's port will not
+reliably run a Pi 5 under load.
+
 ## Why these settings
 
 **`-ffp-contract=off` is mandatory,** not a preference. The DSP mixes in
@@ -91,19 +118,25 @@ probably bite:
    `package/mame-mpc/mame-mpc.mk` is the documented shape but has not been
    exercised here. Expect to adjust `OVERRIDE_*`, the Python detection, and
    possibly to add a `host-mame` step for the build-time generators.
-2. **The two-DAI-link overlay.** Playback and capture are expressed as two
+2. **The USB audio gadget's real latency.** The channel counts, formats
+   and the 125 us service interval are set from the UAC2 function's
+   documented attributes, and `p_hs_bint`/`c_hs_bint` are written
+   best-effort because older kernels lack them. What a host actually
+   achieves at a 32-sample buffer has to be measured on hardware; treat
+   the "very low latency" goal as unverified until it is.
+3. **The two-DAI-link overlay.** Playback and capture are expressed as two
    `simple-audio-card` links sharing one I2S controller. The overlay compiles,
    but whether the RP1 I2S driver accepts a shared controller across two links
    is unverified; the fallback is a single link with both codecs attached, the
    shape `hifiberry-dacplusadc` uses.
-3. **No profile-guided optimisation.** The desktop build gains a large amount
+4. **No profile-guided optimisation.** The desktop build gains a large amount
    from PGO, and the profile is x86 and useless here. Either train on target
    or accept the loss initially.
-4. **Cortex-A76 is not the A53 the optimisation work assumed.** Patches 0036,
+5. **Cortex-A76 is not the A53 the optimisation work assumed.** Patches 0036,
    0038 and 0041 were held back as A53 candidates precisely because
    out-of-order cores hide their benefit. The A76 is out of order, so it may
    behave more like the development desktop. Re-measure before enabling them.
-5. **The kernel commit** is inherited from a neighbouring project's working
+6. **The kernel commit** is inherited from a neighbouring project's working
    Pi 5 build rather than chosen here.
 
 ## First bring-up steps
@@ -114,3 +147,13 @@ probably bite:
    for the ADC.
 4. Run `/usr/bin/mpc-start.sh` by hand before trusting the init script.
 5. Attach the MK1 and start `mpc-mk1-display /dev/shm/mpc-lcd --usb`.
+6. USB audio, host side: plug a class-compliant interface into a type-A
+   port and confirm a second card in `aplay -l` and a node in `pw-cli ls
+   Node`.
+7. USB audio, device side: confirm a UDC exists (`ls /sys/class/udc`
+   should show the dwc2 controller), run `/usr/bin/mpc-usb-gadget.sh` and
+   check `/tmp/usb-gadget.log`, then connect a computer with a data-only
+   cable. The computer should see "MPC2000XL Audio Interface" with 10
+   inputs and no driver install. Route with `mpc-usb-route.sh mpc` and
+   record; then **measure the achievable buffer size** and record the
+   number here, replacing the unverified latency claim above.

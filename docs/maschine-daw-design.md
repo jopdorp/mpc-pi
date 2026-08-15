@@ -260,6 +260,56 @@ cycle errors, clock master starved, slaved transport frozen). So:
   *second* audio device (per-driver quantum is independent) — on the Pi,
   e.g. DAC for the direct/live mix, USB interface for the Ardour mix.
 
+### USB audio interface (both directions)
+
+The appliance is a USB audio interface **and** can use one.
+
+**Using an external interface** (type-A ports): class-compliant UAC1/UAC2
+devices bind to `snd-usb-audio`, appear in PipeWire, and can host the
+guitar/mic chains instead of (or beside) the I2S codecs. The two type-A
+ports are separate `snps,dwc3` host controllers, independent of the
+gadget below, so an external interface and the gadget run simultaneously.
+
+**Being an interface** (USB-C port): BCM2712 has its own DWC2 OTG at
+`usb@480000`, disabled in the stock Pi 5 DTB. `dtoverlay=dwc2,dr_mode=peripheral`
+enables it — **verified with `fdtoverlay` against the real
+`bcm2712-rpi-5-b.dtb`**, which exports the `usb` symbol the overlay
+targets and yields `dr_mode = "otg"` plus gadget FIFO sizes. On top of it
+`mpc-usb-gadget.sh` builds a **UAC2** function through configfs:
+
+| Property | Value | Why |
+|---|---|---|
+| Class | UAC2, USB 2.0 high speed | Driverless on macOS, Windows 10+, Linux |
+| Host records | **10 ch** | MPC stereo + the eight individual outs |
+| Host plays | 2 ch | back into the rig (backing tracks, reamping) |
+| Format | 24-bit / 48 kHz | matches the emulator and the DAC; 25% less bandwidth than padded 32-bit |
+| Service interval | **125 µs** (`p_hs_bint=1`) | the 1 ms default is what usually blocks small buffers |
+| Requests in flight | 2 (`req_number`) | minimum that still survives scheduling jitter |
+
+Bandwidth is not the constraint: 10 ch × 24-bit × 48 kHz is 1.44 MB/s,
+against roughly 8–13 MB/s practical for USB 2.0 high-speed isochronous.
+The 125 µs service interval is the part that makes a 32-sample (0.67 ms)
+host buffer realistic; expect a round trip of a few ms end to end and
+**measure it on hardware before quoting a number** — the gadget adds its
+own buffering on top of the host's.
+
+`mpc-usb-route.sh {mpc|ardour|off}` picks what the computer records.
+Both sources are ten channels, so one occupies the gadget at a time;
+20 channels (MPC *and* Ardour at once) fits the bandwidth but doubles the
+endpoint load, so it stays an experiment rather than the default. As
+everywhere else in this design these are **taps** — the MPC's monitor path
+to the DAC is never routed through the gadget.
+
+Two hardware caveats for the USB-C port, which is also the Pi 5's power
+input:
+
+- A computer's USB port will not reliably power a Pi 5 under load. Power
+  the appliance from its own supply (GPIO 5 V rail or PoE) and use a
+  data-only USB-C cable, or a cable/adapter with VBUS interrupted, to
+  avoid back-powering.
+- `dr_mode=peripheral` fixes the port as a device. Switch to `otg` only if
+  the same port must also host something, which is not our case.
+
 ### Physical inputs fan out to both recorders
 
 Start with the one stereo I2S capture pair (PCM1808): channel 1 mic,

@@ -13,6 +13,14 @@ dtoverlay=vc4-kms-v3d,noaudio
 # overlays/mpc-audio-overlay.dts for the wiring this assumes.
 dtoverlay=mpc-audio
 
+# USB device mode on the USB-C connector (BCM2712's own DWC2 OTG at
+# usb@480000, disabled in the base DTB). This is what lets the appliance
+# present itself to a computer as a USB audio interface; the two type-A
+# ports stay hosts on separate dwc3 controllers, so an external interface
+# still works at the same time. Verified with fdtoverlay against the real
+# bcm2712-rpi-5-b.dtb.
+dtoverlay=dwc2,dr_mode=peripheral
+
 # ===== DISPLAY =====
 # The panel LCD is delivered to external hardware over USB by the MK1 daemon,
 # so no display is required in normal operation. HDMI stays available for
