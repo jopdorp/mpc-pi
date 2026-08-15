@@ -583,6 +583,55 @@ def _fx_amp_view(f, fx):
         f.fill(bx, ty, int(v * (COL_W - 8)), 5, BRIGHT)
 
 
+def _fx_mod_view(f, fx):
+    """Chorus / flanger: the LFO drawn as the waveform it is.
+
+    Rate and depth are a shape, not two numbers - one look says how fast
+    and how far. The sweep marker rides the curve at the current LFO
+    phase, so a stopped rig still shows which way the modulation is
+    heading.
+    """
+    import math
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    mid = (top + bot) // 2
+    height = (bot - top) // 2 - 1
+    f.hline(2, mid, 251, DIM)
+    rate = max(0.15, fx.get("rate_norm", 0.3)) * 4.0
+    depth = fx.get("depth_norm", 0.6)
+    for px in range(2, 253):
+        t = (px - 2) / 250.0
+        y = mid - int(math.sin(t * math.tau * rate) * height * depth)
+        f.point(px, max(top, min(bot, y)), NORMAL)
+    ph = fx.get("phase", 0.25)
+    px = 2 + int(ph * 250)
+    py = mid - int(math.sin(ph * math.tau * rate) * height * depth)
+    f.fill(px - 1, max(top, min(bot, py)) - 1, 3, 3, BRIGHT)
+
+
+def _fx_chop_view(f, fx):
+    """Chopper: the gate pattern against the bar, as a square wave.
+
+    The division is snapped to the MPC's tempo, so the pattern drawn here
+    is literally where the sound stops and starts in the bar - and the
+    beat ticks underneath line the chop up with the grid. One knob owns
+    the division, which is the control a player reaches for mid-song.
+    """
+    top, bot = BODY_Y + 11, ENCBAR_Y - 4
+    steps = max(1, fx.get("steps", 8))
+    duty = fx.get("duty", 0.5)
+    w = 250 // steps
+    for i in range(steps):
+        x = 2 + i * w
+        on = int(w * duty)
+        # high while the gate is open, low while it chops out
+        f.fill(x, top, on, bot - top, MUTED if i % 2 else BRIGHT)
+        f.vline(x, top, bot - top, DIM)
+    # beat ticks: four to the bar, so the chop is read against the grid
+    for b in range(5):
+        bx = 2 + int(b * 250 / 4)
+        f.vline(min(252, bx), bot + 1, 2, NORMAL)
+
+
 def page_fx(f, st):
     """One track's plugin chain. The chain is slot chips on the context
     row; the body is a purpose-built view per plugin kind - an EQ is a
@@ -615,7 +664,8 @@ def page_fx(f, st):
     views = {"eq": _fx_eq_view, "comp": _fx_comp_view,
              "limiter": _fx_limiter_view, "multiband": _fx_multiband_view,
              "delay": _fx_delay_view, "reverb": _fx_reverb_view,
-             "drive": _fx_drive_view, "amp": _fx_amp_view}
+             "drive": _fx_drive_view, "amp": _fx_amp_view,
+             "mod": _fx_mod_view, "chop": _fx_chop_view}
     if kind in views:
         views[kind](f, fx)
     else:

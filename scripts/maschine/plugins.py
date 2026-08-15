@@ -20,7 +20,7 @@ session build time by trying them in order.
 
 # kind -> which micro-view in daw_ui renders it
 KINDS = ("eq", "comp", "limiter", "multiband", "delay", "reverb",
-         "drive", "amp", "params")
+         "drive", "amp", "mod", "chop", "params")
 
 ROLES = [
     {
@@ -84,10 +84,10 @@ ROLES = [
         "kind": "reverb",
         "uris": [
             # Dragonfly is the best-sounding free reverb set and ships
-            # four algorithms; Hall is the default send.
-            "https://michaelwillis.github.io/dragonfly-reverb/hall",
-            "https://michaelwillis.github.io/dragonfly-reverb/room",
-            "https://michaelwillis.github.io/dragonfly-reverb/plate",
+            # four algorithms. Verified installed; guitarix also carries
+            # zita-rev1, which is the other genuinely good free hall.
+            "https://github.com/michaelwillis/dragonfly-reverb",         # verified
+            "http://guitarix.sourceforge.net/plugins/gx_zita_rev1_stereo#_zita_rev1_stereo",  # verified
             "urn:ardour:a-reverb",
         ],
         "knobs": ("SIZE", "DECAY", "MIX", "TONE"),
@@ -97,8 +97,8 @@ ROLES = [
         "role": "Overdrive (Tube Screamer voicing)",
         "kind": "drive",
         "uris": [
-            "http://guitarix.sourceforge.net/plugins/gx_tubescreamer_#_tubescreamer",
-            "http://guitarix.sourceforge.net/plugins/gxtubescreamer#tubescreamer",
+            # guitarix ships a literal TS-9 model.
+            "http://guitarix.sourceforge.net/plugins/gxts9#ts9sim",      # verified
             "http://zamaudio.com/lv2/zamtube",
         ],
         "knobs": ("DRIVE", "TONE", "LEVEL", "MIX"),
@@ -108,41 +108,105 @@ ROLES = [
         "role": "Distortion (DS-1 voicing)",
         "kind": "drive",
         "uris": [
-            "http://guitarix.sourceforge.net/plugins/gx_distortion_#_distortion",
-            "http://guitarix.sourceforge.net/plugins/gxdistortion#distortion",
+            # And a literal Boss DS-1 model, which is exactly the pedal
+            # asked for rather than a generic distortion.
+            "http://guitarix.sourceforge.net/plugins/gx_bossds1_#_bossds1_",  # verified
+            "http://guitarix.sourceforge.net/plugins/gx_mxrdist_#_mxrdist_",  # verified
             "http://zamaudio.com/lv2/zamtube",
         ],
         "knobs": ("DIST", "TONE", "LEVEL", "MIX"),
         "note": "harder clip than the overdrive; same view, different curve",
     },
     {
+        "role": "Chorus",
+        "kind": "mod",
+        "uris": [
+            "http://guitarix.sourceforge.net/plugins/gx_chorus_stereo#_chorus_stereo",  # verified
+            "urn:ardour:a-chorus",
+        ],
+        "knobs": ("RATE", "DEPTH", "MIX", "DELAY"),
+        "note": "the LFO is drawn moving, so rate is seen not read",
+    },
+    {
+        "role": "Flanger",
+        "kind": "mod",
+        "uris": [
+            "http://guitarix.sourceforge.net/plugins/gx_flanger#_flanger",  # verified
+            "http://guitarix.sourceforge.net/plugins/gx_phaser#_phaser",    # verified
+            "urn:ardour:a-chorus",
+        ],
+        "knobs": ("RATE", "DEPTH", "FDBK", "MIX"),
+        "note": "same view as chorus; feedback is what separates them",
+    },
+    {
+        "role": "Chopper / repeater (gate stutter)",
+        "kind": "chop",
+        "uris": [
+            # A *switched* tremolo is a hard on/off gate rather than a
+            # smooth one, which is exactly the on-off-on-off effect.
+            "http://guitarix.sourceforge.net/plugins/gx_switched_tremolo_#_switched_tremolo_",  # verified
+            "http://guitarix.sourceforge.net/plugins/gx_tremolo#_tremolo",  # verified
+            "urn:ardour:a-chorus",
+        ],
+        "knobs": ("DIV", "DEPTH", "SHAPE", "MIX"),
+        "note": "rate snaps to note divisions of the MPC tempo, so the "
+                "chop always lands on the grid; one knob owns it live",
+    },
+    {
         "role": "Guitar amp + cab (combo models)",
         "kind": "amp",
         "uris": [
-            "http://guitarix.sourceforge.net/plugins/gx_amp_stereo#GUITARIX_ST",
-            "http://guitarix.sourceforge.net/plugins/gx_amp#GUITARIX",
+            "http://guitarix.sourceforge.net/plugins/gx_amp_stereo#GUITARIX_ST",  # verified
+            "http://guitarix.sourceforge.net/plugins/gx_amp#GUITARIX",   # verified
             "http://zamaudio.com/lv2/zamtube",
         ],
+        # The amp is followed by a cabinet stage; guitarix models the cab
+        # separately, which is what makes the combo voicings work.
+        "cab_uri": "http://guitarix.sourceforge.net/plugins/gx_cabinet#CABINET",
         "knobs": ("GAIN", "BASS", "MID/TRB", "MASTER"),
         "note": "MODEL button steps the combo voicings below",
     },
 ]
 
-# The three combos asked for, as guitarix amp-model selections. Guitarix
-# ships tube-stage models of exactly these circuits; NAM and AIDA-X are
-# the neural alternatives but neither is packaged for Debian arm64, so
-# they stay a documented future option rather than a dependency.
+# The three combos, as concrete guitarix amp + cabinet selections. These
+# model names were read out of the installed gx_amp/gx_cabinet .ttl files,
+# so they are selectable values rather than aspirations.
+#
+# guitarix is a genuinely complete single-app chain - tube preamp stage,
+# tone stack and a real cabinet model - which is why it is the default
+# even now that NAM is wanted: one plugin pair covers amp and cab, it is
+# analytic (no neural inference cost), and it is packaged for arm64.
 AMP_MODELS = [
     {"name": "DLX", "full": "Fender Deluxe Reverb, clean",
-     "guitarix": "12AX7/6V6 tweed-style clean stage, bright cap on",
+     "gx_amp": "Fender Style", "gx_cab": "2x12",
+     "tubes": "12AX7 preamp into 6V6",
      "for": "jazz, singer-songwriter, funk"},
     {"name": "PLEXI", "full": "Marshall Plexi, edge of breakup",
-     "guitarix": "12AX7/EL34 with the plexi tone stack",
+     "gx_amp": "JTM-45 Style", "gx_cab": "4x12",
+     "tubes": "12AX7 preamp into EL34",
      "for": "Hendrix, RHCP, classic rock"},
     {"name": "IIC+", "full": "Mesa Boogie Mark IIC+, high gain",
-     "guitarix": "cascaded 12AX7 gain stages into a 6L6 stage",
+     "gx_amp": "Mesa Boogie Style", "gx_cab": "4x12",
+     "tubes": "cascaded 12AX7 into 6L6",
      "for": "Metallica, Slipknot, SOAD"},
 ]
+
+# The same three as Neural Amp Modeler captures. NAM is offered as an
+# ALTERNATIVE to guitarix rather than a replacement: it sounds closer to
+# a specific rig because it is a capture of one, but it costs neural
+# inference per instance and needs model files shipped with the image.
+# The panel's amp view is identical either way - it draws the voicing
+# name, the cab and the tone stack - so switching engines is invisible
+# to the player.
+AMP_ENGINES = ("guitarix", "nam")
+NAM_MODELS = [
+    {"name": "DLX", "file": "fender-deluxe-reverb-clean.nam"},
+    {"name": "PLEXI", "file": "marshall-plexi-1959.nam"},
+    {"name": "IIC+", "file": "mesa-mark-iic-plus.nam"},
+]
+NAM_TIER = "nano"      # A2 quality tier; nano is the cheapest that still
+                       # sounds like the amp, and is what fits beside a
+                       # 1600%-speed emulator on a Pi 5.
 
 # Buildroot/apt package names behind the URIs above.
 PACKAGES = [
