@@ -1,0 +1,173 @@
+#!/bin/bash
+# Netboot the MPC appliance: DHCP + TFTP + NFS root from the mpc-pi build.
+#
+# Serves scripts/../.cache/br-rpi5 so the Pi boots the MPC rig itself,
+# not the neighbouring rpi-pedal firmware, and so iterating on the
+# appliance costs a reboot instead of an SD-card swap.
+#
+# Designed to be run through a scoped NOPASSWD sudoers rule (see
+# install-privileges.sh), so it takes NO path arguments: everything it
+# touches is fixed at the top. A privileged helper that accepts paths
+# from its caller is a privilege-escalation hole, and this one is meant
+# to be callable without a password.
+#
+#   mpcpi-netboot start | stop | status
+set -uo pipefail
+
+REPO="/home/jopdorp/development/mpc-pi"
+BUILD="$REPO/.cache/br-rpi5"
+IMAGES="$BUILD/images"
+NFS_ROOT="$BUILD/target"
+TFTP_ROOT="/srv/tftp/mpcpi"
+SERVER_IP="192.168.7.1"
+SUBNET="192.168.7.0/24"
+DHCP_RANGE="192.168.7.100,192.168.7.200,12h"
+PIDFILE="/run/mpcpi-netboot.pid"
+LOGFILE="/var/log/mpcpi-netboot.log"
+IFACE_FILE="/etc/mpcpi-netboot.iface"
+
+die() { echo "mpcpi-netboot: $*" >&2; exit 1; }
+
+# Interface choice, in order: the pinned one, else the wired link that
+# actually has a cable in it. Picking by carrier is what stops the
+# server binding to an unplugged dongle, which is exactly the failure
+# that wasted a boot cycle with the older script.
+pick_iface() {
+	if [ -r "$IFACE_FILE" ]; then
+		local pinned
+		pinned=$(tr -d '[:space:]' < "$IFACE_FILE")
+		if [ -n "$pinned" ] && [ -e "/sys/class/net/$pinned" ]; then
+			echo "$pinned"; return
+		fi
+	fi
+	local best=""
+	for i in /sys/class/net/*; do
+		local n; n=$(basename "$i")
+		case "$n" in
+			lo|wl*|docker*|virbr*|veth*|tap*|wg*|br-*|mpqemubr*) continue ;;
+		esac
+		if [ "$(cat "$i/carrier" 2>/dev/null)" = "1" ]; then
+			best="$n"; break
+		fi
+		[ -z "$best" ] && best="$n"
+	done
+	echo "$best"
+}
+
+IFACE=$(pick_iface)
+
+status() {
+	echo "interface : ${IFACE:-none found}"
+	if [ -n "$IFACE" ]; then
+		echo "carrier   : $(cat "/sys/class/net/$IFACE/carrier" 2>/dev/null || echo '?') (1 = cable present)"
+		echo "address   : $(ip -4 -br addr show "$IFACE" 2>/dev/null | awk '{print $3}')"
+	fi
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+		echo "dnsmasq   : running (pid $(cat "$PIDFILE"))"
+		tr ' ' '\n' < "/proc/$(cat "$PIDFILE")/cmdline" 2>/dev/null |
+			grep -E "^--interface|^--tftp-root" | sed 's/^/            /'
+	else
+		echo "dnsmasq   : not running"
+	fi
+	echo "tftp root : $TFTP_ROOT $([ -d "$TFTP_ROOT" ] && echo "($(ls -1 "$TFTP_ROOT" 2>/dev/null | wc -l) files)" || echo '(absent)')"
+	echo "nfs root  : $NFS_ROOT $([ -d "$NFS_ROOT" ] && echo present || echo MISSING)"
+	echo "exported  : $(exportfs -s 2>/dev/null | grep -c "$NFS_ROOT") entry"
+	echo "log       : $LOGFILE"
+}
+
+start() {
+	[ "$(id -u)" -eq 0 ] || die "must run as root (see install-privileges.sh)"
+	[ -n "$IFACE" ] || die "no wired interface found"
+	[ -d "$IMAGES" ] || die "no build at $IMAGES - run scripts/build-sysroot-rpi5.sh"
+	[ -d "$NFS_ROOT" ] || die "no target rootfs at $NFS_ROOT"
+
+	if [ "$(cat "/sys/class/net/$IFACE/carrier" 2>/dev/null)" != "1" ]; then
+		echo "warning: $IFACE has no carrier - is the cable in?" >&2
+	fi
+
+	# Another DHCP/TFTP server on this link would fight us for port 67
+	# and hand the Pi somebody else's kernel. The rpi-pedal script is
+	# the likely candidate, so say so by name rather than failing
+	# cryptically.
+	local foreign
+	foreign=$(pgrep -af "dnsmasq.*--interface=$IFACE" |
+		grep -v "tftp-root=$TFTP_ROOT" | head -1)
+	if [ -n "$foreign" ]; then
+		echo "another DHCP/TFTP server is already on $IFACE:" >&2
+		echo "  $foreign" >&2
+		echo "stop it first, e.g. the rpi-pedal one:" >&2
+		echo "  sudo ~/development/rpi-pedal-buildroot/scripts/pxe-server.sh stop rpi5" >&2
+		exit 1
+	fi
+
+	echo "using interface $IFACE"
+	ip addr flush dev "$IFACE" 2>/dev/null
+	ip addr add "$SERVER_IP/24" dev "$IFACE" || die "could not set $SERVER_IP"
+	ip link set "$IFACE" up
+
+	mkdir -p "$TFTP_ROOT"
+	# The Pi 5 boots from EEPROM: it needs the kernel, the DTBs, the
+	# overlays and a config/cmdline pair. No start.elf or bootcode.bin.
+	cp "$IMAGES/Image" "$TFTP_ROOT/Image" 2>/dev/null ||
+		die "no kernel Image in $IMAGES"
+	cp "$IMAGES/Image" "$TFTP_ROOT/kernel_2712.img"
+	cp "$IMAGES"/bcm2712*.dtb "$TFTP_ROOT/" 2>/dev/null
+	[ -d "$IMAGES/rpi-firmware/overlays" ] &&
+		cp -r "$IMAGES/rpi-firmware/overlays" "$TFTP_ROOT/"
+	cp "$REPO/board/rpi5/config.txt" "$TFTP_ROOT/config.txt" 2>/dev/null
+
+	# Root over NFS, and keep the appliance's own isolcpus/threadirqs
+	# tuning so a netbooted rig behaves like a flashed one.
+	{
+		printf 'console=serial0,115200 console=tty1 '
+		printf 'root=/dev/nfs nfsroot=%s:%s,vers=3,tcp rw ' "$SERVER_IP" "$NFS_ROOT"
+		printf 'ip=dhcp rootwait isolcpus=2-3 threadirqs\n'
+	} > "$TFTP_ROOT/cmdline.txt"
+
+	if ! grep -qF "$NFS_ROOT" /etc/exports 2>/dev/null; then
+		echo "$NFS_ROOT $SUBNET(rw,sync,no_subtree_check,no_root_squash)" \
+			>> /etc/exports
+	fi
+	exportfs -ra 2>/dev/null || echo "warning: exportfs failed" >&2
+
+	stop_quiet
+	dnsmasq --interface="$IFACE" --bind-interfaces \
+		--dhcp-range="$DHCP_RANGE" --dhcp-option=66,"$SERVER_IP" \
+		--pxe-service=0,"Raspberry Pi Boot" \
+		--enable-tftp --tftp-root="$TFTP_ROOT" \
+		--log-dhcp --log-facility="$LOGFILE" \
+		--pid-file="$PIDFILE" --port=0 ||
+		die "dnsmasq failed to start"
+
+	echo "netboot ready on $IFACE ($SERVER_IP), serving $TFTP_ROOT"
+	echo "watch: sudo tail -f $LOGFILE"
+}
+
+stop_quiet() {
+	if [ -f "$PIDFILE" ]; then
+		kill "$(cat "$PIDFILE")" 2>/dev/null
+		rm -f "$PIDFILE"
+	fi
+	pkill -f "dnsmasq.*tftp-root=$TFTP_ROOT" 2>/dev/null
+	return 0
+}
+
+stop() {
+	[ "$(id -u)" -eq 0 ] || die "must run as root"
+	stop_quiet
+	[ -n "$IFACE" ] && ip addr del "$SERVER_IP/24" dev "$IFACE" 2>/dev/null
+	# Also clear the address wherever else it may have been left, which
+	# is how the older script stranded it on an unplugged dongle.
+	for i in /sys/class/net/*; do
+		n=$(basename "$i")
+		ip addr del "$SERVER_IP/24" dev "$n" 2>/dev/null
+	done
+	echo "netboot stopped"
+}
+
+case "${1:-status}" in
+	start) start ;;
+	stop) stop ;;
+	status) status ;;
+	*) die "usage: mpcpi-netboot start|stop|status" ;;
+esac
