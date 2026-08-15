@@ -34,86 +34,111 @@ COLS = 8
 COL_W = 31
 COL_X = [i * 32 for i in range(COLS)]
 
-HEADER_H = 10
-FOOTER_Y = 53
+# The MK1's eight buttons sit ABOVE the displays and its encoders BELOW
+# them, so the legend for the buttons hugs the top edge and the
+# encoder-owned values hug the bottom edge. Label adjacency is the one
+# rule every surveyed controller obeys (Push, Maschine, Elektron); an
+# earlier version of this file had the button legend along the bottom,
+# pointing at the encoders.
+BTNBAR_H = 10          # button legend, top edge, adjacent to the buttons
+ENCBAR_Y = 50          # encoder strip, bottom edge, adjacent to the knobs
+HEADER_Y = BTNBAR_H + 1
+BODY_Y = 20
 
 
 # --- shared chrome ---------------------------------------------------
 
 
-def draw_header(f, st):
-    """Tab strip left, transport right. Identical on every page."""
-    x = 1
-    for name in PAGES:
-        if name == st["page"]:
-            x = f.text_inverted(x + 1, 1, name) + 3
+def draw_button_bar(f, st):
+    """The eight button labels, along the top edge under the buttons.
+
+    The first four are the pages, so the tab strip and the legend are the
+    same eight cells rather than two competing rows - the page buttons
+    are simply four of the eight buttons.
+    """
+    labels = list(PAGES) + list(st.get("buttons", ("", "", "", "")))
+    for i, label in enumerate(labels[:COLS]):
+        x = COL_X[i]
+        if not label:
+            continue
+        active = (i < len(PAGES) and label == st["page"]) or \
+            label in st.get("buttons_active", ())
+        if active:
+            f.fill(x, 0, COL_W, GLYPH_H + 3, BRIGHT)
+            f.text_center(x, COL_W, 1, label, OFF)
         else:
-            x = f.text(x + 1, 1, name, DIM) + 3
+            f.text_center(x, COL_W, 1, label, NORMAL)
+    f.hline(0, BTNBAR_H, 255, DIM)
 
-    # The MPC's own LCD sits immediately to the left and already shows
-    # tempo and bar position, so repeating them here would spend this
-    # screen's scarcest resource - width - on information the performer
-    # can already see. The right side carries what only the DAW knows.
+
+def draw_status(f, st):
+    """One status line under the buttons: mode, transient message, health.
+
+    A persistent mode name in a fixed position is deliberate. Neither
+    Push nor Maschine ships one - they rely on a lit button - but a lit
+    button is exactly the indicator that fails when attention is on the
+    music rather than the panel.
+    """
+    y = HEADER_Y + 1
+    mode = st.get("mode", "DAW")
+    f.text(2, y, mode, MUTED)
+
     x_right = 254
-
-    # Xruns: a live rig needs to know it is glitching before the take is
-    # ruined. Dim at zero so a healthy system stays quiet.
     xruns = st.get("xruns", 0)
     label = "XR%d" % xruns
-    f.text_right(x_right, 1, label, BRIGHT if xruns else DIM)
+    f.text_right(x_right, y, label, BRIGHT if xruns else DIM)
     x_right -= f.text_width(label) + 6
 
-    # A recording count, inverted, because arming the wrong lane is the
-    # expensive mistake in live looping.
     recording = st.get("recording", 0)
     if recording:
         badge = "REC%d" % recording
-        f.text_inverted(x_right - f.text_width(badge) + 1, 1, badge)
+        f.text_inverted(x_right - f.text_width(badge) + 1, y, badge)
         x_right -= f.text_width(badge) + 6
 
-    # The space the tempo used to occupy becomes a transient message
-    # zone: confirmations ("LOOP1 ARMED"), warnings and undo feedback
-    # appear here and fade, so the rig never needs a modal dialog that a
-    # performer would have to dismiss mid-bar.
-    msg = st.get("message")
-    if msg:
-        # Starts clear of the tab strip, which is 95px wide at most.
-        zone_x = 100
-        # Leave the transport glyph its 8px plus a gap on the right.
-        width = max(0, x_right - zone_x - 16)
-        if width > 0:
-            f.text_center(zone_x, width, 1, msg[:width // 6], MUTED)
-
-    # Shape carries transport state even when the eye is elsewhere.
     tx = x_right - 8
     if st.get("playing"):
         for i in range(6):
-            f.vline(tx + i, 1 + i // 2, GLYPH_H - (i // 2) * 2, BRIGHT)
+            f.vline(tx + i, y + i // 2, GLYPH_H - (i // 2) * 2, BRIGHT)
     else:
-        f.fill(tx, 1, 2, GLYPH_H, MUTED)
-        f.fill(tx + 4, 1, 2, GLYPH_H, MUTED)
-    f.hline(0, HEADER_H, 255, DIM)
+        f.fill(tx, y, 2, GLYPH_H, MUTED)
+        f.fill(tx + 4, y, 2, GLYPH_H, MUTED)
+
+    # The expanded-label line: the full, untruncated name and value of
+    # whichever encoder is being turned. Truncated 5-character cells are
+    # what broke Push 1's heads-up premise; this is the documented fix.
+    msg = st.get("message")
+    if msg:
+        zone_x = f.text_width(mode) + 10
+        width = max(0, tx - zone_x - 6)
+        if width > 0:
+            f.text_center(zone_x, width, y, msg[:width // 6], MUTED)
 
 
-def draw_footer(f, labels, active=()):
-    """Eight button labels, aligned to the eight hardware buttons."""
-    f.hline(0, FOOTER_Y - 2, 255, DIM)
-    for i, label in enumerate(labels[:COLS]):
-        if not label:
+def draw_encoder_bar(f, st, values):
+    """Bottom strip: what the eight encoders control, next to the knobs."""
+    f.hline(0, ENCBAR_Y - 2, 255, DIM)
+    for i, v in enumerate(values[:COLS]):
+        if v is None:
             continue
-        if i in active:
-            f.fill(COL_X[i], FOOTER_Y - 1, COL_W, GLYPH_H + 3, MUTED)
-            f.text_center(COL_X[i], COL_W, FOOTER_Y + 1, label, OFF)
-        else:
-            f.text_center(COL_X[i], COL_W, FOOTER_Y + 1, label, NORMAL)
+        x = COL_X[i]
+        f.meter(x + 2, ENCBAR_Y, COL_W - 4, 3, v.get("norm", 0.0),
+                v.get("level", NORMAL))
+        text = v.get("text")
+        if text:
+            f.text_center(x, COL_W, ENCBAR_Y + 5, text[:5], NORMAL)
 
 
-def column_divider(f, i, top=HEADER_H + 2):
+def draw_header(f, st):
+    draw_button_bar(f, st)
+    draw_status(f, st)
+
+
+def column_divider(f, i, top=BODY_Y):
     """Separator between encoder columns. `top` lets a page keep its own
     full-width info row clear - a divider drawn through a header badge
     breaks the badge in half."""
     if i:
-        f.vline(COL_X[i] - 1, top, FOOTER_Y - top - 3, DIM)
+        f.vline(COL_X[i] - 1, top, ENCBAR_Y - top - 4, DIM)
 
 
 # --- LOOP ------------------------------------------------------------
@@ -121,6 +146,7 @@ def column_divider(f, i, top=HEADER_H + 2):
 
 def page_loop(f, st):
     draw_header(f, st)
+    encoders = []
     for i, lane in enumerate(st["lanes"][:COLS]):
         x = COL_X[i]
         column_divider(f, i)
@@ -128,46 +154,53 @@ def page_loop(f, st):
         name = lane.get("name", "-")[:5]
 
         if state == "empty":
-            f.text_center(x, COL_W, 13, name, DIM)
-            f.hline(x + 8, 30, COL_W - 16, DIM)
+            f.text_center(x, COL_W, BODY_Y + 1, name, DIM)
+            f.hline(x + 8, BODY_Y + 14, COL_W - 16, DIM)
+            encoders.append(None)
             continue
 
-        # State lives in the name row, so the number below can mean the
-        # same thing on every lane: recording is a bright block, overdub a
-        # dimmer one, armed is outlined, playing is plain text.
+        # State is carried by fill, not hue - there is no hue here. Solid
+        # bright = recording, solid dim = overdub, outline = armed, plain
+        # = playing. "Empty" above is deliberately a different shape from
+        # all of them, which is the distinction BOSS had to retrofit.
         if state == "rec":
-            f.fill(x, 12, COL_W, GLYPH_H + 3, BRIGHT)
-            f.text_center(x, COL_W, 13, name, OFF)
+            f.fill(x, BODY_Y, COL_W, GLYPH_H + 3, BRIGHT)
+            f.text_center(x, COL_W, BODY_Y + 1, name, OFF)
         elif state == "dub":
-            f.fill(x, 12, COL_W, GLYPH_H + 3, MUTED)
-            f.text_center(x, COL_W, 13, name, OFF)
+            f.fill(x, BODY_Y, COL_W, GLYPH_H + 3, MUTED)
+            f.text_center(x, COL_W, BODY_Y + 1, name, OFF)
         elif state == "armed":
-            f.rect(x, 12, COL_W, GLYPH_H + 3, NORMAL)
-            f.text_center(x, COL_W, 13, name, NORMAL)
+            f.rect(x, BODY_Y, COL_W, GLYPH_H + 3, NORMAL)
+            f.text_center(x, COL_W, BODY_Y + 1, name, NORMAL)
         else:
-            f.text_center(x, COL_W, 13, name, NORMAL)
+            f.text_center(x, COL_W, BODY_Y + 1, name, NORMAL)
 
-        # One meaning for the big number everywhere: bars until this lane
-        # comes round. That is the question being asked mid-performance.
+        # The analogue position sweep is the primary channel, as on every
+        # looper surveyed, and it is never blanked during recording -
+        # going dark exactly when the player needs it is the RC-505's
+        # documented mistake.
+        bars = lane.get("bars", 0)
+        bar = lane.get("bar", 0)
+        phase = lane.get("phase", 0.0)
+        progress = (bar + phase) / bars if bars else 0.0
+        f.meter(x + 2, BODY_Y + 11, COL_W - 4, 5, progress,
+                BRIGHT if state in ("rec", "dub") else NORMAL)
+        # Bar ticks under the sweep answer the second question - where in
+        # the bar - which BOSS gives a whole second indicator ring.
+        f.progress_ticks(x + 2, BODY_Y + 17, COL_W - 4, bars, bar)
+
+        # The count is secondary to the sweep, so it is set at text size.
         remain = lane.get("bars_remaining")
         if remain is not None:
-            # No caption: a large number under a lane name in a looper
-            # reads as "bars left" once, and the 7 pixels a caption costs
-            # are worth more as separation between the widgets below.
-            f.text_center(x, COL_W, 23, str(remain), BRIGHT, scale=2)
+            f.text_center(x, COL_W, BODY_Y + 20, "%d BAR" % remain, NORMAL)
         else:
-            f.text_center(x, COL_W, 27, "WAIT", NORMAL)
+            f.text_center(x, COL_W, BODY_Y + 20, "WAIT", MUTED)
 
-        # Ticks (segmented) and level (continuous) sit apart so they never
-        # read as one widget.
-        f.progress_ticks(x + 3, 40, COL_W - 6,
-                         lane.get("bars", 0), lane.get("bar", 0))
-        f.meter(x + 3, 46, COL_W - 6, 3, lane.get("level", 0.0),
-                BRIGHT if state in ("rec", "dub") else MUTED)
+        encoders.append({"norm": lane.get("level", 0.0),
+                         "level": BRIGHT if state in ("rec", "dub") else MUTED,
+                         "text": name})
 
-    active = tuple(i for i, l in enumerate(st["lanes"][:COLS])
-                   if l.get("state") in ("rec", "dub"))
-    draw_footer(f, [l.get("key", "") for l in st["lanes"][:COLS]], active)
+    draw_encoder_bar(f, st, encoders)
 
 
 # --- MIX -------------------------------------------------------------
@@ -175,29 +208,28 @@ def page_loop(f, st):
 
 def page_mix(f, st):
     draw_header(f, st)
+    encoders = []
     for i, ch in enumerate(st["mixer"][:COLS]):
         x = COL_X[i]
         column_divider(f, i)
         name = ch.get("name", "-")[:5]
-        # Solo inverts the name, mute dims it: no extra row to collide
-        # with the footer, and both states survive a glance.
         if ch.get("solo"):
-            f.fill(x, 12, COL_W, GLYPH_H + 3, BRIGHT)
-            f.text_center(x, COL_W, 13, name, OFF)
+            f.fill(x, BODY_Y, COL_W, GLYPH_H + 3, BRIGHT)
+            f.text_center(x, COL_W, BODY_Y + 1, name, OFF)
         else:
-            f.text_center(x, COL_W, 13, name, DIM if ch.get("mute") else NORMAL)
+            f.text_center(x, COL_W, BODY_Y + 1, name,
+                          DIM if ch.get("mute") else NORMAL)
 
-        top, height = 24, 24
-        # Fader: a thin track with a wide knob.
-        track_x = x + 7
+        top, height = BODY_Y + 12, 14
+        # A fader is a knob on a thin track; a meter is a solid column.
+        # When both were thin vertical lines they swapped identities.
+        track_x = x + 8
         f.vline(track_x, top, height, DIM)
-        f.hline(track_x - 3, top + int(height * 0.25), 7, DIM)   # unity
+        f.hline(track_x - 3, top + int(height * 0.25), 7, DIM)
         knob_y = top + int((1.0 - ch.get("gain", 0.8)) * (height - 3))
         f.fill(track_x - 4, knob_y, 9, 3, BRIGHT)
 
-        # Meter: a solid column growing from the bottom - deliberately a
-        # different shape from the fader so the two never trade places.
-        mx = x + COL_W - 10
+        mx = x + COL_W - 11
         level = ch.get("level", 0.0)
         f.rect(mx, top, 5, height, DIM)
         lit = int(level * (height - 2))
@@ -208,14 +240,9 @@ def page_mix(f, st):
             f.hline(mx - 1, top + height - 1 - int(peak * (height - 2)), 7,
                     MUTED)
 
-    # The eight buttons toggle mute for the strip above them, so the label
-    # is the action and inversion is the state.
-    draw_footer(f, ["MUTE"] * len(st["mixer"][:COLS]),
-                tuple(i for i, c in enumerate(st["mixer"][:COLS])
-                      if c.get("mute")))
-
-
-MAXCLIP = BRIGHT
+        encoders.append({"norm": ch.get("gain", 0.0), "level": NORMAL,
+                         "text": name})
+    draw_encoder_bar(f, st, encoders)
 
 
 # --- FX --------------------------------------------------------------
@@ -224,32 +251,24 @@ MAXCLIP = BRIGHT
 def page_fx(f, st):
     draw_header(f, st)
     fx = st.get("fx", {})
-    f.text(2, 13, fx.get("track", "-")[:6], BRIGHT)
-    # Reserve the badge's width so a long plugin name truncates instead
-    # of running underneath it.
+    f.text(2, BODY_Y - 8, fx.get("track", "-")[:6], BRIGHT)
     badge = "BYPASS" if fx.get("bypass") else "ACTIVE"
     badge_x = 254 - f.text_width(badge) - 3
-    f.text(46, 13, fx.get("name", "-")[:(badge_x - 50) // 6], NORMAL)
+    f.text(46, BODY_Y - 8, fx.get("name", "-")[:(badge_x - 50) // 6], NORMAL)
     if fx.get("bypass"):
-        f.text_right(254, 13, badge, MUTED)
+        f.text_right(254, BODY_Y - 8, badge, MUTED)
     else:
-        f.text_inverted(badge_x, 13, badge)
-    f.hline(0, 22, 255, DIM)
+        f.text_inverted(badge_x, BODY_Y - 8, badge)
 
-    for i, p in enumerate(fx.get("params", [])[:COLS]):
+    encoders = []
+    for i, prm in enumerate(fx.get("params", [])[:COLS]):
         x = COL_X[i]
-        column_divider(f, i, top=24)
-        f.text_center(x, COL_W, 25, p.get("name", "-")[:5], DIM)
-        # Value gets the emphasis, label stays quiet: the performer is
-        # reading numbers here, not names.
-        f.text_center(x, COL_W, 34, p.get("value", "-")[:5], BRIGHT)
-        f.meter(x + 3, 45, COL_W - 6, 3, p.get("norm", 0.0), NORMAL)
-
-    # Encoders already own the parameters above; the buttons are for
-    # moving around the chain, so repeating the names here would waste
-    # the only eight controls left.
-    draw_footer(f, ["<TRK", "TRK>", "<FX", "FX>", "BYP", "PRE", "NEXT",
-                    "SAVE"])
+        column_divider(f, i, top=BODY_Y + 2)
+        f.text_center(x, COL_W, BODY_Y + 4, prm.get("name", "-")[:5], DIM)
+        f.text_center(x, COL_W, BODY_Y + 14, prm.get("value", "-")[:5], BRIGHT)
+        encoders.append({"norm": prm.get("norm", 0.0), "level": NORMAL,
+                         "text": prm.get("value", "")[:5]})
+    draw_encoder_bar(f, st, encoders)
 
 
 # --- SONG ------------------------------------------------------------
@@ -258,13 +277,13 @@ def page_fx(f, st):
 def page_song(f, st):
     draw_header(f, st)
     song = st.get("song", {})
-    f.text(2, 13, "SEQ", DIM)
-    f.text(24, 13, song.get("sequence", "-")[:12], BRIGHT)
-    f.text_right(254, 13, "%d BARS" % song.get("bars", 0), MUTED)
+    f.text(2, BODY_Y, "SEQ", DIM)
+    f.text(24, BODY_Y, song.get("sequence", "-")[:12], BRIGHT)
+    f.text_right(254, BODY_Y, "%d BARS" % song.get("bars", 0), MUTED)
 
-    # Arrangement ribbon: the whole song across the screen with the
-    # playhead on it, so position is spatial rather than numeric.
-    top, height = 24, 14
+    # The arrangement as a map: position is spatial, not numeric, which
+    # is the one thing the big-screen loopers get wrong.
+    top, height = BODY_Y + 10, 13
     total = max(1, song.get("bars", 1))
     f.rect(1, top, 253, height, DIM)
     for seg in song.get("sections", []):
@@ -273,15 +292,11 @@ def page_song(f, st):
         f.fill(sx + 1, top + 1, sw, height - 2,
                BRIGHT if seg.get("current") else MUTED)
         if sw > 20:
-            f.text(sx + 3, top + 4, seg.get("name", "")[:4],
+            f.text(sx + 3, top + 3, seg.get("name", "")[:4],
                    OFF if seg.get("current") else NORMAL)
     head = 1 + int(song.get("position", 0) / total * 251)
-    f.vline(head, top - 3, height + 6, BRIGHT)
-
-    f.text(2, 44, "LOOPS", DIM)
-    f.text(40, 44, "%d ON TIMELINE" % song.get("loops", 0), NORMAL)
-
-    draw_footer(f, ["PREV", "NEXT", "ADD", "DEL", "", "", "SAVE", "QUIT"])
+    f.vline(head, top - 3, height + 5, BRIGHT)
+    draw_encoder_bar(f, st, [None] * COLS)
 
 
 RENDERERS = {"LOOP": page_loop, "MIX": page_mix, "FX": page_fx,
@@ -299,21 +314,24 @@ def render(st):
 
 def sample_state(page):
     st = {"page": page, "playing": True, "bpm": 86.0, "position": "005.3",
-          "recording": 1, "xruns": 0, "message": "GTR2 REC 2 BARS"}
+          "recording": 1, "xruns": 0, "mode": "DAW",
+          "message": "GTR2 LEVEL  -6.0 DB",
+          "buttons": ("REC", "ARM", "UNDO", "PIN"),
+          "buttons_active": ()}
     st["lanes"] = [
         {"name": "GTR1", "state": "play", "bars": 4, "bar": 3,
-         "bars_remaining": 1, "level": 0.55, "key": "STOP"},
+         "bars_remaining": 1, "phase": 0.4, "level": 0.55},
         {"name": "GTR2", "state": "rec", "bars": 4, "bar": 2,
-         "bars_remaining": 2, "level": 0.82, "key": "REC"},
+         "bars_remaining": 2, "phase": 0.2, "level": 0.82},
         {"name": "MIC", "state": "dub", "bars": 2, "bar": 1,
-         "bars_remaining": 1, "level": 0.30, "key": "DUB"},
+         "bars_remaining": 1, "phase": 0.7, "level": 0.30},
         {"name": "AUX", "state": "play", "bars": 8, "bar": 5,
-         "bars_remaining": 3, "level": 0.12, "key": "STOP"},
+         "bars_remaining": 3, "phase": 0.1, "level": 0.12},
         {"name": "L5", "state": "armed", "bars": 4, "bar": 0,
-         "level": 0.0, "key": "ARM"},
-        {"name": "L6", "state": "empty", "key": "REC"},
-        {"name": "L7", "state": "empty", "key": "REC"},
-        {"name": "L8", "state": "empty", "key": "REC"},
+         "level": 0.0},
+        {"name": "L6", "state": "empty"},
+        {"name": "L7", "state": "empty"},
+        {"name": "L8", "state": "empty"},
     ]
     st["mixer"] = [
         {"name": "MPC", "gain": 0.80, "level": 0.62, "peak": 0.71},

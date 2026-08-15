@@ -390,6 +390,61 @@ page. That is not a convenience — reviewing the panel as one surface is
 what caught the header duplication below, which no single-page snapshot
 would have shown.
 
+### Geometry: labels go next to their controls
+
+The MK1's **eight buttons sit above the displays and its encoders below**
+them (cabl's `DisplayButton1..8`; NI's manual: *"The eight Buttons above
+the displays dynamically adapt their function… The action they perform is
+shown below each Button in the displays"*). So:
+
+```text
+ y0-10   eight button labels          <- adjacent to the buttons above
+ y11-19  mode | expanded label | transport, REC count, xruns
+ y20-46  page body, eight columns
+ y48-63  encoder values and meters    <- adjacent to the encoders below
+```
+
+The first four button cells are the pages, so the tab strip and the
+legend are the *same* eight cells rather than two competing rows. An
+earlier revision of these pages put the button legend along the bottom,
+pointing at the encoders — label adjacency is the one rule every surveyed
+controller obeys, and getting it backwards makes every press a guess.
+
+### What the survey of shipping controllers changed
+
+Researched against Push 1, Elektron (Digitakt/Octatrack/Rytm), Novation
+Circuit/Launchpad, BOSS RC-505mkII/RC-600 and the HeadRush Looperboard:
+
+- **The analogue position sweep is the primary channel, not the number.**
+  Every looper surveyed shows loop position as a sweep; BOSS ships *two*
+  concentric rings (loop position and bar phase) because both questions
+  matter and are distinct. Our lane column now leads with a progress bar
+  plus a bar-tick row, and the bar count is set at ordinary text size
+  beneath them rather than dominating the column.
+- **Never blank the position indicator while recording.** The RC-505mkII
+  does exactly that in two of its three indicator modes, which is its
+  most-reported UX defect.
+- **Bar counters are deliberately absent on BOSS** — quantisation is made
+  trustworthy so the player never counts. We keep a count because the DAW
+  genuinely knows it, but demoted it accordingly.
+- **"Empty" must not look like "stopped".** BOSS retrofitted a distinct
+  colour for phrase-exists because users could not tell them apart. Empty
+  lanes here are a dim name over a dim rule — a different *shape* from
+  every active state, not merely a dimmer one.
+- **We have no hue, so the animation axis carries what colour carries
+  elsewhere**: static = available, blinking = queued, animated fill =
+  active, inverted = selected.
+- **An expanded-label line fixes truncation.** Push 1's 8-character
+  parameter names were its most-cited flaw — users had to look at the
+  computer, defeating the whole point. At 31px per column we have room
+  for *five*, so the status line shows the full name and value of
+  whichever encoder is moving (Analog Rytm's fix, reusing an existing
+  field rather than opening a popup).
+- **A persistent mode name in a fixed corner.** Neither Push nor Maschine
+  ships one, relying on a lit button instead. Raskin's locus-of-attention
+  argument says that indicator fails precisely when attention is on the
+  music, and we have the pixels.
+
 ### The rules the pages follow
 
 1. **State before detail.** What a lane is doing must be readable without
