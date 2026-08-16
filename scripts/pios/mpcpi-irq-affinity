@@ -1,0 +1,85 @@
+#!/bin/sh
+# Give the audio interrupt a core, and make it outrank the others.
+#
+# The previous version put "i2s|xhci|mmc|eth" on cores 0-1 and called
+# that pinning the audio path away from the audio cores. It missed the
+# audio interrupt entirely. On a Pi 5 the I2S transfer is driven by the
+# RP1 DMA engine and appears in /proc/interrupts as
+# dw_axi_dmac_platform, which matches none of those patterns - so it
+# stayed on core 0 under the default irqaffinity, sharing one core with
+# every other interrupt AND with all of userspace, since isolcpus=1-3
+# leaves core 0 as the only core an ordinary task may run on.
+#
+# What that costs, from /proc/interrupts on a running board:
+#
+#   141  dw_axi_dmac_platform   175,035   all on CPU0   <- audio
+#   107  eth0                   922,869   all on CPU0
+#
+# Every audio period begins with interrupt 141, queued behind a source
+# firing five times more often, at the same threaded-IRQ priority of 50.
+# That is a wake-up latency tail, and a wake-up latency tail is exactly
+# what the xrun measurements show: the rate tracks the callback RATE and
+# ignores the load, staying put when every plugin in the session is
+# switched off and the graph drops to a third of its period.
+#
+# So: everything on core 0, audio alone on core 1 - the same core as
+# PipeWire's data loop, deliberately, because the interrupt's whole job
+# is to wake that loop and a same-core wake needs no IPI. Then lift the
+# audio IRQ thread above the rest, which is the half that affinity alone
+# cannot do: two threads at priority 50 on different cores do not
+# queue behind each other, but a shared DMA engine's other clients do.
+AUDIO_CORE_MASK=2      # core 1
+OTHER_CORE_MASK=1      # core 0
+found=""
+
+# One pass over /proc/interrupts, splitting number from name, rather than
+# a grep back into the file per IRQ.
+while IFS= read -r ln; do
+	case "$ln" in
+		*:*) ;;
+		*) continue ;;
+	esac
+	irq=${ln%%:*}
+	irq=$(printf '%s' "$irq" | tr -d ' ')
+	case "$irq" in
+		''|*[!0-9]*) continue ;;
+	esac
+	name=${ln##*  }
+	case "$name" in
+		*dw_axi_dmac*|*i2s*|*1f000a0000*)
+			echo "$AUDIO_CORE_MASK" > "/proc/irq/$irq/smp_affinity" 2>/dev/null &&
+				found="$found $irq($name)"
+			;;
+		*)
+			echo "$OTHER_CORE_MASK" > "/proc/irq/$irq/smp_affinity" 2>/dev/null
+			;;
+	esac
+done < /proc/interrupts
+
+# Say what was found, and say so loudly when nothing was. Silence is how
+# the previous version passed for two months while matching no audio
+# interrupt at all.
+if [ -n "$found" ]; then
+	echo "  audio IRQ ->core 1:$found"
+else
+	echo "  WARNING: no audio interrupt matched; the audio path is still" >&2
+	echo "           sharing core 0 with every other device" >&2
+fi
+
+# threadirqs turns each handler into a task, so the audio one can simply
+# be given a higher realtime priority than the others. 95 sits above
+# PipeWire's data loop (88) because it is upstream of it: the interrupt
+# is what makes the loop runnable, and a wake source that waits behind
+# the thing it wakes has inverted the order.
+# Matched on comm, never with pgrep -f: the pattern would appear in
+# pgrep's own command line, and a self-match here would chrt this
+# script instead of the interrupt thread.
+for p in /proc/[0-9]*; do
+	comm=$(cat "$p/comm" 2>/dev/null) || continue
+	case "$comm" in
+		irq/*dw_axi_dmac*|irq/*i2s*)
+			chrt -f -p 95 "${p##*/}" 2>/dev/null &&
+				echo "  ${comm}: rt prio 95 on core 1"
+			;;
+	esac
+done

@@ -85,9 +85,25 @@ end)
 -- So they are created and then deactivated. Arming one for recording
 -- reactivates it; the panel's LOOP page is where that happens.
 -- MPC_INDIVIDUAL_ACTIVE=1 keeps the old behaviour for comparison.
+-- Deactivating is not the same as not existing, and the difference is
+-- the point of MPC_INDIVIDUAL_TRACKS=0. set_active(false) stops a route
+-- processing, but its ports stay registered, and the graph is scheduled
+-- per PORT, not per active route: PipeWire still prepares a buffer for
+-- every one of them on every callback. Sixteen mono inputs and sixteen
+-- outputs that are never read still cost their share of the fixed
+-- per-callback price.
+--
+-- Set to 0 to leave them uncreated entirely. Strip order survives it:
+-- the eight channel strips are created first and the panel addresses
+-- only those by position.
 local individual_active = os.getenv("MPC_INDIVIDUAL_ACTIVE") == "1"
+local individual_tracks = os.getenv("MPC_INDIVIDUAL_TRACKS") ~= "0"
 
 step("create individual-out tracks", function()
+	if not individual_tracks then
+		say("  skipped: MPC_INDIVIDUAL_TRACKS=0 (no ports created)")
+		return
+	end
 	-- The emulator exposes its eight individual outs as a separate node
 	-- (MPC_OUTPUT_MODE=all); one mono track each so the MPC's drums can
 	-- be mixed per voice group.
@@ -339,8 +355,10 @@ step("connect the emulator", function()
 	else
 		say("  note: emulator not running, MPC input left unconnected")
 	end
-	for i = 1, math.min(8, #outs) do
-		tracks["MPC" .. i]:input():audio(0):connect(outs[i])
+	if individual_tracks then
+		for i = 1, math.min(8, #outs) do
+			tracks["MPC" .. i]:input():audio(0):connect(outs[i])
+		end
 	end
 end)
 

@@ -83,23 +83,28 @@ echo "  governor: performance, pinned by mpcpi-latency-hold"
 
 log "kernel cmdline"
 CMD="$BOOT/cmdline.txt"
-add_cmd() {
-	grep -qw -- "$1" "$CMD" 2>/dev/null || {
-		sed -i "s/\$/ $1/" "$CMD"; echo "  + $1"; }
-}
-# Cores 2-3 belong to the emulator and the audio graph.
-add_cmd "isolcpus=2-3"
-# nohz_full stops the scheduler tick on those cores; rcu_nocbs moves RCU
-# callback work off them. Without these, isolcpus still leaves periodic
-# interruptions that show up as occasional long cycles.
-add_cmd "nohz_full=2-3"
-add_cmd "rcu_nocbs=2-3"
-# Push device interrupts to the housekeeping cores so an SD or USB IRQ
-# cannot land on an audio core mid-buffer.
-add_cmd "irqaffinity=0-1"
-add_cmd "threadirqs"
-# The Pi's default is fine, but say it: no lazy page faults under RT.
-add_cmd "audit=0"
+# Strip each key before setting it, never append-if-absent. The old
+# add_cmd tested for the exact string, so once the isolation widened
+# from two cores to three this file would have appended isolcpus=2-3
+# next to the isolcpus=1-3 already there - two values for one key on one
+# command line, with the kernel taking whichever it parsed last. A
+# tuning script that can silently un-tune the board is worse than none.
+#
+# Cores 1-3 are the audio side: PipeWire's data loop alone on 1, the
+# graph's workers on 2-3. Core 0 keeps every interrupt and the whole of
+# userspace - which is also why the audio interrupt is moved off it
+# afterwards, see mpcpi-irq-affinity.
+#
+# nohz_full stops the scheduler tick on those cores and rcu_nocbs moves
+# RCU callback work off them; without both, isolcpus still leaves
+# periodic interruptions that show up as occasional long cycles.
+WANT="isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 irqaffinity=0 threadirqs audit=0"
+line=$(tr -d '\n' < "$CMD")
+for key in isolcpus nohz_full rcu_nocbs irqaffinity threadirqs audit; do
+	line=$(printf '%s' "$line" | sed -E "s/(^| )$key(=[^ ]*)?//g")
+done
+printf '%s %s\n' "$line" "$WANT" | tr -s ' ' > "$CMD"
+echo "  cmdline: $WANT"
 
 log "swap and memory"
 # Swap is unbounded latency. An instrument that swaps has already failed.
@@ -175,22 +180,18 @@ context.modules = [
     }
 ]
 EOF
-echo "  48k, quantum 256 (min 32), RT prio 88"
+echo "  44.1k, quantum 48 (32..64), RT prio 88"
 
 log "irq affinity"
-# Best effort now, and persisted for boot. i2s and xhci are the two that
-# matter: the audio path and the controller.
-cat > /usr/local/sbin/mpcpi-irq-affinity <<'EOF'
-#!/bin/sh
-# Keep device interrupts on cores 0-1, away from the audio cores.
-for irq in $(awk -F: '/i2s|xhci|mmc|eth/ {gsub(/ /,"",$1); print $1}' /proc/interrupts); do
-	echo 3 > "/proc/irq/$irq/smp_affinity" 2>/dev/null || true
-done
-EOF
+# Best effort now, and persisted for boot. The helper is a real file
+# rather than a heredoc so it can be read, diffed and run on its own -
+# it is the change most likely to need re-measuring.
+install -m 0755 "$(dirname "$0")/mpcpi-irq-affinity" \
+    /usr/local/sbin/mpcpi-irq-affinity
 chmod 0755 /usr/local/sbin/mpcpi-irq-affinity
 cat > /etc/systemd/system/mpcpi-irq-affinity.service <<'EOF'
 [Unit]
-Description=Pin device IRQs away from the audio cores
+Description=Give the audio interrupt its own core and priority
 # NOT After=multi-user.target: this unit is WantedBy that same target, so
 # ordering after it is a deadlock - the job sits queued forever and
 # `is-enabled` cheerfully reports "enabled" while nothing has ever run.
@@ -208,7 +209,7 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --now mpcpi-irq-affinity.service >/dev/null 2>&1 || true
-echo "  IRQs pinned to cores 0-1"
+echo "  audio IRQ alone on core 1 at prio 95; everything else on core 0"
 
 echo
 echo "Reboot required for cmdline changes. Then measure, do not assume:"

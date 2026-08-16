@@ -40,7 +40,11 @@ for n in $NS; do
 	chown mpc:mpc "$CFG"
 	got=$(grep -o 'processor-usage" value="[0-9]*"' "$CFG")
 	echo "=== processor-usage=$n ($got) ===" | tee -a "$OUT"
+	# --line-buffered or nothing appears until the config finishes: grep
+	# block-buffers when its stdout is a pipe, so a sweep that takes
+	# twelve minutes shows an empty log for four of them and reads as a
+	# hang. The run is long enough that watching it matters.
 	ACTIVE=none sh /opt/mpc-pi-src/scripts/daw/measure-xruns.sh 48 32 |
-		grep -E "^(Q=|  q=)" | tee -a "$OUT"
+		grep --line-buffered -E "^(Q=|  q=)" | tee -a "$OUT"
 done
 echo SWEEP-DONE | tee -a "$OUT"
