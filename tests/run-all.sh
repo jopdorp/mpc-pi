@@ -45,12 +45,10 @@ if [ "${1:-}" = "--no-integration" ]; then
 else
 	echo
 	echo "== integration"
-	LUA=/usr/lib/ardour9/luasession
-	if [ -x "$LUA" ]; then
-		export ARDOUR_DATA_PATH=/usr/share/ardour9
-		export ARDOUR_CONFIG_PATH=/etc/ardour9
-		export ARDOUR_DLL_PATH=/usr/lib/ardour9
-		export LD_LIBRARY_PATH=/usr/lib/ardour9
+	# shellcheck source=../scripts/daw/ardour-env.sh
+	. scripts/daw/ardour-env.sh
+	if ardour_env; then
+		echo "  (Ardour $ARDOUR_VERSION at $ARDOUR_DLL_PATH)"
 		run "every plugin in the manifest instantiates" \
 			bash tests/integration/plugins_load.sh
 		run "the session template builds the whole desk" \

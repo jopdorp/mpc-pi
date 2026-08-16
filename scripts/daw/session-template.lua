@@ -31,19 +31,34 @@ local function step(label, fn)
 end
 
 local session
-step("select backend", function()
-	local b = AudioEngine:set_backend("JACK/Pipewire", "", "")
-	assert(b and not b:isnil(), "no JACK/Pipewire backend")
-end)
-step("create session", function()
+-- Try backends in order of how much they prove. On the appliance
+-- PipeWire is up and JACK is the real path; over an ssh session on the
+-- board there is no user sound server at all, and insisting on JACK made
+-- create_session return nil - which reads as a broken template rather
+-- than a missing daemon. Dummy still builds the whole desk and still
+-- instantiates every plugin, which is what this template is asserting.
+-- Backend selection and the route-group argument both differ by version
+-- and by host; they live in one module so the plugin probe cannot drift
+-- from this file. See scripts/daw/ardour-compat.lua for why each choice
+-- is made the way it is.
+local compat = dofile(os.getenv("MPCPI_COMPAT")
+	or "scripts/daw/ardour-compat.lua")
+local backend_used
+
+step("select backend and create session", function()
+	backend_used = compat.use_backend()
 	session = create_session(dir, name, rate)
-	assert(session, "create_session returned nil")
+	assert(session, "create_session returned nil on " .. backend_used ..
+		" (is the sound server running?)")
 end)
+say("backend: " .. tostring(backend_used))
 assert(session, "cannot continue without a session")
 
 -- Track creation: the 9-argument form (Ardour 9 added trigger_visibility).
+local ROUTE_GROUP = compat.route_group()
+
 local function add_audio(nm, ins)
-	local tl = session:new_audio_track(ins, 2, ARDOUR.RouteGroup(), 1, nm,
+	local tl = session:new_audio_track(ins, 2, ROUTE_GROUP, 1, nm,
 		ARDOUR.PresentationInfo.max_order, ARDOUR.TrackMode.Normal, true, true)
 	assert(tl:size() > 0, "no track created for " .. nm)
 	return tl:front()
@@ -68,7 +83,7 @@ end)
 
 step("create send buses", function()
 	for _, nm in ipairs({ "FX A", "FX B" }) do
-		local bl = session:new_audio_route(2, 2, ARDOUR.RouteGroup(), 1, nm,
+		local bl = session:new_audio_route(2, 2, ROUTE_GROUP, 1, nm,
 			ARDOUR.PresentationInfo.Flag.AudioBus,
 			ARDOUR.PresentationInfo.max_order)
 		assert(bl:size() > 0, "no bus for " .. nm)
