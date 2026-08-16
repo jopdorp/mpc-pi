@@ -45,7 +45,13 @@ a=$(driver_err)
 # The full fast preset. Kept in one place ON PURPOSE: if this list and
 # run-mpc2000xl-fast.sh drift apart, this benchmark measures a machine
 # the appliance does not ship.
-setsid taskset --cpu-list "$CPUS" chrt --rr 20 env \
+#
+# No setsid. In a script, setsid usually forks - the caller is a group
+# leader - so $! names the setsid parent, which exits immediately.
+# The first run of this script then declared the emulator dead at the
+# 5-second check while it played on unmeasured for its full minute.
+# taskset/chrt/env all exec, so without setsid $! IS the emulator.
+taskset --cpu-list "$CPUS" chrt --rr 20 env \
 	MAME_MPC_V53_BRK88_HLE=1 MAME_MPC_V53_BRK77_HLE=1 \
 	MAME_MPC_V53_BRK92_HLE=1 MAME_MPC_V53_BRKFD_HLE=1 \
 	MAME_MPC_V53_DIRECT_DISPATCH=1 MAME_MPC_V53_DIVIDE_SUPERBLOCK=1 \

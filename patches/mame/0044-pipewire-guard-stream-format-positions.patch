@@ -1,0 +1,52 @@
+Guard PipeWire stream format positions against unfilled node data
+
+The port count and the channel-position array of a node arrive on
+different PipeWire events: m_sinks/m_sources grow as port registry
+events come in, while m_position_codes is only filled when a later
+Format param event lands on the node.  stream_sink_open() and
+stream_source_open() indexed the vector by the port count with no
+bound: caught between the two events, the vector is empty, data() of
+an empty vector is null, and the read is a null dereference.
+
+On the appliance this crashed the emulator at startup several times in
+a row, timing-dependent enough that whether stdout was a pipe or
+/dev/null decided whether it survived - which is what a two-event race
+looks like from the outside.  Missing entries now fall back to
+SPA_AUDIO_CHANNEL_UNKNOWN, and the loop is also clamped to
+SPA_AUDIO_MAX_CHANNELS, the size of the fixed position array it fills.
+
+--- a/src/osd/modules/sound/pipewire_sound.cpp
++++ b/src/osd/modules/sound/pipewire_sound.cpp
+@@ -805,8 +805,16 @@
+ 		rate,
+ 		stream.m_channels
+ 	};
+-	for(uint32_t i=0; i != snode.m_sinks; i++)
+-		format.position[i] = snode.m_position_codes[i];
++	// The port count and the position array arrive on different events:
++	// m_sinks grows as port registry events come in, m_position_codes is
++	// filled by a later Format param event on the node.  Between the two,
++	// the vector is still empty - and data() of an empty vector is null,
++	// so indexing it is a null dereference, not garbage.  Seen in the
++	// wild as a startup segfault on the appliance, timing-dependent
++	// enough that redirecting stdout decided whether it crashed.
++	for(uint32_t i=0; i != snode.m_sinks && i != SPA_AUDIO_MAX_CHANNELS; i++)
++		format.position[i] = i < snode.m_position_codes.size()
++			? snode.m_position_codes[i] : SPA_AUDIO_CHANNEL_UNKNOWN;
+ 
+ 	uint8_t buffer[1024];
+ 	spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+@@ -858,8 +866,11 @@
+ 		rate,
+ 		stream.m_channels
+ 	};
+-	for(uint32_t i=0; i != snode.m_sources; i++)
+-		format.position[i] = snode.m_position_codes[i];
++	// Same guard as the sink side: the position array may not have
++	// arrived yet, and an empty vector's data() is null.
++	for(uint32_t i=0; i != snode.m_sources && i != SPA_AUDIO_MAX_CHANNELS; i++)
++		format.position[i] = i < snode.m_position_codes.size()
++			? snode.m_position_codes[i] : SPA_AUDIO_CHANNEL_UNKNOWN;
+ 
+ 	uint8_t buffer[1024];
+ 	spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));

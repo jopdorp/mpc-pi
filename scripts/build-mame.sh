@@ -55,6 +55,7 @@ mame_patches=(
     "$repo_root/patches/mame/0041-upd7810-timer-event-countdown.patch"
     "$repo_root/patches/mame/0042-mpc2000xl-panel-event-bus-hle.patch"
     "$repo_root/patches/mame/0043-mpc2000xl-input-and-dma-latency.patch"
+    "$repo_root/patches/mame/0044-pipewire-guard-stream-format-positions.patch"
 )
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then
