@@ -110,6 +110,11 @@ MPC_SYSROOT="${MPC_SYSROOT:-/srv/nfs/mpcpi-pios}"
 if [ -d "$MPC_SYSROOT/usr/lib/aarch64-linux-gnu" ]; then
     staging_dir="$MPC_SYSROOT"
     archopts="$archopts --sysroot=$MPC_SYSROOT"
+    # Debian is multiarch: bits/wordsize.h and friends live under
+    # /usr/include/aarch64-linux-gnu, a path Debian's own cross gcc
+    # searches by default and Buildroot's does not. Adding it explicitly
+    # is what lets a non-Debian toolchain use a Debian sysroot.
+    archopts="$archopts -I$MPC_SYSROOT/usr/include/aarch64-linux-gnu"
     echo "sysroot: $MPC_SYSROOT (the netbooted Debian root)"
 else
     echo "sysroot: $staging_dir (Buildroot - the board must be running it)" >&2
