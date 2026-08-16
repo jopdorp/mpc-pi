@@ -159,6 +159,36 @@ echo
 echo "Reboot required for cmdline changes. Then measure, do not assume:"
 echo "  sudo ./verify.sh"
 
+log "ardour: threads and cores"
+# isolcpus=2-3 removes those cores from every process's default affinity
+# mask, so nproc reports 2 on a four-core board and Ardour ran entirely
+# on cores 0-1 - the housekeeping cores that carry every device IRQ -
+# while the two cores isolated FOR audio sat idle. Isolation keeps things
+# out; it does not put anything in.
+#
+# Measured on the shipped session at quantum 48, changing only affinity:
+#   cores 0-1   943us  B/Q 0.87      (what it was doing)
+#   cores 1-3   799us  B/Q 0.73
+#   cores 2-3   761us  B/Q 0.70
+#
+# And thread count is not "more is better". Two DSP threads on two cores
+# is the best of 2/3/4; three and four both regress, because the extra
+# threads contend for the same two cores and each handoff is a
+# synchronisation point inside the callback:
+#   threads=2  q48 B/Q 0.74     threads=3  q48 over     threads=4  q48 0.91
+install -d /home/mpc/.config/ardour8
+cat > /home/mpc/.config/ardour8/config <<'ACFG'
+<?xml version="1.0" encoding="UTF-8"?>
+<Ardour version="8.0.0">
+  <Config>
+    <Option name="processor-usage" value="2"/>
+    <Option name="plugins-stop-with-transport" value="0"/>
+  </Config>
+</Ardour>
+ACFG
+chown -R mpc:mpc /home/mpc/.config/ardour8 2>/dev/null || true
+echo "  processor-usage=2; run Ardour with taskset -c 2-3"
+
 log "audio on the isolated cores"
 # isolcpus reserves cores 2-3, but reservation only keeps things OUT:
 # nothing lands there unless placed. Measured before this existed: the
