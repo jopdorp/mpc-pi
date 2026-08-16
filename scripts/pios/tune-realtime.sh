@@ -263,7 +263,7 @@ for u in pipewire wireplumber; do
 CPUAffinity=1
 UNIT
 done
-echo "  pipewire + wireplumber pinned to cores 2-3 (user units)"
+echo "  pipewire + wireplumber pinned to core 1 (user units)"
 
 log "jack clients get realtime too"
 # PipeWire's own loops had RT 88 while every pipewire-jack client ran

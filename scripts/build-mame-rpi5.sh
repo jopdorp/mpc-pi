@@ -11,10 +11,13 @@ set -euo pipefail
 # Buildroot's, correctly - the binary has to link against exactly the
 # libraries in the image it ships with. Then the appliance base moved to
 # Raspberry Pi OS and this script did not, so it kept building against a
-# rootfs the board no longer boots. The result ran nowhere: every NEEDED
-# library present, interpreter resolved, highest requirement GLIBC_2.38
-# against Debian's 2.41, and a segfault before main() - built against
-# Buildroot's glibc, started by Debian's.
+# rootfs the board no longer boots.
+#
+# That was a real bug and it is fixed here, but it was NOT the reason the
+# binary died: every NEEDED library resolved and the highest requirement
+# was GLIBC_2.38 against Debian's 2.41, which is fine. The segfault
+# before main() was a 4K-aligned binary meeting a 16K-page kernel - see
+# max_page below.
 #
 # MPC_SYSROOT points at the netboot rootfs by default. Buildroot's
 # cross-gcc is 14.3.0 and Debian trixie ships gcc 14 with
@@ -138,6 +141,25 @@ else
 fi
 export SDL_INSTALL_ROOT="$staging_dir/usr"
 
+# Align the LOAD segments for a 64K page, not the linker's 4K default.
+#
+# This is what "segfault before main()" actually was. The board runs a
+# 16K-page kernel (bcm2712 defconfig; getconf PAGESIZE says 16384), and
+# a binary whose segments are only 4K-aligned cannot be mapped by it at
+# all: the loader gives up with "ELF load command address/offset not
+# page-aligned" before a single instruction of the program runs.
+#
+# It was misread as a libc problem twice, because the symptom - dies
+# instantly, no output, exit 139 - is what a glibc mismatch also looks
+# like, and because the sysroot genuinely WAS wrong at the time. Fixing
+# the sysroot changed nothing, which should have been the clue. The
+# check at the end of this script is here so the next wrong guess costs
+# a build instead of a day: ask the loader, not the theory.
+#
+# 64K rather than 16K so the same binary maps on a 4K, 16K or 64K page
+# kernel. The cost is under 64KB of padding in a 54MB executable.
+max_page=65536
+
 make -C "$mame_source_dir" \
     SUBTARGET=mpc \
     SOURCES=src/mame/akai/mpc60.cpp,src/mame/akai/mpc2000.cpp,src/mame/akai/mpc3000.cpp \
@@ -159,7 +181,7 @@ make -C "$mame_source_dir" \
     OVERRIDE_LD="${cross_prefix}g++" \
     AR="${cross_prefix}ar" \
     ARCHOPTS="$archopts" \
-    LDOPTS="--sysroot=$staging_dir" \
+    LDOPTS="--sysroot=$staging_dir -Wl,-z,max-page-size=$max_page" \
     ${MAME_EXTRA_OPTS:-} \
     -j"$mame_jobs"
 
@@ -171,3 +193,20 @@ echo "note: removed aarch64 mpc from the checkout; desktop harnesses need"
 echo "      scripts/build-mame.sh to restore the x86 binary"
 printf '\nbuilt %s\n' "$out_binary"
 file "$out_binary" | sed 's/^/  /'
+
+# Gate on the thing that cannot be seen by running it here: this host has
+# 4K pages, so a binary that no 16K-page board can map runs fine on the
+# desktop and dies on the target. Read the alignment out of the ELF and
+# refuse to ship anything the board's loader would reject.
+readelf_bin=$(command -v "${cross_prefix}readelf" || command -v readelf)
+if [[ -n "$readelf_bin" ]]; then
+    worst=$("$readelf_bin" -lW "$out_binary" |
+        awk '$1 == "LOAD" { print strtonum($NF) }' | sort -n | head -1)
+    if [[ -n "$worst" && "$worst" -lt 16384 ]]; then
+        printf 'error: LOAD segments aligned to %s; the board pages at 16384\n' \
+            "$worst" >&2
+        printf '       the loader will refuse this binary before main()\n' >&2
+        exit 1
+    fi
+    printf '  segment alignment: %s (board pages at 16384)\n' "$worst"
+fi
