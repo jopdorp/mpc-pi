@@ -89,7 +89,11 @@ sleep 2
 # phantom whose ~1ms DMA service floor was driving the whole graph.
 if [ "${MPCPI_DRIVER:-}" = "usb" ]; then
 	SINK_TAG="Multichannel"
-	export MPCPI_PLAYBACK_MATCH="1000480000"
+	# The match runs against ARDOUR's port list, which is the JACK
+	# namespace: pipewire-jack names ports after the node DESCRIPTION
+	# ("Built-in Audio Multichannel:playback_AUX0"), not the native
+	# node.name - the platform path never appears there.
+	export MPCPI_PLAYBACK_MATCH="Multichannel"
 else
 	SINK_TAG="1f000a0000"
 fi
