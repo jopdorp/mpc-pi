@@ -23,6 +23,15 @@ against the board's counters for the same window. Zero events over
 minutes of capture is the sentence "no dropout reached this output",
 with nothing between the claim and the loudspeaker but the cable.
 
+Startup is reported, never skipped. Earlier versions of this analysis
+began three seconds in, to step over "the start transient" - which
+means the transient was never examined, and an ear caught a click there
+that the tool had been configured not to look at. A capture's first
+second is where stream negotiation lives, so it is exactly where a
+one-off glitch is expected AND exactly where one must not be hidden:
+events before STARTUP_S are counted and printed separately, and the
+steady-state verdict is stated as such rather than as "clean".
+
   check-continuity.py capture.wav [expected_hz]
 """
 import sys
@@ -95,14 +104,29 @@ def main() -> int:
                                f"{kind} {flat_run} samples"))
             flat_run = 1
 
+    STARTUP_S = 1.0
+    early = [e for e in events if e[0] < STARTUP_S]
+    steady = [e for e in events if e[0] >= STARTUP_S]
+
     print(f"{path}: {dur:.1f}s at {rate}Hz, {channels}ch, "
           f"peak {peak / full_scale:.3f}fs, slope limit {max_step / full_scale:.5f}fs")
-    for t, desc in events[:40]:
+    # A peak at or near full scale means something else is summed onto
+    # this channel - the classic way this tool has been made to lie.
+    if peak >= full_scale * 0.98:
+        print("  WARNING: peak is at full scale. Something is probably "
+              "mixed onto this channel; verify the routing before "
+              "believing any verdict below.")
+    if early:
+        print(f"  startup (first {STARTUP_S:.0f}s): {len(early)} events")
+        for t, desc in early[:6]:
+            print(f"    {t:9.3f}s  {desc}")
+    for t, desc in steady[:40]:
         print(f"  {t:9.3f}s  {desc}")
-    if len(events) > 40:
-        print(f"  ... and {len(events) - 40} more")
-    print(f"EVENTS {len(events)} over {dur:.1f}s")
-    return 0 if not events else 1
+    if len(steady) > 40:
+        print(f"  ... and {len(steady) - 40} more")
+    print(f"STEADY {len(steady)} events over {dur - STARTUP_S:.1f}s"
+          f"   STARTUP {len(early)}")
+    return 0 if not steady else 1
 
 
 if __name__ == "__main__":
