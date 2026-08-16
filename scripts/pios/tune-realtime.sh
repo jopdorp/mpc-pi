@@ -87,10 +87,20 @@ log "pipewire"
 install -d /etc/pipewire/pipewire.conf.d
 cat > /etc/pipewire/pipewire.conf.d/95-mpcpi.conf <<'EOF'
 context.properties = {
-    default.clock.rate          = 48000
-    default.clock.quantum       = 256
+    # 44100, because the MPC2000XL is a 44.1kHz machine and always was.
+    # A 48k graph puts a resampler in front of every emulator channel -
+    # CPU we are trying to save and latency we are trying to remove, to
+    # convert audio that started at 44.1 back toward 44.1 at the DAC.
+    # allowed-rates keeps a client from renegotiating the graph to 48k
+    # mid-session, which is a glitch and a silent resampler both.
+    default.clock.rate          = 44100
+    default.clock.allowed-rates = [ 44100 ]
+    # 32 samples is the target: 725us at 44.1k. Anything above 64 is
+    # not acceptable for this instrument, so the ceiling is 64 rather
+    # than a comfortable number that would hide a failure to reach 32.
+    default.clock.quantum       = 32
     default.clock.min-quantum   = 32
-    default.clock.max-quantum   = 1024
+    default.clock.max-quantum   = 64
 }
 context.modules = [
     { name = libpipewire-module-rt
@@ -199,12 +209,33 @@ monitor.alsa.rules = [
         api.alsa.use-acp = false
         api.acp.auto-profile = false
         api.acp.auto-port = false
-        api.alsa.period-size = 256
-        api.alsa.headroom = 0
         node.pause-on-idle = false
       }
     }
   }
 ]
 WP
-echo "  wireplumber rule: mpc-audio exposes its PCMs directly"
+# A second rule, on the NODE rather than the device: the first one set
+# node.pause-on-idle on the card, where it does nothing for the nodes the
+# card creates. PipeWire suspends an idle sink, and a suspended sink is
+# not a driver - the graph then has no clock, every node sits at QUANT 0,
+# and a full Ardour session measures 0.00% DSP while appearing to run.
+# For an instrument the suspend is also wrong on its own terms: resuming
+# mid-performance is an audible click and a latency change.
+cat > /etc/wireplumber/wireplumber.conf.d/96-mpcpi-nosuspend.conf <<'WP2'
+monitor.alsa.rules = [
+  {
+    matches = [
+      { node.name = "~alsa_output.platform-soc_107c000000_sound.*" }
+      { node.name = "~alsa_input.platform-soc_107c000000_sound.*" }
+    ]
+    actions = {
+      update-props = {
+        session.suspend-timeout-seconds = 0
+        node.pause-on-idle = false
+      }
+    }
+  }
+]
+WP2
+echo "  wireplumber rule: mpc-audio exposes its PCMs directly, never suspends"

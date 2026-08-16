@@ -18,7 +18,7 @@
 
 local dir = os.getenv("SESSION_DIR") or "/tmp/mpc-daw"
 local name = os.getenv("SESSION_NAME") or "mpcpi"
-local rate = tonumber(os.getenv("SESSION_RATE") or "48000")
+local rate = tonumber(os.getenv("SESSION_RATE") or "44100")
 local results = {}
 
 local function say(t) io.write(t .. "\n") io.flush() end

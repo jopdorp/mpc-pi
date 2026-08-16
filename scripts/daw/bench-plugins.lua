@@ -24,7 +24,13 @@ local compat = dofile(os.getenv("MPCPI_COMPAT")
 	or "scripts/daw/ardour-compat.lua")
 local dir = os.getenv("SESSION_DIR") or "/home/mpc/bench"
 local name = os.getenv("SESSION_NAME") or "b"
-local settle = tonumber(os.getenv("SETTLE") or "4")
+local settle = tonumber(os.getenv("SETTLE") or "8")
+-- Instances per measurement. One plugin's cost at a small quantum is
+-- below the noise floor of a /proc sample - the first run produced
+-- +0.25% and -0.25% for plugins that obviously do not have negative
+-- cost. Adding several copies multiplies the signal while the noise
+-- stays put, and the per-instance figure is the delta divided by this.
+local copies = tonumber(os.getenv("COPIES") or "4")
 
 local function sleep(s)
 	if ARDOUR.LuaAPI and ARDOUR.LuaAPI.usleep then
@@ -35,13 +41,31 @@ local function sleep(s)
 end
 
 compat.use_backend()
-local session = create_session(dir, name, 48000)
+local session = create_session(dir, name, 44100)
 assert(session, "no session")
 pcall(function() AudioEngine:start() end)
 
 local tl = session:new_audio_track(2, 2, compat.route_group(), 1, "BENCH",
 	ARDOUR.PresentationInfo.max_order, ARDOUR.TrackMode.Normal, true, true)
 local route = tl:front()
+-- A generator at the head of the chain, because silence is not a
+-- workload. Most DSP short-circuits on digital silence - LSP's EQs
+-- certainly do - so benchmarking an idle track measures the early-out
+-- path and reports a 16-band parametric EQ at 0.03% of a core, roughly
+-- a hundredfold too cheap. With noise flowing, every plugin downstream
+-- does the work it would do under a player's hands.
+local GEN = os.getenv("BENCH_GENERATOR")
+	or "http://lsp-plug.in/plugins/lv2/noise_generator_x2"
+local gen = ARDOUR.LuaAPI.new_plugin(session, GEN, ARDOUR.PluginType.LV2, "")
+if gen and not gen:isnil() then
+	route:add_processor_by_index(gen, 0, nil, true)
+	print("generator: " .. GEN)
+else
+	print("WARNING: no generator (" .. GEN .. ") - costs will read low")
+end
+
+local linked = compat.connect_master(session)
+print("master connected to " .. linked .. " playback ports")
 session:request_roll(ARDOUR.TransportRequestSource.TRS_UI)
 
 -- Read the manifest the appliance actually uses, so the list cannot
@@ -60,9 +84,36 @@ for uri in text:gmatch('"uri":%s*"([^"]+)"') do
 	end
 end
 
+-- CPU seconds burned per wall second, read from /proc, not
+-- AudioEngine:get_dsp_load(). The engine's own figure reported a
+-- perfectly steady 0.00% while the process sat at 70% CPU visibly
+-- processing audio - it is only meaningful when Ardour owns the
+-- backend, and here PipeWire drives the graph. utime+stime cannot be
+-- wrong about work that was done.
+local CLK = 100        -- USER_HZ; getconf CLK_TCK is 100 on aarch64
+
+local function cpu_seconds()
+	local f = io.open("/proc/self/stat", "r")
+	local line = f:read("*l")
+	f:close()
+	-- Fields after the comm field, which may itself contain spaces.
+	local rest = line:match("%)%s+(.*)$")
+	local n, utime, stime = 0, 0, 0
+	for tok in rest:gmatch("%S+") do
+		n = n + 1
+		if n == 12 then utime = tonumber(tok) end
+		if n == 13 then stime = tonumber(tok) end
+	end
+	return (utime + stime) / CLK
+end
+
 local function load_now()
+	local c0, t0 = cpu_seconds(), os.time()
 	sleep(settle)
-	return AudioEngine:get_dsp_load()
+	local dt = math.max(1, os.time() - t0)
+	-- Percent of one core, which is the unit that matters: the audio
+	-- callback runs on one thread and must finish inside its period.
+	return (cpu_seconds() - c0) / dt * 100.0
 end
 
 local base = load_now()
@@ -71,11 +122,18 @@ print(string.format("BASE %.2f%%", base))
 local results = {}
 local prev = base
 for _, uri in ipairs(order) do
-	local p = ARDOUR.LuaAPI.new_plugin(session, uri, ARDOUR.PluginType.LV2, "")
-	if p and not p:isnil() then
-		route:add_processor_by_index(p, -1, nil, true)
+	local added = 0
+	for _ = 1, copies do
+		local p = ARDOUR.LuaAPI.new_plugin(session, uri,
+			ARDOUR.PluginType.LV2, "")
+		if p and not p:isnil() then
+			route:add_processor_by_index(p, -1, nil, true)
+			added = added + 1
+		end
+	end
+	if added > 0 then
 		local now = load_now()
-		local cost = now - prev
+		local cost = (now - prev) / added
 		prev = now
 		results[#results + 1] = {
 			uri = uri, each = cost, total = cost * counts[uri],

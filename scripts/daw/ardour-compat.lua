@@ -66,4 +66,41 @@ function M.route_group()
 	return M._group
 end
 
+-- Connect the session's master to the first physical playback pair.
+--
+-- Not cosmetic, and not only about hearing it: PipeWire schedules a node
+-- only when it is linked into a driver's graph. An Ardour session whose
+-- master goes nowhere is never called, so it burns no CPU, reports no
+-- DSP load, and looks - convincingly - like a graph running perfectly
+-- and doing nothing. Every plugin cost measured 0.00% for exactly this
+-- reason, with the engine reporting running=true throughout.
+--
+-- Returns how many channels were connected, so a caller can tell
+-- "connected" from "no playback ports exist".
+function M.connect_master(session)
+	local master = session:master_out()
+	if not master or master:isnil() then return 0 end
+	local ports = C.StringVector()
+	AudioEngine:get_backend_ports("", ARDOUR.DataType("audio"),
+		ARDOUR.PortFlags.IsInput, ports)
+	local playback = {}
+	for i = 1, ports:size() do
+		local n = ports:at(i - 1)
+		if not n:find("Ardour") then
+			playback[#playback + 1] = n
+		end
+	end
+	local made = 0
+	for ch = 0, 1 do
+		local p = playback[ch + 1]
+		if p then
+			local ok = pcall(function()
+				master:output():audio(ch):connect(p)
+			end)
+			if ok then made = made + 1 end
+		end
+	end
+	return made
+end
+
 return M

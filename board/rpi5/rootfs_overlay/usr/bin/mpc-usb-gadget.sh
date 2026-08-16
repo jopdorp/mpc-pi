@@ -24,7 +24,10 @@ UDC_DIR=/sys/class/udc
 # 1-2 MPC stereo, 3-10 MPC individual outs, 11-18 Ardour (mask 0x3ffff).
 CHANNELS_IN=${MPC_USB_CHANNELS_IN:-18}
 CHANNELS_OUT=${MPC_USB_CHANNELS_OUT:-2}
-RATE=${MPC_USB_RATE:-48000}
+# 44100: the MPC is a 44.1kHz machine, so the gadget speaks the rate the
+# audio is already in. A 48k gadget would resample every channel on the
+# way out and hand the computer a converted copy of a 44.1k source.
+RATE=${MPC_USB_RATE:-44100}
 # 24-bit over the wire: the emulator and the DAC are both 24-bit clean and
 # it costs a quarter less bandwidth than padding to 32.
 SSIZE=${MPC_USB_SSIZE:-3}

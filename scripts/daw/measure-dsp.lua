@@ -57,6 +57,10 @@ if os.getenv("STRESS") == "1" then
 	print("stress: activated " .. n .. " plugin inserts")
 end
 
+-- Linked into the driver's graph, or PipeWire never calls us.
+print("master connected to " .. compat.connect_master(session) ..
+	" playback ports")
+
 -- Roll the transport so the graph is actually processing, not idling.
 session:request_roll(ARDOUR.TransportRequestSource.TRS_UI)
 
