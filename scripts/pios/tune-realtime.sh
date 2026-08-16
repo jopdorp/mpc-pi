@@ -385,14 +385,21 @@ WPGRP
 #    128, and the MEASURED fill - which is what latency actually is -
 #    drops from 96 frames (2.18ms) to 64 (1.45ms).
 #
-#    Left at 4 pending a comparison that has not been completed. One
-#    valid delivery measurement exists at 2 periods (full desk, emulator
-#    live, tone verified alone on its channel, host recorder at its own
-#    default): 22 defects in 60 seconds. There is no matching 4-period
-#    number, because the gadget wedged with EIO partway through every
-#    attempt at one, so whether those 22 events are the cost of the
-#    shallower buffer or simply the floor is unknown. 4 is the stock
-#    depth and the conservative choice until that A/B exists.
+#    Settled at 4, which is the depth every clean result on this board
+#    was obtained at: the ten-minute armed soak with Ardour's own xrun
+#    counter at +0 across eleven reports, and the sample-exact 76-second
+#    USB capture, both ran on a stock four-period gadget. Two periods
+#    measured 22 defects in 60 seconds under the same load and never got
+#    a matched control of its own (the gadget returned EIO partway
+#    through every attempt), so the shallower buffer buys 0.73ms against
+#    a known-good configuration and an unproven one. Not a trade worth
+#    taking for an instrument.
+#
+#    The kernel patch stays in the tree regardless: it removes an
+#    arbitrary limit, and the DAC path - once converters are wired - is
+#    where a shallower buffer is actually likely to pay. I2S has one
+#    clock and a fixed sample cadence, with none of USB's packetisation
+#    or two-clock reconciliation.
 cat > /etc/wireplumber/wireplumber.conf.d/99-mpcpi-usb-sched.conf <<'WPUSB'
 monitor.alsa.rules = [
   {
