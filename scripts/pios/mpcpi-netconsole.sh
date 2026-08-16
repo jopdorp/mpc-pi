@@ -30,6 +30,14 @@
 # message is what a panic looks like:
 #
 #   printf '<1>test\n' > /dev/kmsg
+#
+# The unit must order After=basic.target, NOT network-online.target.
+# This board netboots, so the network is up before userspace starts and
+# there is nothing to wait for; ordering against a target that never
+# activates leaves the job silently unqueued - "enabled" and "inactive
+# (dead)" at once, with no journal entry at all. The same trap is
+# documented on mpcpi-irq-affinity, and it caught this unit too: the
+# first crash after installing it was still lost.
 set -eu
 
 TARGET_IP="${MPCPI_NETCONSOLE_IP:-192.168.7.1}"
