@@ -28,6 +28,29 @@ local ok = pcall(function() AudioEngine:start() end)
 print("engine start: " .. tostring(ok) ..
 	"  running=" .. tostring(AudioEngine:running()))
 
+-- STRESS=1 activates every processor on every route, including the
+-- slots the session ships bypassed (alternate amp engine, chopper,
+-- tuner). The player never runs all of these at once; the point is the
+-- other direction - if the worst case fits the period, every real case
+-- does.
+if os.getenv("STRESS") == "1" then
+	local n = 0
+	local routes = session:get_routes()
+	for r in routes:iter() do
+		local i = 0
+		while true do
+			local proc = r:nth_processor(i)
+			if proc:isnil() then break end
+			if not proc:to_insert():isnil() then
+				proc:activate()
+				n = n + 1
+			end
+			i = i + 1
+		end
+	end
+	print("stress: activated " .. n .. " plugin inserts")
+end
+
 -- Roll the transport so the graph is actually processing, not idling.
 session:request_roll(ARDOUR.TransportRequestSource.TRS_UI)
 

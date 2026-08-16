@@ -142,3 +142,20 @@ echo "  IRQs pinned to cores 0-1"
 echo
 echo "Reboot required for cmdline changes. Then measure, do not assume:"
 echo "  sudo ./verify.sh"
+
+log "audio on the isolated cores"
+# isolcpus reserves cores 2-3, but reservation only keeps things OUT:
+# nothing lands there unless placed. Measured before this existed: the
+# graph's RT data loops sat on cores 0-1 with every device IRQ and the
+# whole of userspace, the isolated cores idled, and a 29-plugin session
+# logged 15 xruns in 30 seconds while cyclictest on the empty core 3
+# reported a flawless 13us. The tuning was real; the audio just was not
+# where the tuning was.
+for u in pipewire wireplumber; do
+	install -d "/etc/systemd/user/$u.service.d"
+	cat > "/etc/systemd/user/$u.service.d/mpcpi-affinity.conf" <<'UNIT'
+[Service]
+CPUAffinity=2-3
+UNIT
+done
+echo "  pipewire + wireplumber pinned to cores 2-3 (user units)"
