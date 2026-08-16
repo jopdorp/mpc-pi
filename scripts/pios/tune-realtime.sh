@@ -120,7 +120,12 @@ chmod 0755 /usr/local/sbin/mpcpi-irq-affinity
 cat > /etc/systemd/system/mpcpi-irq-affinity.service <<'EOF'
 [Unit]
 Description=Pin device IRQs away from the audio cores
-After=multi-user.target
+# NOT After=multi-user.target: this unit is WantedBy that same target, so
+# ordering after it is a deadlock - the job sits queued forever and
+# `is-enabled` cheerfully reports "enabled" while nothing has ever run.
+# basic.target is late enough that the devices exist and early enough
+# that it actually fires.
+After=basic.target
 
 [Service]
 Type=oneshot

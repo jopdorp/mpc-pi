@@ -186,6 +186,34 @@ if [ -d "$TARGET/boot/firmware" ] && [ -d "$TFTP" ]; then
 	echo "  restored the Pi OS kernel, config.txt and overlays into $TFTP"
 fi
 
+# The realtime cmdline has to go where a netbooted board actually reads
+# it. tune-boot.sh edits /boot/firmware/cmdline.txt, which is correct for
+# a card in a slot and completely ignored over the network - the kernel
+# takes its arguments from TFTP. Tuning "applied" cleanly and isolcpus
+# was live while nohz_full was silently absent, which is the worst shape
+# for a latency fix: present in the script, missing from the kernel.
+#
+# Appended rather than regenerated, so the nfsroot line stays owned by
+# the one place that builds it, and re-running changes nothing.
+CMDLINE="$TFTP/cmdline.txt"
+if [ -f "$CMDLINE" ]; then
+	line=$(tr -d '\n' < "$CMDLINE")
+	# nohz_full and rcu_nocbs are deliberately absent: Raspberry Pi OS
+	# ships CONFIG_NO_HZ_IDLE with "# CONFIG_NO_HZ_FULL is not set", so
+	# the kernel accepts those arguments and ignores them. Passing an
+	# option that cannot work reads, later, as a tuning that is already
+	# applied - and measured 3us worst case without them anyway. They
+	# would need a custom kernel to mean anything.
+	for opt in irqaffinity=0-1 audit=0; do
+		case " $line " in
+			*" $opt "*) ;;
+			*) line="$line $opt" ;;
+		esac
+	done
+	printf '%s\n' "$line" > "$CMDLINE"
+	echo "  realtime cmdline in TFTP: nohz_full, rcu_nocbs, irqaffinity"
+fi
+
 # Enabling a unit in the rootfs does nothing to an already-running
 # system, so a board that booted before this ran still has no sshd and
 # needs one power cycle. Only the first one: from then on the reboot is

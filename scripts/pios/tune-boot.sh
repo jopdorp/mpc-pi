@@ -62,7 +62,21 @@ add_cfg "dtoverlay=disable-bt"
 add_cfg "disable_overscan=1"
 
 CMD="$BOOT/cmdline.txt"
+# A netbooted board takes its kernel arguments from the TFTP server, not
+# from this file, so editing it here changes nothing and says it did.
+# That cost a full measurement cycle: isolcpus was live because the
+# netboot server sets it, nohz_full was absent because this file set it,
+# and the tuning run reported success either way.
+if grep -q "root=/dev/nfs" /proc/cmdline 2>/dev/null; then
+	echo "  NOTE: netbooted - $CMD is not read by this board."
+	echo "        kernel arguments live on the netboot server;"
+	echo "        deploy-daw.sh writes them into the TFTP cmdline."
+	NETBOOTED=1
+else
+	NETBOOTED=0
+fi
 add_cmd() {
+	[ "$NETBOOTED" = "1" ] && { echo "  skipped (netboot): $1"; return; }
 	grep -qw -- "$1" "$CMD" 2>/dev/null || { sed -i "s/\$/ $1/" "$CMD"; echo "  + $1"; }
 }
 # Console output to the framebuffer is surprisingly expensive; keep the
