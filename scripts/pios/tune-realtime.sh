@@ -373,15 +373,16 @@ WPGRP
 #    f_uac2's pointer advances every 125us microframe, so a 32-frame
 #    period suits it.
 #
-#    period-num is NOT a knob here: f_uac2 always uses four periods.
-#    Measured by asking and then reading hw_params while the device was
-#    open - 32/2 -> 128, 64/2 -> 256, 128/2 -> 512, 32/3 -> 128 - the
-#    buffer is four times period-size whatever is requested. So the
-#    board-side output buffer at quantum 32 is 128 frames (2.9ms) and
-#    the only way to shrink it is a smaller period, which would then no
-#    longer match the quantum. 4 is written here because it is what the
-#    hardware does; asking for 2 and silently getting 4 is worse than
-#    asking for what you get.
+#    period-num 2 requires patches/kernel/0001, which lowers u_audio.c's
+#    MIN_PERIODS from 4 to 2. Stock, the gadget silently returns a
+#    four-period buffer whatever is asked for - measured by requesting
+#    and reading hw_params back with the device open: 32/2 -> 128,
+#    32/3 -> 128, 64/2 -> 256, 128/2 -> 512. It is a hardcoded constant
+#    in the driver, not a hardware limit, and the real constraint a few
+#    lines below it (period_bytes_min * periods_min = 2 * max_psize,
+#    the two-USB-packet floor) is preserved by the change. With the
+#    patch the board-side buffer at quantum 32 is 64 frames - 1.45ms
+#    instead of 2.9ms.
 cat > /etc/wireplumber/wireplumber.conf.d/99-mpcpi-usb-sched.conf <<'WPUSB'
 monitor.alsa.rules = [
   {
@@ -393,7 +394,7 @@ monitor.alsa.rules = [
       update-props = {
         api.alsa.disable-tsched = true
         api.alsa.period-size = 32
-        api.alsa.period-num = 4
+        api.alsa.period-num = 2
         api.alsa.headroom = 0
         node.pause-on-idle = false
         session.suspend-timeout-seconds = 0

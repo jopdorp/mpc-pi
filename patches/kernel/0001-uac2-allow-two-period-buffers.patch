@@ -1,0 +1,42 @@
+Allow the USB audio gadget to run a two-period buffer
+
+u_audio.c advertises periods_min = MIN_PERIODS to ALSA, and MIN_PERIODS
+is the constant 4 with no hardware justification attached. The effect on
+the appliance, measured by asking for a buffer and then reading
+hw_params back with the device open:
+
+    asked period 32  periods 2  ->  period_size 32   buffer_size 128
+    asked period 32  periods 3  ->  period_size 32   buffer_size 128
+    asked period 64  periods 2  ->  period_size 64   buffer_size 256
+    asked period 128 periods 2  ->  period_size 128  buffer_size 512
+
+The buffer is always four periods whatever is requested, so the
+board-side output buffer at a 32-frame quantum is 128 frames - 2.9ms -
+when double buffering would need 64.
+
+The one real constraint in that file is a few lines below:
+
+    runtime->hw.period_bytes_min = 2 * prm->max_psize
+                                    / runtime->hw.periods_min;
+
+which keeps period_bytes_min * periods_min at 2 * max_psize - the
+buffer must hold two USB packets, which is what double buffering means
+and is preserved exactly by this change. For this configuration (22
+channels, 24-bit, 44.1kHz, bInterval 1) max_psize is about 396 bytes,
+so that floor is roughly three frames: far below the 32-frame period in
+use, which is why periods_min rather than packet size is what binds.
+
+Halving MIN_PERIODS therefore halves the minimum buffer without
+weakening the packet-level guarantee.
+
+--- a/drivers/usb/gadget/function/u_audio.c
++++ b/drivers/usb/gadget/function/u_audio.c
+@@ -25,7 +25,7 @@
+ 
+ #define BUFF_SIZE_MAX	(PAGE_SIZE * 16)
+ #define PRD_SIZE_MAX	PAGE_SIZE
+-#define MIN_PERIODS	4
++#define MIN_PERIODS	2
+ 
+ enum {
+ 	UAC_FBACK_CTRL,

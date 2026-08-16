@@ -10,6 +10,7 @@
 set -euo pipefail
 D=~/development/mpc-pi/.cache/rt-kernel
 SRC=$D/linux
+REPO=~/development/mpc-pi
 mkdir -p "$D"
 # Prefer the repo's own Buildroot toolchain; its prefix is aarch64-linux-.
 BR=~/development/mpc-pi/.cache/br-rpi5/host/bin
@@ -34,5 +35,28 @@ make bcm2712_defconfig
 sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-mpcpi-rt"/' .config || true
 make olddefconfig
 grep -E "PREEMPT_RT=y|NO_HZ_FULL=y" .config || { echo "config refused RT" >&2; exit 1; }
+# Patches. Kept as a stack like the MAME one, applied fresh each build
+# so a rebuilt tree never silently loses them, and reverted on exit so
+# the checkout stays clean for the next run.
+KPATCHES=$(ls "$REPO"/patches/kernel/0*.patch 2>/dev/null || true)
+applied=0
+cleanup_kpatch() {
+	for p in $(printf '%s\n' $KPATCHES | tac); do
+		[ "$applied" -gt 0 ] || break
+		git -C "$SRC" apply --reverse "$p" 2>/dev/null || true
+		applied=$((applied - 1))
+	done
+}
+trap cleanup_kpatch EXIT
+for p in $KPATCHES; do
+	git -C "$SRC" apply --check "$p" 2>/dev/null || {
+		printf 'error: kernel patch does not apply: %s\n' "$p" >&2
+		exit 1
+	}
+	git -C "$SRC" apply "$p"
+	applied=$((applied + 1))
+	printf 'applied %s\n' "$(basename "$p")"
+done
+
 make -j"$(nproc)" KCFLAGS="-mcpu=cortex-a76" Image dtbs modules
 echo "BUILD OK: $SRC/arch/arm64/boot/Image"
