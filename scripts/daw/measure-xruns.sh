@@ -82,7 +82,18 @@ sleep 2
 
 # Wake the sink: an idle ALSA node is not a driver, and a graph with no
 # driver runs nothing at all - which reports as a confident zero.
-ID=$($R wpctl status 2>/dev/null | grep "1f000a0000" |
+#
+# MPCPI_DRIVER=usb points everything at the gadget instead of the I2S
+# card. The I2S card exists whether or not a DAC is wired to the pins -
+# the overlay creates it unconditionally - and in the USB phase it is a
+# phantom whose ~1ms DMA service floor was driving the whole graph.
+if [ "${MPCPI_DRIVER:-}" = "usb" ]; then
+	SINK_TAG="Multichannel"
+	export MPCPI_PLAYBACK_MATCH="1000480000"
+else
+	SINK_TAG="1f000a0000"
+fi
+ID=$($R wpctl status 2>/dev/null | grep "$SINK_TAG" |
 	grep -oE "^[^0-9]*[0-9]+\." | grep -oE "[0-9]+" | head -1)
 [ -n "$ID" ] && $R wpctl set-default "$ID" >/dev/null 2>&1
 [ -n "$ID" ] && timeout 6 $R pw-play --target "$ID" \
@@ -107,6 +118,7 @@ setsid nohup taskset -c "${MPCPI_AUDIO_CORES:-2-3}" sudo -u mpc env \
 	SESSION_DIR="$SESSION" SESSION_NAME="$NAME" \
 	ACTIVE="${ACTIVE:-}" STRESS="${STRESS:-}" \
 	NO_INPUTS="${NO_INPUTS:-}" REC_ARM="${REC_ARM:-}" \
+	MPCPI_PLAYBACK_MATCH="${MPCPI_PLAYBACK_MATCH:-}" \
 	MPCPI_COMPAT="$SRC/scripts/daw/ardour-compat.lua" \
 	SECONDS="$total" \
 	pw-jack "$LUASESSION" "$SRC/scripts/daw/measure-dsp.lua" \

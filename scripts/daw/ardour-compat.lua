@@ -83,10 +83,17 @@ function M.connect_master(session)
 	local ports = C.StringVector()
 	AudioEngine:get_backend_ports("", ARDOUR.DataType("audio"),
 		ARDOUR.PortFlags.IsInput, ports)
+	-- MPCPI_PLAYBACK_MATCH picks WHICH hardware the master lands on.
+	-- Without it this takes the first two non-Ardour input ports in
+	-- enumeration order - which is how the master kept landing on the
+	-- phantom I2S sink after the appliance moved to USB output: the
+	-- I2S card exists (the overlay creates it) whether or not anything
+	-- is wired to those pins, and its ports enumerate first.
+	local want = os.getenv("MPCPI_PLAYBACK_MATCH")
 	local playback = {}
 	for i = 1, ports:size() do
 		local n = ports:at(i - 1)
-		if not n:find("Ardour") then
+		if not n:find("Ardour") and (not want or n:find(want, 1, true)) then
 			playback[#playback + 1] = n
 		end
 	end
