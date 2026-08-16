@@ -119,8 +119,17 @@ if want and want ~= "" then
 			ins.proc:deactivate()
 		end
 		if os.getenv("LIST_INSERTS") == "1" then
-			print(string.format("INSERT %2d %s %s", i,
-				on[i] and "ON " or "off", ins.name))
+			-- Reported latency too. On this instrument the master chain
+			-- is in the live monitor path, so a lookahead limiter's
+			-- latency is delay the player hears while playing - and it
+			-- costs no CPU, so it never shows up in a DSP measurement.
+			local lat = 0
+			local ok = pcall(function()
+				lat = ins.proc:signal_latency()
+			end)
+			print(string.format("INSERT %2d %s lat=%-6s %s", i,
+				on[i] and "ON " or "off",
+				ok and tostring(lat) or "?", ins.name))
 		end
 	end
 	print(string.format("ACTIVE %s -> %d of %d inserts on",

@@ -71,7 +71,21 @@ MASTER = [
     {"name": "MBAND", "kind": "multiband", "bypass": True,
      "why": "glue; off by default because it is easy to overdo"},
     {"name": "LIMIT", "kind": "limiter",
-     "why": "last in the chain, always: nothing follows the ceiling"},
+     "why": "last in the chain, always: nothing follows the ceiling",
+     # Lookahead off. Measured on the board: this was the ONLY plugin in
+     # the whole desk reporting any latency at all - 220 samples, 5.0ms
+     # at 44.1k, which is nearly five times the entire quantum-48 period.
+     # The master chain sits in the live monitor path, so that is delay
+     # between a string being struck and the player hearing it, and it
+     # costs no CPU so no DSP measurement would ever have shown it.
+     # A lookahead limiter is a mastering tool; live, the ceiling is
+     # worth a little overshoot to keep the instrument responsive.
+     # Keyed by the parameter's LABEL, which is what the session
+     # builder matches. LSP's lookahead is control index 15 today and
+     # its symbol is "lk", but an index changes silently between plugin
+     # releases and would then set the wrong control forever; a label
+     # that stops matching sets nothing and says so.
+     "params": {"Lookahead": 0.0}},
 ]
 
 # Send buses.
@@ -125,6 +139,14 @@ def resolve(chain, amp_engine="guitarix"):
                                else 1.0}
         else:
             entry["uri"] = _first_uri(slot["kind"], slot.get("role", 0))
+        # Slot-level params ride along, merged under any the engine
+        # choice already set. Without this the manifest could declare a
+        # setting - the limiter's lookahead, say - and the session would
+        # build without ever applying it.
+        if slot.get("params"):
+            merged = dict(entry.get("params") or {})
+            merged.update(slot["params"])
+            entry["params"] = merged
         out.append(entry)
     return out
 

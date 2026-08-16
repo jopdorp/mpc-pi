@@ -176,6 +176,9 @@
    "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
   }
  ],
+ "GTR1+": [],
+ "GTR2+": [],
+ "MIC+": [],
  "FX A": [
   {
    "name": "VERB",
@@ -204,6 +207,9 @@
    "name": "LIMIT",
    "kind": "limiter",
    "why": "last in the chain, always: nothing follows the ceiling",
+   "params": {
+    "Lookahead": 0.0
+   },
    "uri": "http://lsp-plug.in/plugins/lv2/limiter_stereo"
   }
  ]
