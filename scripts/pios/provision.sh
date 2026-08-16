@@ -33,6 +33,7 @@ BOOT="/boot/firmware"
 [ -d "$BOOT" ] || BOOT="/boot"
 
 log() { printf '\n== %s\n' "$*"; }
+die() { printf '\nprovision: %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 
 # --- packages --------------------------------------------------------
@@ -41,20 +42,39 @@ if [ "${1:-}" != "--no-apt" ]; then
 log "packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
+
 # Audio engine and the verified effect set. Every one of these was
 # instantiated in Ardour on the build host before being listed here.
-apt-get install -y --no-install-recommends \
-	ardour \
-	lsp-plugins-lv2 \
-	guitarix \
-	dragonfly-reverb \
-	x42-plugins \
-	zam-plugins \
-	pipewire pipewire-jack pipewire-alsa wireplumber \
-	alsa-utils \
-	python3 python3-usb \
-	dtc device-tree-compiler \
-	nfs-common
+#
+# CORE must exist or the appliance is not an appliance. EXTRA is allowed
+# to be missing: package names drift between Debian releases, and a
+# single stale name makes `apt-get install` refuse the entire list, so a
+# rename in one plugin bundle silently costs you Ardour as well. That is
+# exactly what happened here - `dtc` is a binary shipped by
+# device-tree-compiler, not a package, and naming it installed nothing at
+# all. Fail on the packages that matter, report the rest and continue.
+CORE="ardour pipewire pipewire-jack pipewire-alsa wireplumber alsa-utils python3"
+EXTRA="lsp-plugins-lv2 guitarix dragonfly-reverb x42-plugins zam-plugins
+       python3-usb device-tree-compiler nfs-common lilv-utils rt-tests
+       fake-hwclock"
+
+available=""
+missing=""
+for p in $CORE $EXTRA; do
+	if apt-cache show "$p" >/dev/null 2>&1; then
+		available="$available $p"
+	else
+		missing="$missing $p"
+	fi
+done
+
+# shellcheck disable=SC2086
+apt-get install -y --no-install-recommends $available
+
+for p in $CORE; do
+	dpkg -s "$p" >/dev/null 2>&1 || die "core package $p failed to install"
+done
+[ -n "$missing" ] && echo "  NOT IN THIS RELEASE:$missing" >&2
 fi
 
 # NAM is not in Debian: it ships as a prebuilt aarch64 LV2 that links
@@ -65,7 +85,17 @@ NAM_DIR=/usr/lib/lv2/neural_amp_modeler.lv2
 if [ ! -d "$NAM_DIR" ]; then
 	tmp=$(mktemp -d)
 	url="https://github.com/mikeoliphant/neural-amp-modeler-lv2/releases/latest/download/neural_amp_modeler_lv2_rpi5.tgz"
-	if curl -fsSL "$url" -o "$tmp/nam.tgz"; then
+	# A netbooted board reaches the world through the netboot host's
+	# proxy, and apt is the only thing configured to know that. curl is
+	# not, so this download failed while every package around it
+	# succeeded - and the failure was a warning, so provisioning
+	# "passed" without the one plugin that cannot be replaced by
+	# anything else in the set. Inherit a proxy if the environment
+	# names one, else assume the netboot host is serving it.
+	: "${https_proxy:=${MPCPI_PROXY:-http://192.168.7.1:3142}}"
+	: "${http_proxy:=$https_proxy}"
+	export https_proxy http_proxy
+	if curl -fsSL --connect-timeout 10 "$url" -o "$tmp/nam.tgz"; then
 		tar -xzf "$tmp/nam.tgz" -C /usr/lib/lv2/
 		echo "installed NAM LV2"
 	else

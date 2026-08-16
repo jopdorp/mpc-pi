@@ -161,17 +161,29 @@ ln -sf /etc/systemd/system/mpcpi-daw-ui.service \
 echo "mpc-pi" > "$TARGET/etc/hostname"
 sed -i 's/^127\.0\.1\.1.*/127.0.1.1\tmpc-pi/' "$TARGET/etc/hosts" 2>/dev/null || true
 
-# Put the Pi OS kernel and firmware back into TFTP. `deploy` copies the
-# Buildroot kernel unconditionally, which would hand a Pi OS root a
-# Buildroot kernel on the next boot - a mismatch that only shows up as a
-# board that comes up without its rootfs.
+# Put the whole Pi OS boot set back into TFTP. `deploy` copies the
+# Buildroot kernel AND the Buildroot config.txt unconditionally, and
+# config.txt is the one that decides which kernel actually runs.
+#
+# Restoring only the kernel is not enough and cost real hardware time:
+# the Buildroot config.txt names `kernel=Image`, so the board loaded a
+# Buildroot kernel against a Pi OS root, reached userspace far enough to
+# set its hostname, and then died minutes later. From the outside that is
+# indistinguishable from a failing power supply, and it was diagnosed as
+# one twice.
+#
+# The stale Image is deleted rather than left in place. A kernel that
+# must never be selected should not be sitting in the directory the
+# bootloader reads.
 TFTP="/srv/tftp/mpcpi"
 if [ -d "$TARGET/boot/firmware" ] && [ -d "$TFTP" ]; then
 	cp "$TARGET/boot/firmware"/kernel*.img "$TFTP/" 2>/dev/null || true
 	cp "$TARGET/boot/firmware"/*.dtb "$TFTP/" 2>/dev/null || true
+	cp "$TARGET/boot/firmware/config.txt" "$TFTP/config.txt" 2>/dev/null || true
 	[ -d "$TARGET/boot/firmware/overlays" ] &&
 		cp -r "$TARGET/boot/firmware/overlays" "$TFTP/" 2>/dev/null || true
-	echo "  restored the Pi OS kernel into $TFTP"
+	rm -f "$TFTP/Image"
+	echo "  restored the Pi OS kernel, config.txt and overlays into $TFTP"
 fi
 
 # Enabling a unit in the rootfs does nothing to an already-running
