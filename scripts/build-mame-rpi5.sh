@@ -5,8 +5,21 @@ set -euo pipefail
 #
 # Deliberately separate from the Buildroot tree: the emulator is rebuilt far
 # more often than the image, and wrapping it as a package meant a full package
-# rebuild for every change. Buildroot still supplies the sysroot, because the
-# binary has to link against exactly the libraries that end up in the image.
+# rebuild for every change.
+#
+# The sysroot is the ROOTFS THE BOARD ACTUALLY RUNS. That used to be
+# Buildroot's, correctly - the binary has to link against exactly the
+# libraries in the image it ships with. Then the appliance base moved to
+# Raspberry Pi OS and this script did not, so it kept building against a
+# rootfs the board no longer boots. The result ran nowhere: every NEEDED
+# library present, interpreter resolved, highest requirement GLIBC_2.38
+# against Debian's 2.41, and a segfault before main() - built against
+# Buildroot's glibc, started by Debian's.
+#
+# MPC_SYSROOT points at the netboot rootfs by default. Buildroot's
+# cross-gcc is 14.3.0 and Debian trixie ships gcc 14 with
+# libstdc++.so.6.0.33, so the toolchain is fine; only the sysroot was
+# wrong.
 #
 # Produces board/rpi5/rootfs_overlay/usr/bin/mpc, which the next Buildroot
 # image build picks up automatically.
@@ -92,9 +105,32 @@ done
 # are only used by bgfx's EGL context, which the appliance never creates.
 archopts="-mcpu=cortex-a76 -ffp-contract=off -DUSE_OZONE"
 
-export PKG_CONFIG="$host_dir/bin/pkg-config"
+# Build against the rootfs the Pi boots, not the one it used to.
+MPC_SYSROOT="${MPC_SYSROOT:-/srv/nfs/mpcpi-pios}"
+if [ -d "$MPC_SYSROOT/usr/lib/aarch64-linux-gnu" ]; then
+    staging_dir="$MPC_SYSROOT"
+    archopts="$archopts --sysroot=$MPC_SYSROOT"
+    echo "sysroot: $MPC_SYSROOT (the netbooted Debian root)"
+else
+    echo "sysroot: $staging_dir (Buildroot - the board must be running it)" >&2
+fi
+
+# pkg-config has to look inside the sysroot, and Debian keeps its .pc
+# files under the multiarch directory that Buildroot does not have.
+export PKG_CONFIG="${PKG_CONFIG:-pkg-config}"
 export PKG_CONFIG_SYSROOT_DIR="$staging_dir"
-export PKG_CONFIG_LIBDIR="$staging_dir/usr/lib/pkgconfig:$staging_dir/usr/share/pkgconfig"
+export PKG_CONFIG_LIBDIR="$staging_dir/usr/lib/aarch64-linux-gnu/pkgconfig:$staging_dir/usr/lib/pkgconfig:$staging_dir/usr/share/pkgconfig"
+
+# Debian's own cross toolchain if it is installed - it is the exact
+# compiler the target's libstdc++ was built with. Buildroot's gcc 14.3
+# against a Debian gcc 14 sysroot works too, which is what this used
+# before crossbuild-essential-arm64 was available.
+if command -v aarch64-linux-gnu-g++ >/dev/null 2>&1; then
+    export CROSS_BUILD_PREFIX="aarch64-linux-gnu-"
+    echo "toolchain: Debian aarch64-linux-gnu ($(aarch64-linux-gnu-g++ -dumpversion))"
+else
+    echo "toolchain: Buildroot cross-gcc against the Debian sysroot"
+fi
 export SDL_INSTALL_ROOT="$staging_dir/usr"
 
 make -C "$mame_source_dir" \
