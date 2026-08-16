@@ -15,6 +15,12 @@
 local dir = os.getenv("SESSION_DIR") or "/tmp/mpc-daw"
 local name = os.getenv("SESSION_NAME") or "mpcpi"
 local secs = tonumber(os.getenv("SECONDS") or "20")
+-- Line-buffer stdout. Lua block-buffers when redirected to a
+-- file, so a long run shows nothing at all until it exits and
+-- an interrupted one loses every measurement it had already
+-- taken - which reads as a hang rather than a slow benchmark.
+io.stdout:setvbuf("line")
+
 local compat = dofile(os.getenv("MPCPI_COMPAT")
 	or "scripts/daw/ardour-compat.lua")
 

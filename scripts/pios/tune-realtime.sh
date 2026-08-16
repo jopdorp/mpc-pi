@@ -176,3 +176,35 @@ context.modules = [
 ]
 EOF2
 echo "  module-rt in jack.conf.d (prio 85)"
+
+log "i2s card as the appliance sink"
+# The PCM5102A is on ALSA device 1 (the PCM1808 ADC is device 0), and
+# ALSA Card Profile builds no output profile for a simple-card shaped
+# that way: the card offered exactly two profiles, "off" and
+# "input:stereo-fallback", so the DAC had no PipeWire node and the
+# instrument had no sink at all. With no sink the graph has no clock,
+# nothing processes, and every DSP measurement reads a truthful,
+# useless 0.0%.
+#
+# use-acp=false skips profile inference and exposes each PCM directly,
+# which is what a fixed-function board wants anyway - there is nothing
+# to infer, the hardware is known and soldered.
+install -d /etc/wireplumber/wireplumber.conf.d
+cat > /etc/wireplumber/wireplumber.conf.d/95-mpcpi-i2s.conf <<'WP'
+monitor.alsa.rules = [
+  {
+    matches = [ { device.nick = "mpc-audio" } ]
+    actions = {
+      update-props = {
+        api.alsa.use-acp = false
+        api.acp.auto-profile = false
+        api.acp.auto-port = false
+        api.alsa.period-size = 256
+        api.alsa.headroom = 0
+        node.pause-on-idle = false
+      }
+    }
+  }
+]
+WP
+echo "  wireplumber rule: mpc-audio exposes its PCMs directly"
