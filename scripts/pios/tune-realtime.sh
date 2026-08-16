@@ -296,75 +296,74 @@ log "i2s card as the appliance sink"
 # which is what a fixed-function board wants anyway - there is nothing
 # to infer, the hardware is known and soldered.
 install -d /etc/wireplumber/wireplumber.conf.d
-cat > /etc/wireplumber/wireplumber.conf.d/95-mpcpi-i2s.conf <<'WP'
-monitor.alsa.rules = [
-  {
-    matches = [ { device.nick = "mpc-audio" } ]
-    actions = {
-      update-props = {
-        api.alsa.use-acp = false
-        api.acp.auto-profile = false
-        api.acp.auto-port = false
-        node.pause-on-idle = false
-      }
-    }
-  }
-]
-WP
-# The scheduling rule, on the NODES, in its own fragment. It sat inside
-# the device rule above for half a day and did nothing there - the exact
-# trap the nosuspend comment below describes, repeated - and every
-# measurement taken in that window ran on 1024-frame timer-scheduled
-# periods while claiming the interrupt fix. The tell, when it happens
-# again: IRQ 141 at ~86/s per direction (44100/1024) instead of one
-# interrupt per period, and hw_params reading 1024/32768 while open.
-#
-# What these properties are and why - the measurements behind every
-# number here are in the git history (the tsched sweep):
-#
-#   * disable-tsched: PipeWire's default is timer scheduling - big ALSA
-#     buffer, wake on a guess about the DMA pointer. On this device the
-#     pointer only moves per hardware period, so below a 128-frame
-#     quantum the guess fails: bare sink 209..614 errors/10s against
-#     46..60 interrupt-driven. Wake on the interrupt instead.
-#   * period-size 48: property of the HARDWARE, not the quantum. 32-
-#     frame periods measured worse at BOTH quanta including 32, where
-#     "matching" would pick them; this I2S/DMA path has a ~1ms service
-#     floor and 48 frames is 1.09ms.
-#   * period-num 4: 8 measured the same, and buffer depth is output
-#     latency, so ties go to the shallower buffer.
-#   * headroom 0: the wake-up is the interrupt itself, not a guess to
-#     hedge against.
-cat > /etc/wireplumber/wireplumber.conf.d/98-mpcpi-sched.conf <<'WP3'
-monitor.alsa.rules = [
-  {
-    matches = [
-      { node.name = "~alsa_output.platform-soc_107c000000_sound.*" }
-      { node.name = "~alsa_input.platform-soc_107c000000_sound.*" }
-    ]
-    actions = {
-      update-props = {
-        api.alsa.disable-tsched = true
-        api.alsa.period-size = 48
-        api.alsa.period-num = 4
-        api.alsa.headroom = 0
-      }
-    }
-  }
-]
-WP3
 
-# The same rule for the USB gadget nodes, in its own fragment. Found the
-# hard way, from the delivered audio itself: at quantum 32 with nothing
-# but a tone playing, the host-side capture of the gadget stream carried
-# 120 discontinuities and one-quantum silence gaps per minute - the
-# gadget was still timer-scheduled on 1024-frame periods, the exact
-# disease just cured on the I2S sink, on the second device. It had
-# survived quantum 48 in that state, which is why certifying q48 did not
-# expose it. With 48-frame periods the same 60-second capture at q32
-# reads sample-exact. The f_uac2 pointer advances per 125us USB
-# microframe, so small periods suit it.
-cat > /etc/wireplumber/wireplumber.conf.d/99-mpcpi-usb-sched.conf <<'WP4'
+# ---------------------------------------------------------------------
+# The audio graph's shape, in four fragments. All four are required and
+# each one is here because its absence was measured.
+#
+# There is NO hardware clock on this appliance. The I2S card is disabled
+# in config.txt (no DAC is wired, and the overlay's DMA driver panics
+# the kernel), so the only real device is the USB gadget - and a gadget
+# must not drive, because its cycle follows whatever the connected
+# computer does. Measured: with the gadget as driver, Ardour ran at
+# 362-1037% load. So the graph is clocked by a timer.
+# ---------------------------------------------------------------------
+
+# 1. The clock. A null sink, driven by PipeWire's own timer on the RT
+#    kernel with the CPU held out of deep idle. It never touches
+#    hardware, so it cannot underrun and cannot be taken down by a
+#    device error. priority.session keeps it the DEFAULT sink too,
+#    which matters more than it sounds: PipeWire connects any stream
+#    with no explicit route to the default sink's first free channels,
+#    and when that was the gadget, 44 links from the emulator piled onto
+#    the channels a measurement was using and produced a day of phantom
+#    defects. Strays now land on a node that goes nowhere.
+install -d /etc/pipewire/pipewire.conf.d
+cat > /etc/pipewire/pipewire.conf.d/95-mpcpi-clock.conf <<'PWCLK'
+context.objects = [
+  { factory = adapter
+    args = {
+        factory.name     = support.null-audio-sink
+        node.name        = "mpcpi-clock"
+        node.description = "MPC-Pi graph clock"
+        media.class      = "Audio/Sink"
+        audio.position   = [ FL FR ]
+        audio.rate       = 44100
+        priority.driver  = 5000
+        priority.session = 2000
+        node.group       = "mpcpi-audio"
+        node.always-process = true
+        monitor.channel-volumes = false
+    }
+  }
+]
+PWCLK
+
+# 2. One scheduling group. PipeWire elects a driver PER GROUP, so
+#    without this the null sink drives only itself while every hardware
+#    node forms its own island - which is exactly what happened, and
+#    looked like the clock simply being ignored.
+cat > /etc/wireplumber/wireplumber.conf.d/97-mpcpi-driver.conf <<'WPGRP'
+monitor.alsa.rules = [
+  {
+    matches = [ { node.name = "~alsa_.*" } ]
+    actions = { update-props = {
+        node.group = "mpcpi-audio"
+        priority.driver = 100
+    } }
+  }
+]
+WPGRP
+
+# 3. The gadget: interrupt-driven, one hardware period per graph cycle.
+#    PipeWire's default is timer scheduling - a large buffer polled on a
+#    guess about the DMA pointer - and below a 128-frame quantum that
+#    guess stops being good enough. Measured on the bare sink, errors
+#    per 10s: 209..614 timer-scheduled against 46..60 interrupt-driven.
+#    f_uac2's pointer advances every 125us microframe, so a 32-frame
+#    period suits it; period-num 4 is the ring depth, and 2 is the
+#    structural floor still to be tested.
+cat > /etc/wireplumber/wireplumber.conf.d/99-mpcpi-usb-sched.conf <<'WPUSB'
 monitor.alsa.rules = [
   {
     matches = [
@@ -374,57 +373,30 @@ monitor.alsa.rules = [
     actions = {
       update-props = {
         api.alsa.disable-tsched = true
-        api.alsa.period-size = 48
+        api.alsa.period-size = 32
         api.alsa.period-num = 4
         api.alsa.headroom = 0
-      }
-    }
-  }
-]
-WP4
-# A second rule, on the NODE rather than the device: the first one set
-# node.pause-on-idle on the card, where it does nothing for the nodes the
-# card creates. PipeWire suspends an idle sink, and a suspended sink is
-# not a driver - the graph then has no clock, every node sits at QUANT 0,
-# and a full Ardour session measures 0.00% DSP while appearing to run.
-# For an instrument the suspend is also wrong on its own terms: resuming
-# mid-performance is an audible click and a latency change.
-cat > /etc/wireplumber/wireplumber.conf.d/96-mpcpi-nosuspend.conf <<'WP2'
-monitor.alsa.rules = [
-  {
-    matches = [
-      { node.name = "~alsa_output.platform-soc_107c000000_sound.*" }
-      { node.name = "~alsa_input.platform-soc_107c000000_sound.*" }
-    ]
-    actions = {
-      update-props = {
-        session.suspend-timeout-seconds = 0
         node.pause-on-idle = false
+        session.suspend-timeout-seconds = 0
       }
     }
   }
 ]
-WP2
-# Which node drives the graph is not an implementation detail. Measured:
-# the PCM1808 capture node had become the driver - a converter with
-# nothing wired to it was clocking the instrument - while the DAC ran as
-# a follower and logged 29016 xruns. Both PCMs share one hardware clock,
-# so the choice is free; make it the output, which is the side a player
-# hears and the side whose deadline is real.
-cat > /etc/wireplumber/wireplumber.conf.d/97-mpcpi-driver.conf <<'WP3'
+WPUSB
+
+# 4. Never suspend an audio node. PipeWire suspends idle sinks; a
+#    suspended node is not in the graph, and for an instrument the
+#    resume is an audible click and a latency change.
+cat > /etc/wireplumber/wireplumber.conf.d/96-mpcpi-nosuspend.conf <<'WPSUS'
 monitor.alsa.rules = [
   {
-    matches = [ { node.name = "~alsa_output.platform-soc_107c000000_sound.*" } ]
-    actions = { update-props = { priority.driver = 2000 } }
-  }
-  {
-    matches = [ { node.name = "~alsa_input.platform-soc_107c000000_sound.*" } ]
-    actions = { update-props = { priority.driver = 100 } }
-  }
-  {
-    matches = [ { node.name = "~alsa_.*platform-1000480000.usb.*" } ]
-    actions = { update-props = { priority.driver = 50 } }
+    matches = [ { node.name = "~alsa_.*" } ]
+    actions = { update-props = {
+        node.pause-on-idle = false
+        session.suspend-timeout-seconds = 0
+    } }
   }
 ]
-WP3
+WPSUS
+echo "  graph: timer clock drives, gadget follows at 32-frame periods"
 echo "  wireplumber rules: PCMs direct, no suspend, DAC drives the graph"

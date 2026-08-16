@@ -103,6 +103,63 @@ comments.
   MIDI-pad, playback, window-resize, and xrun check after offline regressions
   pass.
 
+## Working on the board
+
+- **Persist it or do not do it.** Any setting applied over ssh - a
+  wireplumber fragment, an IRQ priority, a default sink, a kernel module -
+  is gone at the next reboot, and this board reboots. Put the change in the
+  provisioning script (`scripts/pios/tune-realtime.sh` and friends), commit
+  it, deploy once. Re-applying the same tweak by hand after every reboot
+  wastes the run and, worse, means measurements are taken against a
+  configuration nobody can reproduce.
+- Config lives in the repo, not on the board. When a value has to be found
+  by experiment, the experiment goes in `scripts/diagnostics/` and the
+  winning value goes in provisioning with the measurement that chose it.
+- The board **netboots**. `config.txt` and `cmdline.txt` are read from the
+  TFTP copy, which `mpcpi-netboot deploy` populates from the NFS root's
+  `/boot/firmware`. Editing the repo copy alone changes nothing on the next
+  boot; the chain is edit -> deploy -> reboot, and it must be verified after
+  the reboot, not assumed.
+- Verify a setting by reading what the system actually did, not by reading
+  back the file that asked for it: `hw_params` while the device is open,
+  the interrupt rate in `/proc/interrupts`, `pw-top` for who drives the
+  graph, `systemctl is-active` for units. Several settings in this project
+  were "applied" for days while doing nothing.
+- Keep kernel forensics armed. `mpcpi-netconsole` ships the console to the
+  development host over UDP; the board panics, and a panic reaches no
+  journal, no serial port, and no NFS-mounted log. A crash with no trace
+  costs a whole investigation.
+- systemd units on this board order `After=basic.target`. Ordering against
+  `network-online.target` leaves the job silently unqueued on a netbooted
+  machine - "enabled" and "inactive (dead)" at once, no journal entry. This
+  has now bitten two separate units.
+
+## Measurement discipline
+
+- Know what the instrument is measuring before believing it. Several
+  metrics here have lied for days at a time: `pw-top`'s client ERR column
+  counts something that is not a dropout; a cumulative interrupt total
+  divided by uptime was quoted as a rate; and a waveform continuity test
+  reported thousands of defects that were another source mixed onto the
+  measured channel.
+- Verify the signal path of a measurement, not only its result. For an
+  audio capture that means: check what is routed into the channel
+  (`pw-link -l`), and check the peak level - a peak at full scale usually
+  means something is summed in that should not be.
+- When several independent levers all fail to move a number, stop pulling
+  levers and suspect the number. Six consecutive null results is evidence
+  about the instrument, not about the system.
+- Prefer, in order: the producer's own statistics, the consumer's own
+  counter, the driver's error count, and a recorded waveform with its
+  routing verified. Do not build an argument on a single metric that
+  nothing else corroborates.
+- Take a positive control before trusting a new measurement channel. A
+  silent log and a working-but-silent log look identical.
+- Record negative results with the same care as positive ones, including
+  the ones that refute an earlier conclusion in this repository. A
+  document that confidently explains the wrong mechanism is worse than no
+  document.
+
 ## MAME upstreamability
 
 Follow MAME's current official contribution documentation:
