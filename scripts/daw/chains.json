@@ -10,13 +10,6 @@
  ],
  "GTR1": [
   {
-   "name": "TUNE",
-   "kind": "tuner",
-   "bypass": true,
-   "why": "reads the dry string before anything colours it",
-   "uri": "http://gareus.org/oss/lv2/tuna#one"
-  },
-  {
    "name": "OD",
    "kind": "drive",
    "role": 0,
@@ -72,13 +65,6 @@
   }
  ],
  "GTR2": [
-  {
-   "name": "TUNE",
-   "kind": "tuner",
-   "bypass": true,
-   "why": "reads the dry string before anything colours it",
-   "uri": "http://gareus.org/oss/lv2/tuna#one"
-  },
   {
    "name": "OD",
    "kind": "drive",

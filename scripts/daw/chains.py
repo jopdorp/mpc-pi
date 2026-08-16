@@ -34,9 +34,19 @@ def _first_uri(kind, index=0):
 # Guitar: tuner first so it hears the dry string; overdrive into the amp;
 # cab after the amp; EQ and compressor after the cab so they shape the
 # finished tone rather than the raw pickup.
+# No tuner slot. It used to sit first in every guitar chain, bypassed,
+# and measurement made the case for removing it outright: at 190us per
+# instance it was the most expensive plugin in the entire desk, and two
+# of them came to 380us - a third of the whole quantum-48 budget - for
+# something that is only wanted while a string is being tuned and is
+# silent the rest of the time. Even bypassed it occupies a slot in a
+# chain the panel navigates four at a time.
+#
+# The tuner is its own client now, tapping the input when TUNER mode is
+# entered. That also frees it from the chain's constraints: it wants the
+# dry signal, no latency compensation, and no obligation to run at the
+# graph's quantum.
 GUITAR = [
-    {"name": "TUNE", "kind": "tuner", "bypass": True,
-     "why": "reads the dry string before anything colours it"},
     {"name": "OD", "kind": "drive", "role": 0, "bypass": True,
      "why": "into the amp, never after it"},
     {"name": "AMP", "kind": "amp",
@@ -176,7 +186,11 @@ def self_test():
 
     # Order rules that matter sonically, asserted rather than trusted.
     g = [s["name"] for s in CHAINS["GTR1"]]
-    assert g.index("TUNE") == 0, "the tuner must hear the dry string"
+    # The tuner is deliberately NOT in the chain: it is a separate
+    # client, so assert its absence rather than its position. It cost
+    # 190us per instance - the most expensive plugin in the desk - to sit
+    # bypassed in a chain waiting for someone to tune.
+    assert "TUNE" not in g, "the tuner belongs outside the chain"
     assert g.index("OD") < g.index("AMP"), "drive goes into the amp"
     assert g.index("AMP") < g.index("CAB"), "the cab follows the amp"
     assert g.index("CAB") < g.index("EQ"), "EQ shapes the finished tone"
