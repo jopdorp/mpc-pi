@@ -92,26 +92,39 @@ end
 local want = os.getenv("ACTIVE")
 if want and want ~= "" then
 	local inserts = enumerate_inserts()
-	local lo, hi = 0, 0
+	-- A set, not a range: "4,5,13,14" measures every amp and cab in the
+	-- desk at once, which is the question actually being asked. Ranges
+	-- alone could only ever answer "is the cost in this contiguous
+	-- block", and the answer to that turned out to be "no, it is
+	-- spread" - two different halves each blew the budget on their own.
+	local on = {}
 	if want == "all" then
-		lo, hi = 1, #inserts
+		for i = 1, #inserts do on[i] = true end
 	elseif want ~= "none" then
-		lo, hi = want:match("^(%d+)%-(%d+)$")
-		lo, hi = tonumber(lo) or 0, tonumber(hi) or 0
+		for part in (want .. ","):gmatch("([^,]+),") do
+			local lo, hi = part:match("^(%d+)%-(%d+)$")
+			if lo then
+				for i = tonumber(lo), tonumber(hi) do on[i] = true end
+			elseif part:match("^%d+$") then
+				on[tonumber(part)] = true
+			end
+		end
 	end
+	local count = 0
 	for i, ins in ipairs(inserts) do
-		if i >= lo and i <= hi then
+		if on[i] then
 			ins.proc:activate()
+			count = count + 1
 		else
 			ins.proc:deactivate()
 		end
 		if os.getenv("LIST_INSERTS") == "1" then
 			print(string.format("INSERT %2d %s %s", i,
-				(i >= lo and i <= hi) and "ON " or "off", ins.name))
+				on[i] and "ON " or "off", ins.name))
 		end
 	end
 	print(string.format("ACTIVE %s -> %d of %d inserts on",
-		want, math.max(0, math.min(hi, #inserts) - lo + 1), #inserts))
+		want, count, #inserts))
 end
 
 -- Linked into the driver's graph, or PipeWire never calls us.

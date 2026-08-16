@@ -98,7 +98,13 @@ context.properties = {
     # 32 samples is the target: 725us at 44.1k. Anything above 64 is
     # not acceptable for this instrument, so the ceiling is 64 rather
     # than a comfortable number that would hide a failure to reach 32.
-    default.clock.quantum       = 32
+    # 48 frames at 44.1kHz = 1088us. 32 proved reachable on the
+    # hardware, but it leaves only ~390us for all DSP once the graph's
+    # own fixed cost is paid - measured at 334us with every insert off,
+    # nearly half the 726us period, because per-route overhead is
+    # charged 1378 times a second whatever is on the route. 48 buys
+    # back 362us of headroom for 8 more samples of latency.
+    default.clock.quantum       = 48
     default.clock.min-quantum   = 32
     default.clock.max-quantum   = 64
 }

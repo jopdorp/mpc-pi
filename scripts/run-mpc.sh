@@ -7,8 +7,14 @@ mame_bin=${MAME_BIN:-"$mame_source_dir/mpc"}
 rom_dir=${MAME_ROM_DIR:-"$repo_root/roms"}
 runtime_dir=${MAME_RUNTIME_DIR:-"$repo_root/results/runtime"}
 system_name=${1:-mpc2000xl}
-pipewire_frames=${2:-32}
-pipewire_rate=${PIPEWIRE_RATE_HZ:-48000}
+# 48 frames at 44.1kHz is 1088us. 48 divides by both 8 and 16, so the
+# host-update cadence can stay at 8-sample updates (6 per quantum) or
+# relax to 16 (3 per quantum) without changing the quantum again -
+# MPC_SOUND_UPDATES_PER_QUANTUM must divide this exactly.
+pipewire_frames=${2:-48}
+# 44100: the MPC2000XL is a 44.1kHz machine, and the whole graph now
+# runs at its rate so nothing resamples the emulator's own output.
+pipewire_rate=${PIPEWIRE_RATE_HZ:-44100}
 alsa_headroom=${MPC_ALSA_HEADROOM:-keep}
 mame_nice=${MAME_NICE:--10}
 mame_rt_priority=${MAME_RT_PRIORITY:-20}
