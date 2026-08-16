@@ -828,6 +828,16 @@ def draw_pad_overlay(f, st):
                                   OFF if state == 2 else
                                   (NORMAL if state == 1 else DIM))
 
+    # The overlay is opaque, so it hides the page's message line - and
+    # the message line is where a refusal appears. Pressing REC with the
+    # transport stopped is refused for a good reason, and while the pad
+    # map is up the player is looking at exactly this rectangle, so
+    # swallowing the answer here makes a correct refusal read as a dead
+    # pad. Carry the message onto the overlay instead.
+    msg = st.get("message")
+    if msg:
+        f.text_center(0, f.w, ENCBAR_Y - 9, msg[:40], BRIGHT)
+
 
 # --- WAVE ------------------------------------------------------------
 

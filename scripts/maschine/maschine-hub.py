@@ -69,7 +69,12 @@ class Router:
                 self.held = None
             return [("cmd", "mode %s" % self.mode)]
 
-        if name == control_map.PIN_BUTTON and self.held:
+        # `and down`: without it PIN toggles on press AND on release, so
+        # a real press-and-release pins the mode and instantly unpins
+        # it, and the latch does nothing on hardware. The routing
+        # self-test sent only the press edge and never noticed; a finger
+        # always sends both.
+        if name == control_map.PIN_BUTTON and self.held and down:
             self.pinned = None if self.pinned == self.held else self.held
             return [("cmd", "mode %s" % self.mode)]
 

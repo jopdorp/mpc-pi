@@ -30,6 +30,7 @@ noted() { printf '  SKIP  %s\n' "$*"; skip=$((skip+1)); }
 echo "== unit"
 run "panel rendering, layout, control map" python3 tests/test_panel.py
 run "engine, transport, clock, osc, routing" python3 tests/test_engine.py
+run "interaction: input -> state -> screen" python3 tests/test_interaction.py
 
 echo
 echo "== module self-tests"

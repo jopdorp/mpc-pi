@@ -51,7 +51,10 @@ class Daw:
         self.page = "LOOP"
         self.mode = "MPC"
         self.focus_bank = 0
-        self.gains = {n: 0.8 for n in self.strips}
+        # dB, not fader position. It was 0.8 here and read as dB by
+        # the readout, which printed "0.8 DB" for a strip nobody had
+        # touched - a unity fader claiming +0.8.
+        self.gains = {n: 0.0 for n in self.strips}
         self.mutes = {n: False for n in self.strips}
         self.solos = {n: False for n in self.strips}
         self.message = ""
@@ -114,9 +117,67 @@ class Daw:
             self.osc.send("/strip/%s" % verb, self.ssid(name),
                           1 if book[name] else 0)
             return []
+        # Encoders. The hub emits "knob <page> <target> <delta>", and
+        # nothing here understood it: the line fell through to the loop
+        # engine, which does not speak encoder, and every knob on the
+        # mixer was silently dead. Found by the interaction tests, which
+        # is the whole reason they exist - the routing test proved the
+        # hub sends this, and the panel test proved the screen can draw
+        # it, and neither could notice that nothing joins them.
+        if verb == "knob" and len(parts) > 3:
+            page, target, delta = parts[1], parts[2], int(parts[3])
+            return self.knob(page, target, delta)
+
         # anything else is loop-engine vocabulary
         actions = self.engine.command(line, self.playhead)
-        return [self.perform(a) for a in actions]
+        out = []
+        for a in actions:
+            # An engine refusal is information the player needs. "rec"
+            # with a stopped transport is legitimate - a loop lane needs
+            # a bar grid to quantise to - but answering it with a screen
+            # that does not move is indistinguishable from a dead pad.
+            if a.startswith("error "):
+                self.message = a[6:].replace("-", " ").upper()
+                out.append(a)
+            else:
+                out.append(self.perform(a))
+        return out
+
+    # --- encoders ---
+
+    # dB per detent. Coarse enough to cross a fader in one sweep, fine
+    # enough to set a level: 8 detents is 4 dB, and the encoders are
+    # endless, so there is no pickup and no jump.
+    KNOB_DB_STEP = 0.5
+
+    def knob(self, page, target, delta):
+        if page in ("MIX", "LOOP"):
+            # The lane strip is an ordinary strip, so LOOP and MIX are
+            # the same call - see ardour_bindings.KNOBS.
+            if target not in self.gains:
+                return ["error no-strip %s" % target]
+            db = self.gains[target] + delta * self.KNOB_DB_STEP
+            db = max(-19.3, min(6.0, db))
+            self.gains[target] = db
+            self.osc.send("/strip/gain", self.ssid(target), db)
+            self.message = "%s %.1f DB" % (target, db)
+            return ["gain %s %.1f" % (target, db)]
+        if page == "FX":
+            # Parameter index comes from the focused plugin; the panel
+            # sends the column and daw-ctl holds the focus.
+            self.message = "FX %s %+d" % (target, delta)
+            self.osc.send("/strip/plugin/parameter",
+                          self.ssid(self.strips[0]), 1, int(target) + 1,
+                          delta * 0.01)
+            return ["fx %s %+d" % (target, delta)]
+        if page == "SONG":
+            if target == "0":
+                self.playhead = max(0, self.playhead +
+                                    delta * self.transport.samples_per_bar())
+                self.osc.send("/locate", self.playhead, 0)
+                return ["locate %d" % self.playhead]
+            return ["view %s %+d" % (target, delta)]
+        return ["error no-knob %s" % page]
 
     # --- the loop ---
 
@@ -133,6 +194,18 @@ class Daw:
 
     def tick(self):
         return [self.perform(a) for a in self.engine.tick(self.playhead)]
+
+    # Fader position from dB. This was hardcoded to 0.8 for every strip,
+    # so the readout moved and the fader graphic never did: the mixer
+    # showed nine identical faders whatever the levels were. Linear in dB
+    # across the strip's range - not Ardour's exact taper, but monotonic
+    # and honest, which is what a 28px column can convey.
+    GAIN_MIN_DB = -19.3
+    GAIN_MAX_DB = 6.0
+
+    def fader(self, db):
+        span = self.GAIN_MAX_DB - self.GAIN_MIN_DB
+        return max(0.0, min(1.0, (db - self.GAIN_MIN_DB) / span))
 
     def ui_state(self):
         lanes = []
@@ -157,7 +230,8 @@ class Daw:
             "xruns": self.xruns, "message": self.message,
             "focus_bank": self.focus_bank,
             "lanes": lanes,
-            "mixer": [{"name": n, "gain": 0.8,
+            "mixer": [{"name": n,
+                       "gain": self.fader(self.gains.get(n, 0.0)),
                        "db": "%.1f" % self.gains.get(n, 0.0),
                        "level": 0.0, "peak": 0.0,
                        "mute": self.mutes.get(n, False),

@@ -260,3 +260,28 @@ Verify after reboot:
   systemctl status mpcpi-daw-ui
   ls /sys/class/udc              # USB gadget controller present
 EOF
+
+log "usb gadget service"
+# The gadget is not a manual step: it is how the instrument presents
+# itself, and - discovered the hard way after an RT-kernel reboot - it is
+# also what gives the graph a playback device when no DAC is attached.
+# Without it wireplumber has only a capture node, PipeWire runs on the
+# Dummy driver, and Ardour cannot create a session at all.
+cat > /etc/systemd/system/mpcpi-usb-gadget.service <<'UNIT'
+[Unit]
+Description=UAC2 + MIDI USB gadget
+After=basic.target
+Before=pipewire.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mpc-usb-gadget.sh start
+ExecStop=/usr/bin/mpc-usb-gadget.sh stop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now mpcpi-usb-gadget.service >/dev/null 2>&1 || true
+echo "  gadget service enabled"
