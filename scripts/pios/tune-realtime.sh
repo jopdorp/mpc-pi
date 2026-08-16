@@ -210,6 +210,15 @@ monitor.alsa.rules = [
         api.acp.auto-profile = false
         api.acp.auto-port = false
         node.pause-on-idle = false
+        # 32-sample periods work on this I2S device, but only with
+        # enough of them queued: measured with aplay, period 32 with a
+        # 128-sample buffer (4 periods) underruns immediately, while
+        # 256 (8 periods) and above run clean. The driver advertises
+        # PERIOD_SIZE [4 65536], so the limit is DMA turnaround, not
+        # the period size - which is why the fix is periods, not a
+        # bigger quantum.
+        api.alsa.headroom = 128
+        api.alsa.period-num = 8
       }
     }
   }
@@ -238,4 +247,26 @@ monitor.alsa.rules = [
   }
 ]
 WP2
-echo "  wireplumber rule: mpc-audio exposes its PCMs directly, never suspends"
+# Which node drives the graph is not an implementation detail. Measured:
+# the PCM1808 capture node had become the driver - a converter with
+# nothing wired to it was clocking the instrument - while the DAC ran as
+# a follower and logged 29016 xruns. Both PCMs share one hardware clock,
+# so the choice is free; make it the output, which is the side a player
+# hears and the side whose deadline is real.
+cat > /etc/wireplumber/wireplumber.conf.d/97-mpcpi-driver.conf <<'WP3'
+monitor.alsa.rules = [
+  {
+    matches = [ { node.name = "~alsa_output.platform-soc_107c000000_sound.*" } ]
+    actions = { update-props = { priority.driver = 2000 } }
+  }
+  {
+    matches = [ { node.name = "~alsa_input.platform-soc_107c000000_sound.*" } ]
+    actions = { update-props = { priority.driver = 100 } }
+  }
+  {
+    matches = [ { node.name = "~alsa_.*platform-1000480000.usb.*" } ]
+    actions = { update-props = { priority.driver = 50 } }
+  }
+]
+WP3
+echo "  wireplumber rules: PCMs direct, no suspend, DAC drives the graph"
