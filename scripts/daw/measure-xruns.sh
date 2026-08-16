@@ -98,6 +98,7 @@ setsid nohup taskset -c "${MPCPI_AUDIO_CORES:-2-3}" sudo -u mpc env \
 	ARDOUR_CONFIG_PATH="$ARDOUR_CONFIG_PATH" \
 	SESSION_DIR="$SESSION" SESSION_NAME="$NAME" \
 	ACTIVE="${ACTIVE:-}" STRESS="${STRESS:-}" \
+	NO_INPUTS="${NO_INPUTS:-}" \
 	MPCPI_COMPAT="$SRC/scripts/daw/ardour-compat.lua" \
 	SECONDS="$total" \
 	pw-jack "$LUASESSION" "$SRC/scripts/daw/measure-dsp.lua" \
@@ -115,6 +116,28 @@ if ! pgrep -x luasession >/dev/null; then
 	exit 1
 fi
 echo "session up (budget ${total}s, ${REPEATS} windows of ${WINDOW}s per quantum)"
+
+# NO_INPUTS=1 cuts every link feeding Ardour from a capture device.
+#
+# A bisection, not a tuning option. Ardour's lateness survived switching
+# off all 27 plugins and survived fixing the sink's scheduling, so it is
+# neither DSP cost nor the driver underneath. What remains wired into
+# the graph are the capture nodes the tracks are connected to: an
+# 8-channel 44.1k ADC and the USB gadget's input, which was found
+# running at 48000 inside a 44100 graph. Both carry error counts of
+# their own.
+#
+# Cut from here rather than from Lua: IO:disconnect(nil) segfaults
+# luasession, and a segfault takes the whole measurement with it.
+if [ "${NO_INPUTS:-}" = "1" ]; then
+	cut=0
+	for id in $($R pw-link -I -l 2>/dev/null |
+			awk '/alsa_input|capture|stereo-fallback/ {print $1}' |
+			grep -E '^[0-9]+$' | sort -u); do
+		$R pw-link -d "$id" >/dev/null 2>&1 && cut=$((cut + 1))
+	done
+	echo "NO_INPUTS: cut $cut links from capture devices"
+fi
 
 for q in $QUANTA; do
 	$R pw-metadata -n settings 0 clock.force-quantum "$q" >/dev/null 2>&1

@@ -136,6 +136,16 @@ if want and want ~= "" then
 		want, count, #inserts))
 end
 
+-- Unlinking the track inputs is done from the shell, not from here.
+--
+-- IO:disconnect(nil) segfaulted luasession outright - no error, no
+-- traceback, the process simply gone after the line that activates the
+-- inserts, which is the third binding in this codebase to do that
+-- (set_active with one argument and Dummy's isnil() were the others).
+-- pcall cannot catch a segfault, so there is no safe way to probe it.
+-- measure-xruns.sh cuts the links with pw-link instead, from outside
+-- the process, where a wrong argument costs an error message.
+
 -- Linked into the driver's graph, or PipeWire never calls us.
 print("master connected to " .. compat.connect_master(session) ..
 	" playback ports")
@@ -166,12 +176,29 @@ sleep(2)
 local xrun_base = session:get_xrun_count()
 
 local max_load, sum, n = 0, 0, 0
-for _ = 1, secs do
+-- Report ARDOUR's own xrun count as the run goes, not only at the end.
+--
+-- It used to print once, after the loop. measure-xruns.sh kills the
+-- session the moment its last window closes, so that line never
+-- appeared - and it is the one number in this whole investigation that
+-- comes from somewhere other than pw-top. Everything else has been the
+-- ERR column of one tool. If Ardour's counter and pw-top's disagree
+-- then a large part of what has been chased is bookkeeping rather than
+-- a dropout the player would hear, and there is no way to know that
+-- from a line that never prints.
+local last_xrun = xrun_base
+for i = 1, secs do
 	sleep(1)
 	local load = AudioEngine:get_dsp_load()
 	if load > max_load then max_load = load end
 	sum = sum + load
 	n = n + 1
+	if i % 10 == 0 then
+		local now = session:get_xrun_count()
+		print(string.format("ARDOUR-XRUNS +%d over 10s (total %d) load=%.1f%%",
+			now - last_xrun, now - xrun_base, load))
+		last_xrun = now
+	end
 end
 session:request_stop(false, false, ARDOUR.TransportRequestSource.TRS_UI)
 
