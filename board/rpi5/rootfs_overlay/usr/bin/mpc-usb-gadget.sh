@@ -91,6 +91,27 @@ echo "$SSIZE" > "$F/c_ssize"
 echo "$(mask "$CHANNELS_IN")" > "$F/p_chmask"
 echo "$RATE" > "$F/p_srate"
 echo "$SSIZE" > "$F/p_ssize"
+
+# Read the rate back before binding. A gadget was found running at 48000
+# with the channel masks correct - so this script had run, and only the
+# rate had not taken - which put a resampler in front of every channel on
+# the way to the computer, in an appliance whose whole point is that it
+# stays at 44.1k from the emulator to the wire. Nothing anywhere reported
+# it; the mismatch was visible only as a 48000 node sitting in a 44100
+# graph.
+#
+# Newer f_uac2 takes a comma-separated rate list, so compare against the
+# first entry rather than the whole string.
+for side in c p; do
+	got=$(cut -d, -f1 < "$F/${side}_srate" 2>/dev/null)
+	if [ "$got" != "$RATE" ]; then
+		printf 'mpc-usb-gadget: %s_srate is %s, wanted %s\n' \
+			"$side" "$got" "$RATE" >&2
+		printf '  a gadget at the wrong rate resamples every channel;\n' >&2
+		printf '  refusing to bind. Unbind the old gadget and retry.\n' >&2
+		exit 1
+	fi
+done
 # Service the isochronous endpoints every microframe (125 us) instead of
 # the 1 ms default, and keep few requests in flight: this is what makes a
 # 32-sample buffer usable on the host. Older kernels lack the bInterval
