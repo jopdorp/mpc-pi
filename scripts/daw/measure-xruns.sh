@@ -98,7 +98,7 @@ setsid nohup taskset -c "${MPCPI_AUDIO_CORES:-2-3}" sudo -u mpc env \
 	ARDOUR_CONFIG_PATH="$ARDOUR_CONFIG_PATH" \
 	SESSION_DIR="$SESSION" SESSION_NAME="$NAME" \
 	ACTIVE="${ACTIVE:-}" STRESS="${STRESS:-}" \
-	NO_INPUTS="${NO_INPUTS:-}" \
+	NO_INPUTS="${NO_INPUTS:-}" REC_ARM="${REC_ARM:-}" \
 	MPCPI_COMPAT="$SRC/scripts/daw/ardour-compat.lua" \
 	SECONDS="$total" \
 	pw-jack "$LUASESSION" "$SRC/scripts/daw/measure-dsp.lua" \

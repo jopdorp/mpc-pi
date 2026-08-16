@@ -146,6 +146,35 @@ end
 -- measure-xruns.sh cuts the links with pw-link instead, from outside
 -- the process, where a wrong argument costs an error message.
 
+-- REC_ARM=1 measures the take, not the soundcheck: activate the eight
+-- individual-out tracks, record-enable them, and roll with the session
+-- record engaged, so the butler is genuinely writing ten mono files to
+-- the NFS home while the chains run. Arming is the one state this
+-- harness had never measured, and it is the state the player is in.
+if os.getenv("REC_ARM") == "1" then
+	local armed, active = 0, 0
+	for r in session:get_routes():iter() do
+		local nm = r:name()
+		if nm:match("^MPC%d$") then
+			-- Two arguments, always: one-argument set_active
+			-- segfaults luasession outright.
+			local ok = pcall(function() r:set_active(true, nil) end)
+			if ok then active = active + 1 end
+		end
+		local ok2 = pcall(function()
+			local t = r:to_track()
+			if t and not t:isnil() then
+				t:rec_enable_control():set_value(1,
+					PBD.GroupControlDisposition.NoGroup)
+				armed = armed + 1
+			end
+		end)
+	end
+	pcall(function() session:maybe_enable_record(false) end)
+	print(string.format("REC_ARM: %d tracks armed, %d MPC tracks activated",
+		armed, active))
+end
+
 -- Linked into the driver's graph, or PipeWire never calls us.
 print("master connected to " .. compat.connect_master(session) ..
 	" playback ports")
