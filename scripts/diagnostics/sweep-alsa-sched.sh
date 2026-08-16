@@ -32,7 +32,12 @@
 set -u
 U=$(id -u mpc)
 R="sudo -u mpc env XDG_RUNTIME_DIR=/run/user/$U"
-RULE=/etc/wireplumber/wireplumber.conf.d/94-mpcpi-sched.conf
+# 98, not 94. wireplumber merges wireplumber.conf.d in lexical order and
+# later files win, so a fragment numbered below the existing
+# 95-mpcpi-i2s.conf would have had its period-num and headroom silently
+# overridden by that file - the sweep would have varied period-num
+# through five configurations and measured the same one five times.
+RULE=/etc/wireplumber/wireplumber.conf.d/98-mpcpi-sched.conf
 OUT=/var/log/mpcpi-alsasched.txt
 
 restore() {

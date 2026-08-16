@@ -306,15 +306,59 @@ monitor.alsa.rules = [
         api.acp.auto-profile = false
         api.acp.auto-port = false
         node.pause-on-idle = false
-        # 32-sample periods work on this I2S device, but only with
-        # enough of them queued: measured with aplay, period 32 with a
-        # 128-sample buffer (4 periods) underruns immediately, while
-        # 256 (8 periods) and above run clean. The driver advertises
-        # PERIOD_SIZE [4 65536], so the limit is DMA turnaround, not
-        # the period size - which is why the fix is periods, not a
-        # bigger quantum.
-        api.alsa.headroom = 128
-        api.alsa.period-num = 8
+        # Follow the hardware instead of predicting it.
+        #
+        # PipeWire's default is timer-based scheduling: give ALSA a big
+        # buffer, wake on your own timer once per quantum, and estimate
+        # where DMA must have reached. On this device that estimate was
+        # being made against a 1024-frame period behind a 32768-frame
+        # buffer - 743ms of hardware buffer under a 32-frame quantum -
+        # and IRQ 141 fired about 86 times a second, which is 44100/1024
+        # across both directions. Nothing in the path was following the
+        # hardware at all.
+        #
+        # It fails quietly and only below a certain size. The bare sink,
+        # no graph attached, doing 4us of work per callback:
+        #
+        #   quantum   512  256  128   64   48   32
+        #   errors/10s  0    0    0    8   49  100
+        #
+        # Zero down to 128 samples, and everything below it. That is the
+        # timer model running out of resolution, and it is why none of
+        # the work above the sink ever moved the number - thread count,
+        # plugin load, core placement, interrupt affinity. Switching to
+        # interrupt-driven scheduling, same measurement:
+        #
+        #   q48   209..231  ->  46..60      (4x)
+        #   q32   608..614  ->  52..60     (10x)
+        #
+        # 48 is not "the quantum, matched". Matching was the obvious
+        # guess and it is wrong: a 32-frame period measured WORSE than a
+        # 48-frame one at both quanta, including at quantum 32 where it
+        # is the matching choice.
+        #
+        #   period-size  32/8  32/4   48/8   48/4
+        #   q48 errors    91..104  84..  56..60  46..86
+        #   q32 errors    71..112        48..60  57..61
+        #
+        # 48 frames is 1.09ms of DMA turnaround and 32 is 726us; below
+        # about a millisecond this device starts missing regardless of
+        # what the graph is doing. So period-size is a property of the
+        # hardware, not of the quantum, and it stays at 48 even if the
+        # graph goes to 32.
+        #
+        # period-num 4 is a 192-frame buffer: 8 measured no better, and
+        # buffer depth here is output latency, so the shallower one wins
+        # ties. aplay's old 32-frame-period underruns, which this file
+        # used to cite as a DMA turnaround limit needing 8 periods, were
+        # measuring the same 1ms floor from the other side.
+        #
+        # headroom 0 because there is nothing left to hedge against: the
+        # wake-up is now the interrupt itself, not a guess about it.
+        api.alsa.disable-tsched = true
+        api.alsa.period-size = 48
+        api.alsa.period-num = 4
+        api.alsa.headroom = 0
       }
     }
   }
