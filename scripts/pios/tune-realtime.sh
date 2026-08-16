@@ -155,18 +155,28 @@ context.properties = {
     # mid-session, which is a glitch and a silent resampler both.
     default.clock.rate          = 44100
     default.clock.allowed-rates = [ 44100 ]
-    # 32 samples is the target: 725us at 44.1k. Anything above 64 is
-    # not acceptable for this instrument, so the ceiling is 64 rather
-    # than a comfortable number that would hide a failure to reach 32.
-    # 48 frames at 44.1kHz = 1088us. 32 proved reachable on the
-    # hardware, but it leaves only ~390us for all DSP once the graph's
-    # own fixed cost is paid - measured at 334us with every insert off,
-    # nearly half the 726us period, because per-route overhead is
-    # charged 1378 times a second whatever is on the route. 48 buys
-    # back 362us of headroom for 8 more samples of latency.
-    default.clock.quantum       = 48
+    # 32 samples, 725us, and nothing else. Quantum 48 existed as a
+    # fallback while 32 looked unreachable; every reason for it has
+    # since been measured away:
+    #
+    #   * the "delivery defects at 32" were a measurement artifact -
+    #     the emulator's audio summed onto the test tone's channels;
+    #   * the "sessions die at 32" was a kernel panic in the DAC-less
+    #     I2S card, now disabled at the overlay;
+    #   * the ~1ms DMA service floor belonged to that same phantom card
+    #     and left the graph with it.
+    #
+    # What remains is the measurement that matters: the FULL desk - 27
+    # inserts, sixteen tracks armed, all eight MPC individual-out tracks
+    # active, emulator live - at quantum 32, with Ardour's own xrun
+    # counter reading +0 across eleven consecutive reports and the
+    # driver logging zero errors in every window.
+    #
+    # Pinning min and max to 32 as well, so no client can renegotiate
+    # the graph out from under the instrument mid-take.
+    default.clock.quantum       = 32
     default.clock.min-quantum   = 32
-    default.clock.max-quantum   = 64
+    default.clock.max-quantum   = 32
 }
 context.modules = [
     { name = libpipewire-module-rt
@@ -180,7 +190,7 @@ context.modules = [
     }
 ]
 EOF
-echo "  44.1k, quantum 48 (32..64), RT prio 88"
+echo "  44.1k, quantum 32 fixed, RT prio 88"
 
 log "irq affinity"
 # Best effort now, and persisted for boot. The helper is a real file
@@ -361,8 +371,17 @@ WPGRP
 #    guess stops being good enough. Measured on the bare sink, errors
 #    per 10s: 209..614 timer-scheduled against 46..60 interrupt-driven.
 #    f_uac2's pointer advances every 125us microframe, so a 32-frame
-#    period suits it; period-num 4 is the ring depth, and 2 is the
-#    structural floor still to be tested.
+#    period suits it.
+#
+#    period-num is NOT a knob here: f_uac2 always uses four periods.
+#    Measured by asking and then reading hw_params while the device was
+#    open - 32/2 -> 128, 64/2 -> 256, 128/2 -> 512, 32/3 -> 128 - the
+#    buffer is four times period-size whatever is requested. So the
+#    board-side output buffer at quantum 32 is 128 frames (2.9ms) and
+#    the only way to shrink it is a smaller period, which would then no
+#    longer match the quantum. 4 is written here because it is what the
+#    hardware does; asking for 2 and silently getting 4 is worse than
+#    asking for what you get.
 cat > /etc/wireplumber/wireplumber.conf.d/99-mpcpi-usb-sched.conf <<'WPUSB'
 monitor.alsa.rules = [
   {

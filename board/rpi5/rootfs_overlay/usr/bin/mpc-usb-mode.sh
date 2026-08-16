@@ -1,64 +1,49 @@
 #!/bin/sh
-# Switch the appliance between playing and tracking. Quantum only.
+# Report the audio topology. There are no modes left to switch.
 #
-#   live  - quantum 32 (725us). The playing mode.
-#   track - quantum 48 (1.09ms). The tracking mode: more headroom for a
-#           fully armed session with every insert running.
+# This script used to toggle between a "live" quantum of 32 and a
+# "tracking" quantum of 48, on the belief that the full armed desk could
+# not run at 32. It can. Measured on the shipped session with all 27
+# inserts, sixteen tracks armed, all eight MPC individual-out tracks
+# active and the emulator live: Ardour's own xrun counter read +0 across
+# eleven consecutive ten-second reports, and the driver logged zero
+# errors in every window.
 #
-# Nothing else changes between them. The interface is always 22 up / 2
-# down, so the USB descriptors never change, so the computer never sees
-# the interface leave - a recording running on the host survives a mode
-# switch. That is only true because the channel count is fixed: it was
-# once thought to be a latency lever, and it is not (the gadget
-# interrupts per 125us microframe whatever the width; 18 channels down
-# to 6 changed nothing measurable).
+# Everything that had argued for 48 turned out to be something else:
+# the delivery defects were a measurement artifact (the emulator's audio
+# summed onto the test tone's channels), the session deaths were a
+# kernel panic in the DAC-less I2S card, and the ~1ms DMA service floor
+# belonged to that same card.
 #
-# The quantum itself switches inside the running graph: PipeWire
-# renegotiates it on the next cycle. There is a brief transient while
-# clients re-adapt, which is why this is a deliberate command rather
-# than something the appliance does on its own mid-take.
+# So the appliance has one quantum, pinned at both ends so no client can
+# renegotiate it mid-take, and one interface width. Keeping a mode
+# switch for settings that no longer vary would only invite the question
+# "which mode am I in?" during a take.
 #
-#   mpc-usb-mode.sh live|track|status
+#   mpc-usb-mode.sh          print the topology
 set -eu
 
-MODE="${1:-status}"
 U=$(id -u mpc)
 R="sudo -u mpc env XDG_RUNTIME_DIR=/run/user/$U"
 
-quantum() {
-	$R pw-metadata -n settings 0 clock.force-quantum "$1" >/dev/null 2>&1
-}
+# Read the quantum the graph is RUNNING at, from the driver's own row,
+# not the force-quantum request in metadata. Those differ whenever the
+# request is cleared and the configured default applies - and reporting
+# the request as though it were the state is how settings in this
+# project appeared to be in force for days while doing nothing.
+top=$($R timeout 6 pw-top -b -n 2 2>/dev/null)
+q=$(printf '%s\n' "$top" | awk '$1 == "R" && $3 ~ /^[0-9]+$/ && $3 > 0 {print $3; exit}')
 
-case "$MODE" in
-status)
-	q=$($R pw-metadata -n settings 0 2>/dev/null |
-		grep -o "clock.force-quantum.*value:'[0-9]*'" |
-		grep -oE "[0-9]+" | tail -1)
-	mask=$(cat /sys/kernel/config/usb_gadget/mpc/functions/uac2.usb0/p_chmask 2>/dev/null || echo none)
-	# Count the bits, so the report says channels rather than hex.
-	if [ "$mask" != none ]; then
-		n=$(printf '%d\n' "$mask" | awk '{c=0; v=$1; while (v) {c += v % 2; v = int(v/2)}; print c}')
-	else
-		n=none
-	fi
-	case "${q:-0}" in
-		32) name="live" ;;
-		48) name="track" ;;
-		*)  name="custom" ;;
-	esac
-	printf 'mode: %s (quantum %s)  interface: %s up / 2 down\n' \
-		"$name" "${q:-default}" "$n"
-	;;
-live)
-	quantum 32
-	echo "mode: live (quantum 32) - interface unchanged, host uninterrupted"
-	;;
-track)
-	quantum 48
-	echo "mode: track (quantum 48) - interface unchanged, host uninterrupted"
-	;;
-*)
-	echo "usage: mpc-usb-mode.sh live|track|status" >&2
-	exit 2
-	;;
-esac
+mask=$(cat /sys/kernel/config/usb_gadget/mpc/functions/uac2.usb0/p_chmask 2>/dev/null || echo 0)
+up=$(printf '%d\n' "$mask" 2>/dev/null |
+	awk '{c=0; v=$1; while (v) {c += v % 2; v = int(v/2)}; print c}')
+hw=$(grep -E 'period_size|buffer_size' \
+	/proc/asound/card0/pcm0p/sub0/hw_params 2>/dev/null | tr '\n' ' ')
+drv=$(printf '%s\n' "$top" |
+	awk '$1 == "R" && $3 ~ /^[0-9]+$/ && $3 > 0 {print $NF; exit}')
+
+printf 'quantum   %s samples (%s ms at 44.1k)\n' \
+	"${q:-?}" "$(awk -v q="${q:-0}" 'BEGIN{printf "%.2f", q*1000/44100}')"
+printf 'interface %s up / 2 down\n' "${up:-?}"
+printf 'clock     %s\n' "${drv:-not running}"
+printf 'gadget    %s\n' "${hw:-not open}"
