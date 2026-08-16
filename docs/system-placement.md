@@ -1,11 +1,18 @@
-# System placement: everything measured, and the plan it implies
+# System placement: everything measured, and what it turned out to mean
 
 Written after six single-variable experiments in a row failed to move a
-defect rate. That is the signal to stop guessing and put every number
-already collected in one place, because when six educated guesses miss,
-the fault is in the model, not in the next guess.
+defect rate. That was the right moment to stop guessing and collect
+every number in one place - and doing so found the answer, though not
+the one this document first proposed: **the defect was in the
+measurement, not in the machine.** The wrong hypothesis is left standing
+below, marked, because the path to catching it is the useful part.
 
 Everything below was measured on the board. Nothing here is estimated.
+
+**Bottom line: quantum 32 is met.** Ardour's own xrun counter reads zero
+across a ten-minute armed soak with every insert running and the
+emulator live; the delivered USB audio is sample-exact over 76 seconds
+under the same load. See "What it actually was".
 
 ## The machine
 
@@ -58,7 +65,12 @@ The gadget's 7,979/s is one interrupt per 125µs USB microframe - set by
 defect rate. (An earlier "2,900/s" in these notes was a cumulative
 total divided by uptime, quoted as a rate. It was wrong.)
 
-## The defect, and everything that did not fix it
+## The "defect", and everything that did not fix it
+
+**Read the next section before believing this table.** Every number in
+it turned out to be a measurement artifact. It is kept because the
+shape of it - six levers, no movement - is what should have prompted
+suspicion of the instrument far sooner than it did.
 
 Delivered audio is judged by recording the gadget stream on the host
 and checking the waveform (`check-continuity.py`): a 441Hz sine cannot
@@ -81,73 +93,53 @@ Six levers, all on the USB service path, all null. The rate does not
 respond to anything about USB. It responds to exactly one thing:
 **whether a session is loaded and recording.**
 
-## What that leaves, by elimination
+## What it actually was: the measurement
 
-The failing configuration differs from the clean one in these ways, and
-only these:
+**The delivery problem did not exist.** The table above is an artifact,
+and the mechanism this document originally proposed - butler NFS writes
+delaying the gadget interrupt - was wrong. Both are recorded here
+rather than deleted, because the way this went wrong is the useful
+part.
 
-1. Ardour's DSP runs (but its own counter says it never misses).
-2. The emulator runs on core 3 (11.8% of a core, RR 20).
-3. **The butler writes sixteen tracks of audio to an NFS home** - over
-   the same `eth0` whose interrupt lands on core 0.
-4. Ardour's non-realtime threads occupy cores 2-3.
+Nothing routes the 22-channel map yet, so PipeWire connects every
+source it sees to the first available channels. `pw-link -l` on the
+running board showed **44 links** from the emulator's `:speaker`,
+`:outputs` and floppy-sound nodes into the same gadget channels the
+441Hz measurement tone was playing into. The analyser was reading MPC
+music summed with a sine and correctly reporting that it is not a sine.
 
-Item 3 is the one never tested, and it completes a mechanism that fits
-every observation:
+That single artifact explains every null result at once:
 
-    butler writes  ->  NFS RPC  ->  eth0 IRQ + softirq on core 0
-                                        |
-                     dwc2 IRQ (7,979/s) also on core 0, prio 60
-                                        |
-                     gadget misses microframe deadlines
-                                        |
-                     defects in delivered audio, while Ardour,
-                     which finished its DSP on time, reports zero
+- immune to channel count, URB depth, headroom, interrupt placement and
+  the tone player's priority - none of those change what is *mixed*
+  onto the channel;
+- clean whenever no session was loaded - because then no emulator was
+  running to mix in;
+- one capture read peak 1.000 full-scale (clipping), which is what a
+  sum of two sources does and what finally gave it away.
 
-It explains why the rate is immune to channel count, URB depth and
-headroom - all of those are downstream of an interrupt that arrived
-late. It explains why the tone player's priority is irrelevant - the
-tone is not what is late. It explains why moving dwc2 to core 1 at
-FIFO 90 made things *worse* (it then preempted the PipeWire data loop
-that feeds the gadget, on the core that loop owns) while core 0 at
-FIFO 60 helped only marginally (still behind the same softirq work).
+The control: same load, emulator confirmed running on core 3, its 44
+links cut so the tone was alone on the wire.
 
-## The plan
+    76 seconds, quantum 32, peak 0.275fs (the tone's own level)
+    discontinuities = 0    flat-gaps = 0    rate = 0.00/s
 
-Ordered by confidence, each with the observation it is derived from.
+**Quantum 32 delivers clean audio over USB under full emulator load.**
+Together with the graph result - Ardour's own xrun counter at zero
+across a ten-minute armed soak with every insert running - quantum 32
+is met on both sides.
 
-**1. Take recording off the network.** The appliance is meant to write
-to local storage; NFS is a development artifact. Point the session's
-audio directory at local storage and re-measure. If the defect rate
-collapses, the mechanism above is confirmed and the production
-appliance never had this problem. *Cost: nothing. This is what the
-shipped device does anyway.*
+## What still needs doing
 
-**2. Give the gadget interrupt a core that is neither core 0 nor
-contended.** Core 1 at a priority **below** PipeWire's data loop (88) -
-80, not 90. Never tested: 90 was tried (preempts the loop) and core 0
-was tried (queued behind NFS). Core 1 at 80 is the untested cell that
-both failures point at.
-
-**3. Move Ardour's non-realtime threads off the DSP cores.**
-`pin-threads.sh` exists and was measured as "no effect" - but that
-measurement was taken when the xrun metric was `pw-top`'s client ERR
-column, since retired as meaningless. It is worth re-running against
-the waveform. Butler on core 0 also puts the NFS writer next to the
-NFS interrupt, which is where it belongs.
-
-**4. Separate the three realtime threads.** Core 3 currently holds the
-dispatcher (85), a worker (77) and the emulator (RR 20). With the
-butler moved away, the natural map is:
-
-    core 0   housekeeping, eth0/NFS, butler and workers
-    core 1   PipeWire data loop (88), I2S IRQ (95), gadget IRQ (80)
-    core 2   Ardour RT-main + AudioEngine dispatcher
-    core 3   Ardour RT-1 + emulator (RR 20, below both)
-
-**5. Only then** revisit URB depth, headroom, and period counts. Every
-one of them measured null while the interrupt was late; none of them
-can be judged until it is not.
+1. **Route the 22-channel map.** MPC master to 1-2, MPC individual outs
+   to 3-10, DAW master to 11-12, DAW stems to 13-20, ADC direct to
+   21-22. Right now everything piles onto the first pair, which is not
+   only wrong for the product, it is what made this measurement lie.
+2. **Re-measure period depth** down toward 2. Every earlier reading was
+   taken through the artifact and means nothing.
+3. The placement items below are unproven, not wrong - they were never
+   tested, because the thing they were meant to fix was not real.
+   Revisit only if a genuine defect appears.
 
 ## Method note
 
@@ -160,6 +152,17 @@ cost days:
 - A **cumulative interrupt total divided by uptime** was quoted as a
   rate and used to argue that channel count drove interrupt load.
 
-The metrics that have never lied: the producer's own underrun
-statistics, Ardour's `get_xrun_count`, the driver row's ERR, and the
-recorded waveform. Prefer them, in that order.
+- The **recorded waveform** was believed to be the ground truth that
+  could not lie, and in a sense it did not: it faithfully reported that
+  the signal was not a sine. What lied was the assumption that the
+  channel carried only the test tone. A waveform test is only as good
+  as the knowledge of what is routed into it - so check the routing,
+  and check the peak level, before trusting the verdict.
+
+The metrics that have held up: the producer's own underrun statistics,
+Ardour's `get_xrun_count`, the driver row's ERR, and the recorded
+waveform *with its routing verified*. Prefer them, in that order.
+
+The general lesson, which cost most of a day twice over: when many
+independent levers all fail to move a number, stop pulling levers and
+suspect the number.
