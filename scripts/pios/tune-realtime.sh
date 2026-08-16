@@ -306,55 +306,44 @@ monitor.alsa.rules = [
         api.acp.auto-profile = false
         api.acp.auto-port = false
         node.pause-on-idle = false
-        # Follow the hardware instead of predicting it.
-        #
-        # PipeWire's default is timer-based scheduling: give ALSA a big
-        # buffer, wake on your own timer once per quantum, and estimate
-        # where DMA must have reached. On this device that estimate was
-        # being made against a 1024-frame period behind a 32768-frame
-        # buffer - 743ms of hardware buffer under a 32-frame quantum -
-        # and IRQ 141 fired about 86 times a second, which is 44100/1024
-        # across both directions. Nothing in the path was following the
-        # hardware at all.
-        #
-        # It fails quietly and only below a certain size. The bare sink,
-        # no graph attached, doing 4us of work per callback:
-        #
-        #   quantum   512  256  128   64   48   32
-        #   errors/10s  0    0    0    8   49  100
-        #
-        # Zero down to 128 samples, and everything below it. That is the
-        # timer model running out of resolution, and it is why none of
-        # the work above the sink ever moved the number - thread count,
-        # plugin load, core placement, interrupt affinity. Switching to
-        # interrupt-driven scheduling, same measurement:
-        #
-        #   q48   209..231  ->  46..60      (4x)
-        #   q32   608..614  ->  52..60     (10x)
-        #
-        # 48 is not "the quantum, matched". Matching was the obvious
-        # guess and it is wrong: a 32-frame period measured WORSE than a
-        # 48-frame one at both quanta, including at quantum 32 where it
-        # is the matching choice.
-        #
-        #   period-size  32/8  32/4   48/8   48/4
-        #   q48 errors    91..104  84..  56..60  46..86
-        #   q32 errors    71..112        48..60  57..61
-        #
-        # 48 frames is 1.09ms of DMA turnaround and 32 is 726us; below
-        # about a millisecond this device starts missing regardless of
-        # what the graph is doing. So period-size is a property of the
-        # hardware, not of the quantum, and it stays at 48 even if the
-        # graph goes to 32.
-        #
-        # period-num 4 is a 192-frame buffer: 8 measured no better, and
-        # buffer depth here is output latency, so the shallower one wins
-        # ties. aplay's old 32-frame-period underruns, which this file
-        # used to cite as a DMA turnaround limit needing 8 periods, were
-        # measuring the same 1ms floor from the other side.
-        #
-        # headroom 0 because there is nothing left to hedge against: the
-        # wake-up is now the interrupt itself, not a guess about it.
+      }
+    }
+  }
+]
+WP
+# The scheduling rule, on the NODES, in its own fragment. It sat inside
+# the device rule above for half a day and did nothing there - the exact
+# trap the nosuspend comment below describes, repeated - and every
+# measurement taken in that window ran on 1024-frame timer-scheduled
+# periods while claiming the interrupt fix. The tell, when it happens
+# again: IRQ 141 at ~86/s per direction (44100/1024) instead of one
+# interrupt per period, and hw_params reading 1024/32768 while open.
+#
+# What these properties are and why - the measurements behind every
+# number here are in the git history (the tsched sweep):
+#
+#   * disable-tsched: PipeWire's default is timer scheduling - big ALSA
+#     buffer, wake on a guess about the DMA pointer. On this device the
+#     pointer only moves per hardware period, so below a 128-frame
+#     quantum the guess fails: bare sink 209..614 errors/10s against
+#     46..60 interrupt-driven. Wake on the interrupt instead.
+#   * period-size 48: property of the HARDWARE, not the quantum. 32-
+#     frame periods measured worse at BOTH quanta including 32, where
+#     "matching" would pick them; this I2S/DMA path has a ~1ms service
+#     floor and 48 frames is 1.09ms.
+#   * period-num 4: 8 measured the same, and buffer depth is output
+#     latency, so ties go to the shallower buffer.
+#   * headroom 0: the wake-up is the interrupt itself, not a guess to
+#     hedge against.
+cat > /etc/wireplumber/wireplumber.conf.d/98-mpcpi-sched.conf <<'WP3'
+monitor.alsa.rules = [
+  {
+    matches = [
+      { node.name = "~alsa_output.platform-soc_107c000000_sound.*" }
+      { node.name = "~alsa_input.platform-soc_107c000000_sound.*" }
+    ]
+    actions = {
+      update-props = {
         api.alsa.disable-tsched = true
         api.alsa.period-size = 48
         api.alsa.period-num = 4
@@ -363,7 +352,7 @@ monitor.alsa.rules = [
     }
   }
 ]
-WP
+WP3
 # A second rule, on the NODE rather than the device: the first one set
 # node.pause-on-idle on the card, where it does nothing for the nodes the
 # card creates. PipeWire suspends an idle sink, and a suspended sink is
