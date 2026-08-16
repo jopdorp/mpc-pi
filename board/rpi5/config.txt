@@ -49,11 +49,20 @@ dtoverlay=vc4-kms-v3d,noaudio
 #     one it already reconciles with the USB host.
 #   * I2S is structurally better suited to a small buffer than the USB
 #     gadget is: one clock, one sample per LRCLK edge, no packetisation
-#     and no two-clock reconciliation. patches/kernel/0001 (which lifts
-#     an arbitrary period-count floor) is likely to pay here rather than
-#     on the gadget. The device-independent limit still holds though:
-#     buffer = quantum means the writer must be punctual forever, so
-#     32 frames x 2 periods is the honest target, not 1.
+#     and no two-clock reconciliation.
+#
+#     It also needs NO kernel patch. patches/kernel/0001 lifts
+#     MIN_PERIODS in drivers/usb/gadget/function/u_audio.c, which is the
+#     USB gadget's ALSA helper and is not in this path at all. I2S goes
+#     through ASoC and soc-generic-dmaengine-pcm.c, which already sets
+#     periods_min = 2 (line 123). Its real floor is
+#     period_bytes_min = maxburst * 8, or 256 bytes when the DMA engine
+#     reports no burst size - a genuine property of the hardware rather
+#     than an arbitrary constant, which is what a limit should be.
+#
+#     The device-independent rule still holds: buffer = quantum means the
+#     writer must be punctual forever, so 32 frames x 2 periods is the
+#     honest target, not 1.
 #dtoverlay=mpc-audio
 
 # USB device mode on the USB-C connector (BCM2712's own DWC2 OTG at
