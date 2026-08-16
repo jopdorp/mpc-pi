@@ -398,5 +398,15 @@ monitor.alsa.rules = [
   }
 ]
 WPSUS
+# WirePlumber remembers a manually chosen default sink in its state
+# directory and that choice outranks priority.session forever after. A
+# single `wpctl set-default` during bring-up therefore pins the graph's
+# default to whatever was convenient that day - here it survived a
+# reboot and kept pointing at the gadget, so unrouted streams would
+# still have landed on the wire to the computer. Clear the state and let
+# the configuration decide.
+rm -f /home/mpc/.local/state/wireplumber/default-nodes
+echo "  cleared wireplumber's remembered default sink"
+
 echo "  graph: timer clock drives, gadget follows at 32-frame periods"
 echo "  wireplumber rules: PCMs direct, no suspend, DAC drives the graph"
