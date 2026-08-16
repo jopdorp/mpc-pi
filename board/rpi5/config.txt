@@ -32,9 +32,28 @@ dtoverlay=vc4-kms-v3d,noaudio
 #
 # Disabling it in wireplumber was not enough: the ALSA device still
 # exists and its DMA channel is still live. The card must not be created
-# at all. Re-enable this line when a DAC is actually attached; nothing
-# else about the audio configuration depends on it, because the
+# at all. Re-enable this line when converters are actually attached;
+# nothing else about the audio configuration depends on it, because the
 # instrument's output goes out over USB.
+#
+# WHEN THAT DAY COMES, three things from this investigation apply:
+#
+#   * The "~1ms DMA service floor" recorded elsewhere in this repo was
+#     measured on THIS card with nothing wired to it, while its driver
+#     was logging "IRQ with no descriptors" and heading for a panic. It
+#     is not evidence about a real converter. Re-measure from scratch.
+#   * The plan is an RP2040 as the clock source for the PCM1808 ADC,
+#     which needs an external SCKI. That makes the Pi's I2S a slave to
+#     that clock - so whatever generates it should clock BOTH converters,
+#     or the board acquires two clock domains of its own on top of the
+#     one it already reconciles with the USB host.
+#   * I2S is structurally better suited to a small buffer than the USB
+#     gadget is: one clock, one sample per LRCLK edge, no packetisation
+#     and no two-clock reconciliation. patches/kernel/0001 (which lifts
+#     an arbitrary period-count floor) is likely to pay here rather than
+#     on the gadget. The device-independent limit still holds though:
+#     buffer = quantum means the writer must be punctual forever, so
+#     32 frames x 2 periods is the honest target, not 1.
 #dtoverlay=mpc-audio
 
 # USB device mode on the USB-C connector (BCM2712's own DWC2 OTG at
