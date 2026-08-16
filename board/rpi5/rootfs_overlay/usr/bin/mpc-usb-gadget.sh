@@ -22,43 +22,29 @@ G=/sys/kernel/config/usb_gadget/mpc
 UDC_DIR=/sys/class/udc
 
 # 1-2 MPC stereo, 3-10 MPC individual outs, 11-18 Ardour (mask 0x3ffff).
-# Two modes, because the channel count is a latency decision.
+# Twenty-two channels up, two down, always. The map:
 #
-# live (the default): a stereo master out and a stereo return. The
-# playing mode - one mix, nothing to route.
+#    1-2   MPC master stereo
+#    3-10  MPC individual outs
+#   11-12  DAW master stereo
+#   13-20  DAW channel outs
+#   21-22  ADC direct (the PCM1808 pair, untouched by the graph)
+#    down  stereo from the computer, landing on Ardour's AUX strip
 #
-# The channel count is NOT what makes this mode work, and it is worth
-# being exact about that, because the opposite was believed for a
-# while. The gadget interrupts once per 125us USB microframe -
-# measured 7,979/s - and that rate is set by p_hs_bint=1, not by how
-# many channels ride each frame. Dropping 18 channels to 6 changed
-# neither the interrupt rate nor the delivered-audio defect rate.
-# Channels are close to free; two is chosen for simplicity, not speed.
+# Fixed, not switchable, and that is the point. The channel count was
+# once believed to be a latency lever; it is not. The gadget interrupts
+# once per 125us USB microframe - measured 7,979 per second - and that
+# rate comes from p_hs_bint=1, not from how many channels ride each
+# frame. Going from 18 channels to 6 changed neither the interrupt rate
+# nor the delivered-audio defect rate. 22ch of 24-bit 44.1k is 2.9MB/s,
+# 363 bytes per microframe, well inside one high-speed packet.
 #
-# full: twenty channels up - MPC stereo + 8 individual outs, DAW
-# stereo + 8 stems - and two down, at quantum 48. This is the tracking
-# mode, certified clean end-to-end (zero xruns, sample-exact USB
-# capture) on the armed session. Everything the live mode folds into
-# one mix is available separately here.
-#
-# Switching modes re-enumerates: USB descriptors are fixed at bind, so
-# the computer sees the interface leave and return (~2-3s). That is
-# inherent to USB, not to this script. The quantum, by contrast,
-# switches gaplessly; mpc-usb-mode.sh does both in order.
-MPC_USB_MODE=${MPC_USB_MODE:-live}
-case "$MPC_USB_MODE" in
-live)
-	default_in=2
-	;;
-full)
-	default_in=20
-	;;
-*)
-	echo "mpc-usb-gadget: unknown MPC_USB_MODE '$MPC_USB_MODE' (live|full)" >&2
-	exit 2
-	;;
-esac
-CHANNELS_IN=${MPC_USB_CHANNELS_IN:-$default_in}
+# Because the width never changes, switching between playing and
+# tracking is a quantum change alone - and the quantum switches
+# GAPLESSLY. The interface never re-enumerates, so a recording running
+# on the computer is not interrupted by a mode change. See
+# mpc-usb-mode.sh.
+CHANNELS_IN=${MPC_USB_CHANNELS_IN:-22}
 CHANNELS_OUT=${MPC_USB_CHANNELS_OUT:-2}
 # 44100: the MPC is a 44.1kHz machine, so the gadget speaks the rate the
 # audio is already in. A 48k gadget would resample every channel on the
@@ -178,4 +164,4 @@ ln -s "$F" "$G/configs/c.1/"
 ln -s "$M" "$G/configs/c.1/"
 
 echo "$udc" > "$G/UDC"
-echo "mpc-usb-gadget: bound to $udc (mode ${MPC_USB_MODE}: ${CHANNELS_IN} up / ${CHANNELS_OUT} down @ ${RATE}, 2x MIDI)"
+echo "mpc-usb-gadget: bound to $udc (${CHANNELS_IN} up / ${CHANNELS_OUT} down @ ${RATE}, 2x MIDI)"

@@ -1,29 +1,24 @@
 #!/bin/sh
-# Switch the appliance between its two latency modes, in the right order.
+# Switch the appliance between playing and tracking. Quantum only.
 #
-#   live  - stereo out, stereo return, quantum 32. The playing mode: one
-#           mix, nothing to route. Channel count is not what makes it
-#           work - the gadget interrupts per 125us microframe whatever
-#           the width - it is chosen for simplicity.
-#   full  - 20 channels up / 2 down, quantum 48. The tracking mode:
-#           every MPC voice and every DAW stem on its own channel, with
-#           1.09ms periods - certified clean end-to-end on the armed
-#           session.
+#   live  - quantum 32 (725us). The playing mode.
+#   track - quantum 48 (1.09ms). The tracking mode: more headroom for a
+#           fully armed session with every insert running.
 #
-# The quantum switches gaplessly. The channel count cannot: USB
-# descriptors are fixed at bind, so the computer sees the interface
-# leave and return (a few seconds). Any host-side recording in progress
-# stops at that moment - which is why the mode switch is a deliberate
-# command and not something the appliance does on its own.
+# Nothing else changes between them. The interface is always 22 up / 2
+# down, so the USB descriptors never change, so the computer never sees
+# the interface leave - a recording running on the host survives a mode
+# switch. That is only true because the channel count is fixed: it was
+# once thought to be a latency lever, and it is not (the gadget
+# interrupts per 125us microframe whatever the width; 18 channels down
+# to 6 changed nothing measurable).
 #
-# Order matters both directions:
-#   going to live: shrink the quantum only AFTER the small gadget is
-#     up - a 20-channel gadget at quantum 32 under load is the measured
-#     glitch case;
-#   going to full: widen the quantum FIRST, for the same reason
-#     mirrored.
+# The quantum itself switches inside the running graph: PipeWire
+# renegotiates it on the next cycle. There is a brief transient while
+# clients re-adapt, which is why this is a deliberate command rather
+# than something the appliance does on its own mid-take.
 #
-#   mpc-usb-mode.sh live|full|status
+#   mpc-usb-mode.sh live|track|status
 set -eu
 
 MODE="${1:-status}"
@@ -39,23 +34,31 @@ status)
 	q=$($R pw-metadata -n settings 0 2>/dev/null |
 		grep -o "clock.force-quantum.*value:'[0-9]*'" |
 		grep -oE "[0-9]+" | tail -1)
-	ch=$(cut -d, -f1 < /sys/kernel/config/usb_gadget/mpc/functions/uac2.usb0/p_chmask 2>/dev/null || echo none)
-	printf 'quantum: %s  gadget p_chmask: %s\n' "${q:-default}" "$ch"
+	mask=$(cat /sys/kernel/config/usb_gadget/mpc/functions/uac2.usb0/p_chmask 2>/dev/null || echo none)
+	# Count the bits, so the report says channels rather than hex.
+	if [ "$mask" != none ]; then
+		n=$(printf '%d\n' "$mask" | awk '{c=0; v=$1; while (v) {c += v % 2; v = int(v/2)}; print c}')
+	else
+		n=none
+	fi
+	case "${q:-0}" in
+		32) name="live" ;;
+		48) name="track" ;;
+		*)  name="custom" ;;
+	esac
+	printf 'mode: %s (quantum %s)  interface: %s up / 2 down\n' \
+		"$name" "${q:-default}" "$n"
 	;;
 live)
-	MPC_USB_MODE=live /usr/bin/mpc-usb-gadget.sh
-	# Let the host re-enumerate before the tighter deadline applies.
-	sleep 3
 	quantum 32
-	echo "mode: live (stereo out / stereo return, quantum 32)"
+	echo "mode: live (quantum 32) - interface unchanged, host uninterrupted"
 	;;
-full)
+track)
 	quantum 48
-	MPC_USB_MODE=full /usr/bin/mpc-usb-gadget.sh
-	echo "mode: full (20 up / 2 down, quantum 48)"
+	echo "mode: track (quantum 48) - interface unchanged, host uninterrupted"
 	;;
 *)
-	echo "usage: mpc-usb-mode.sh live|full|status" >&2
+	echo "usage: mpc-usb-mode.sh live|track|status" >&2
 	exit 2
 	;;
 esac
