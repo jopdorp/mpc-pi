@@ -353,6 +353,35 @@ monitor.alsa.rules = [
   }
 ]
 WP3
+
+# The same rule for the USB gadget nodes, in its own fragment. Found the
+# hard way, from the delivered audio itself: at quantum 32 with nothing
+# but a tone playing, the host-side capture of the gadget stream carried
+# 120 discontinuities and one-quantum silence gaps per minute - the
+# gadget was still timer-scheduled on 1024-frame periods, the exact
+# disease just cured on the I2S sink, on the second device. It had
+# survived quantum 48 in that state, which is why certifying q48 did not
+# expose it. With 48-frame periods the same 60-second capture at q32
+# reads sample-exact. The f_uac2 pointer advances per 125us USB
+# microframe, so small periods suit it.
+cat > /etc/wireplumber/wireplumber.conf.d/99-mpcpi-usb-sched.conf <<'WP4'
+monitor.alsa.rules = [
+  {
+    matches = [
+      { node.name = "~alsa_output.platform-1000480000.usb.*" }
+      { node.name = "~alsa_input.platform-1000480000.usb.*" }
+    ]
+    actions = {
+      update-props = {
+        api.alsa.disable-tsched = true
+        api.alsa.period-size = 48
+        api.alsa.period-num = 4
+        api.alsa.headroom = 0
+      }
+    }
+  }
+]
+WP4
 # A second rule, on the NODE rather than the device: the first one set
 # node.pause-on-idle on the card, where it does nothing for the nodes the
 # card creates. PipeWire suspends an idle sink, and a suspended sink is
