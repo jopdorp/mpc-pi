@@ -19,6 +19,13 @@ Measured on 2026-08-16, armed lp0 + emulator at quantum 32: Ardour's
 own xrun counter ZERO across five consecutive reports, driver-late
 count zero. The graph is clean at 32 on this topology.
 
+`94-mpcpi-i2s-off.conf` -> /etc/wireplumber/wireplumber.conf.d/
+    disables the I2S card outright. No DAC is wired to it; the overlay
+    creates it regardless. Netconsole caught it panicking the kernel -
+    a use-after-free in the RP1 DMA driver reached through
+    snd_pcm_do_start - which is the cause of every unexplained reboot
+    in this project. See the file for the trace.
+
 NOT yet the default, for two reasons, both honest:
   * the board dropped off the network during the first long run under
     this topology and the crash is unattributed;
