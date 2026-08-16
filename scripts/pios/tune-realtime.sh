@@ -159,3 +159,20 @@ CPUAffinity=2-3
 UNIT
 done
 echo "  pipewire + wireplumber pinned to cores 2-3 (user units)"
+
+log "jack clients get realtime too"
+# PipeWire's own loops had RT 88 while every pipewire-jack client ran
+# its data loop - the thread the process callback lives in - at
+# SCHED_OTHER, because Debian's jack.conf loads no module-rt. Ardour's
+# AudioEngine thread asks for RT itself and got 83; the pw- threads
+# feeding it did not, and they are where the deadline actually lands.
+install -d /etc/pipewire/jack.conf.d
+cat > /etc/pipewire/jack.conf.d/95-mpcpi-rt.conf <<'EOF2'
+context.modules = [
+    { name = libpipewire-module-rt
+      args = { nice.level = -19 rt.prio = 85 rt.time.soft = -1 rt.time.hard = -1 }
+      flags = [ ifexists nofail ]
+    }
+]
+EOF2
+echo "  module-rt in jack.conf.d (prio 85)"

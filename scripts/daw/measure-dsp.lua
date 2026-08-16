@@ -54,10 +54,27 @@ end
 -- Roll the transport so the graph is actually processing, not idling.
 session:request_roll(ARDOUR.TransportRequestSource.TRS_UI)
 
+-- A real sleep, never a spin. The first version busy-waited on
+-- os.clock, and taskset had pinned this script to the audio cores: the
+-- measurement loop itself then competed with the graph's client threads
+-- for 25 straight seconds, so the tool was manufacturing a share of the
+-- xruns it reported. ARDOUR.LuaAPI.usleep yields the core like any
+-- blocked process.
 local function sleep(s)
-	local t = os.clock() + s
-	while os.clock() < t do end
+	if ARDOUR.LuaAPI and ARDOUR.LuaAPI.usleep then
+		ARDOUR.LuaAPI.usleep(math.floor(s * 1e6))
+	else
+		os.execute("sleep " .. s)
+	end
 end
+
+-- Settle before counting. Loading 29 plugins into a running graph
+-- xruns freely, and those load-time overruns were being billed to
+-- steady state: a 3-second run "measured" 18 of them. What matters to
+-- a player is the count while playing, so baseline after two settled
+-- seconds and report the delta.
+sleep(2)
+local xrun_base = session:get_xrun_count()
 
 local max_load, sum, n = 0, 0, 0
 for _ = 1, secs do
@@ -71,6 +88,7 @@ session:request_stop(false, false, ARDOUR.TransportRequestSource.TRS_UI)
 
 print(string.format("DSP-LOAD max=%.1f%% avg=%.1f%% samples=%d",
 	max_load, sum / math.max(n, 1), n))
-print(string.format("XRUNS %d", session:get_xrun_count()))
+print(string.format("XRUNS %d (plus %d during load)",
+	session:get_xrun_count() - xrun_base, xrun_base))
 session:save_state("", false, false, false, false, false)
 close_session()
