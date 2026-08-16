@@ -57,6 +57,63 @@ if os.getenv("STRESS") == "1" then
 	print("stress: activated " .. n .. " plugin inserts")
 end
 
+-- ACTIVE selects which inserts run, so cost can be found by bisection
+-- rather than by guessing. The first guess here was the seven 16-band
+-- EQs; switching all of them off bought about 10%, which is exactly the
+-- kind of confident wrong answer that a halving search does not let you
+-- keep.
+--
+--   ACTIVE=none     every insert off - the floor: routing, track and
+--                   graph overhead with no DSP at all
+--   ACTIVE=all      every insert on
+--   ACTIVE=3-14     inclusive 1-based range of the printed index
+--
+-- Indices are stable: route order, then processor order within a route,
+-- which is the order the audio actually flows.
+local function enumerate_inserts()
+	local list = {}
+	for r in session:get_routes():iter() do
+		local i = 0
+		while true do
+			local proc = r:nth_processor(i)
+			if proc:isnil() then break end
+			if not proc:to_insert():isnil() then
+				list[#list + 1] = {
+					proc = proc,
+					name = r:name() .. "/" .. proc:display_name(),
+				}
+			end
+			i = i + 1
+		end
+	end
+	return list
+end
+
+local want = os.getenv("ACTIVE")
+if want and want ~= "" then
+	local inserts = enumerate_inserts()
+	local lo, hi = 0, 0
+	if want == "all" then
+		lo, hi = 1, #inserts
+	elseif want ~= "none" then
+		lo, hi = want:match("^(%d+)%-(%d+)$")
+		lo, hi = tonumber(lo) or 0, tonumber(hi) or 0
+	end
+	for i, ins in ipairs(inserts) do
+		if i >= lo and i <= hi then
+			ins.proc:activate()
+		else
+			ins.proc:deactivate()
+		end
+		if os.getenv("LIST_INSERTS") == "1" then
+			print(string.format("INSERT %2d %s %s", i,
+				(i >= lo and i <= hi) and "ON " or "off", ins.name))
+		end
+	end
+	print(string.format("ACTIVE %s -> %d of %d inserts on",
+		want, math.max(0, math.min(hi, #inserts) - lo + 1), #inserts))
+end
+
 -- Linked into the driver's graph, or PipeWire never calls us.
 print("master connected to " .. compat.connect_master(session) ..
 	" playback ports")
