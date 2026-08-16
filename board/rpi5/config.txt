@@ -4,14 +4,38 @@ arm_64bit=1
 disable_overscan=1
 
 # ===== AUDIO =====
-# Onboard/HDMI audio is off so the I2S card is the only sound device and
-# always lands on card 0; MAME's PipeWire path picks the default sink.
+# Onboard/HDMI audio is off. With the I2S overlay disabled below, the
+# USB gadget is the only real sound device; the graph is clocked by a
+# timer-driven null sink rather than by any hardware, so nothing depends
+# on which card lands at index 0.
 dtparam=audio=off
 dtoverlay=vc4-kms-v3d,noaudio
 
 # PCM5102A DAC plus PCM1808 ADC on the shared I2S bus. See
 # overlays/mpc-audio-overlay.dts for the wiring this assumes.
-dtoverlay=mpc-audio
+#
+# DISABLED until the converters are physically wired. The overlay
+# creates the card unconditionally, and with nothing on the pins it is
+# not merely useless - it is actively harmful:
+#
+#   * it PANICS THE KERNEL. Captured over netconsole:
+#       dma dma2chan2: BUG: dma2chan2, IRQ with no descriptors
+#       Unable to handle kernel paging request at deaddeaddeaddead
+#       axi_desc_get / dw_axi_dma_set_hw_desc / snd_pcm_do_start
+#       Kernel panic - not syncing: Oops: Fatal exception in interrupt
+#     A use-after-free in the RP1 AXI DMA driver, reached by starting
+#     the PCM - which is what every audio graph restart does. It is the
+#     cause of the unexplained reboots this project spent days blaming
+#     on power supplies and realtime tuning.
+#   * it became the graph's clock by default, and its ~1ms DMA service
+#     floor was then mistaken for a hardware limit on quantum 32.
+#
+# Disabling it in wireplumber was not enough: the ALSA device still
+# exists and its DMA channel is still live. The card must not be created
+# at all. Re-enable this line when a DAC is actually attached; nothing
+# else about the audio configuration depends on it, because the
+# instrument's output goes out over USB.
+#dtoverlay=mpc-audio
 
 # USB device mode on the USB-C connector (BCM2712's own DWC2 OTG at
 # usb@480000, disabled in the base DTB). This is what lets the appliance
