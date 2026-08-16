@@ -280,23 +280,27 @@ targets and yields `dr_mode = "otg"` plus gadget FIFO sizes. On top of it
 | Property | Value | Why |
 |---|---|---|
 | Class | UAC2, USB 2.0 high speed | Driverless on macOS, Windows 10+, Linux |
-| Host records | **10 ch** | MPC stereo + the eight individual outs |
-| Host plays | 2 ch | back into the rig (backing tracks, reamping) |
+| Host records | **18 ch** | 1-2 MPC stereo · 3-10 MPC individual outs · 11-12 Ardour master · 13-18 Ardour input strips |
+| Host plays | 2 ch | lands on Ardour's AUX strip (backing tracks, reamping) |
 | Format | 24-bit / 48 kHz | matches the emulator and the DAC; 25% less bandwidth than padded 32-bit |
 | Service interval | **125 µs** (`p_hs_bint=1`) | the 1 ms default is what usually blocks small buffers |
 | Requests in flight | 2 (`req_number`) | minimum that still survives scheduling jitter |
 
-Bandwidth is not the constraint: 10 ch × 24-bit × 48 kHz is 1.44 MB/s,
+Bandwidth is not the constraint: 18 ch × 24-bit × 48 kHz is 2.6 MB/s —
+324 bytes per 125 µs microframe, a third of one high-speed iso packet —
 against roughly 8–13 MB/s practical for USB 2.0 high-speed isochronous.
 The 125 µs service interval is the part that makes a 32-sample (0.67 ms)
 host buffer realistic; expect a round trip of a few ms end to end and
 **measure it on hardware before quoting a number** — the gadget adds its
 own buffering on top of the host's.
 
-`mpc-usb-route.sh {mpc|ardour|off}` picks what the computer records.
-Both sources are ten channels, so one occupies the gadget at a time;
-20 channels (MPC *and* Ardour at once) fits the bandwidth but doubles the
-endpoint load, so it stays an experiment rather than the default. As
+`mpc-usb-route.sh {on|off}` wires the whole map at once. An earlier
+version made MPC and Ardour take turns on ten channels; that quietly
+reinvented the chained topology this design forbids — each source must
+reach the wire directly or not at all — so the mode switch is gone.
+Ardour's MPC strip is not tapped (the raw MPC is already on 1–10), and
+AUX is not tapped because it carries the computer's own stereo down-mix
+back in — tapping it would feed the host its own signal. As
 everywhere else in this design these are **taps** — the MPC's monitor path
 to the DAC is never routed through the gadget.
 

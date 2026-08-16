@@ -1,8 +1,16 @@
 #!/bin/sh
 # Present the appliance to a computer as a class-compliant USB 2.0 audio
-# interface (UAC2), so the MPC's ten channels or Ardour's mix can be
-# recorded on a host with no drivers. See docs/maschine-daw-design.md,
-# "USB audio interface (both directions)".
+# interface (UAC2), so everything the instrument makes can be recorded on
+# a host with no drivers. See docs/maschine-daw-design.md, "USB audio
+# interface (both directions)".
+#
+# Eighteen channels up, concurrently - MPC stereo, the MPC's eight
+# individual outs, and eight from Ardour - because "pick one source at a
+# time" turned out to contradict the design's own direct-out rule: the
+# switch forced Ardour through the MPC's channels or off the wire
+# entirely. Concurrency is cheap here: 18ch of 24-bit 48k is 2.6 MB/s,
+# 324 bytes per 125us microframe, a third of one high-speed iso packet.
+# The stereo pair down from the computer lands on Ardour's AUX strip.
 #
 # The gadget shows up locally as an ordinary ALSA card, which is what lets
 # PipeWire route emulator or DAW channels into it: what the host records is
@@ -13,8 +21,8 @@ set -eu
 G=/sys/kernel/config/usb_gadget/mpc
 UDC_DIR=/sys/class/udc
 
-# Ten channels: MPC stereo plus the eight individual outs (mask 0x3ff).
-CHANNELS_IN=${MPC_USB_CHANNELS_IN:-10}
+# 1-2 MPC stereo, 3-10 MPC individual outs, 11-18 Ardour (mask 0x3ffff).
+CHANNELS_IN=${MPC_USB_CHANNELS_IN:-18}
 CHANNELS_OUT=${MPC_USB_CHANNELS_OUT:-2}
 RATE=${MPC_USB_RATE:-48000}
 # 24-bit over the wire: the emulator and the DAC are both 24-bit clean and
