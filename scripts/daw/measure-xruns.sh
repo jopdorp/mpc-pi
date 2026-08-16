@@ -50,8 +50,17 @@ ardour_env || { echo "no Ardour"; exit 1; }
 # rename cannot silently redirect the measurement at the driver node -
 # whose ERR column counts something else entirely.
 sample() {
-	$R timeout 8 pw-top -b -n 2 2>/dev/null |
-		grep -E "^R +[0-9]+ +0 +0" | tail -1
+	$R timeout 8 pw-top -b -n 2 2>/dev/null > /tmp/pwtop.$$
+	grep -E "^R +[0-9]+ +0 +0" /tmp/pwtop.$$ | tail -1
+}
+
+# The DRIVER row, from the same capture. Without it a rising client ERR
+# is unattributable: a follower that is late every time the sink is late
+# is not a slow follower, it is a slow sink, and the two want opposite
+# fixes. The driver is the row that owns the quantum and rate - the
+# followers report 0 0 because they inherit them.
+driver_line() {
+	grep -E "^R +[0-9]+ +[1-9][0-9]* +[1-9][0-9]*" /tmp/pwtop.$$ | head -1
 }
 
 median() {
@@ -112,6 +121,7 @@ for q in $QUANTA; do
 	sleep 6
 	prev=$(sample)
 	a=$(printf '%s' "$prev" | awk '{print $9}')
+	da=$(driver_line | awk '{print $9}')
 	if [ -z "$a" ]; then
 		echo "q=$q: NO CLIENT NODE - the session is not in the graph" >&2
 		continue
@@ -132,14 +142,17 @@ for q in $QUANTA; do
 		# the fixed per-callback cost, and only the second one is
 		# addressable by removing nodes from the graph.
 		busy=$(printf '%s' "$cur" | awk '{print $6}')
+		db=$(driver_line | awk '{print $9}')
+		dd=$((${db:-0} - ${da:-0}))
+		da=${db:-0}
 		# The first window is warm-up: the quantum change itself xruns and
 		# the graph has not settled onto its cores yet.
 		if [ $i -eq 0 ]; then
-			printf '  q=%-3s warmup   xruns=%-6s B/Q=%-6s BUSY=%s\n' \
-				"$q" "$d" "$bq" "$busy"
+			printf '  q=%-3s warmup   xruns=%-6s drv=%-6s B/Q=%-6s BUSY=%s\n' \
+				"$q" "$d" "$dd" "$bq" "$busy"
 		else
-			printf '  q=%-3s window%-2d xruns=%-6s B/Q=%-6s BUSY=%s\n' \
-				"$q" "$i" "$d" "$bq" "$busy"
+			printf '  q=%-3s window%-2d xruns=%-6s drv=%-6s B/Q=%-6s BUSY=%s\n' \
+				"$q" "$i" "$d" "$dd" "$bq" "$busy"
 			vals="$vals $d"
 			busies="$busies $busy"
 		fi
@@ -159,6 +172,7 @@ for q in $QUANTA; do
 		"$q" "$med" "$WINDOW" "$lo" "$hi" "$(echo $vals | wc -w)" "$mbusy"
 done
 
+rm -f /tmp/pwtop.$$
 $R pw-metadata -n settings 0 clock.force-quantum 0 >/dev/null 2>&1
 pkill -x luasession 2>/dev/null
 echo XRUNS-DONE

@@ -110,6 +110,7 @@ archopts="-mcpu=cortex-a76 -ffp-contract=off -DUSE_OZONE"
 
 # Build against the rootfs the Pi boots, not the one it used to.
 MPC_SYSROOT="${MPC_SYSROOT:-/srv/nfs/mpcpi-pios}"
+ldextra=""
 if [ -d "$MPC_SYSROOT/usr/lib/aarch64-linux-gnu" ]; then
     staging_dir="$MPC_SYSROOT"
     archopts="$archopts --sysroot=$MPC_SYSROOT"
@@ -118,9 +119,30 @@ if [ -d "$MPC_SYSROOT/usr/lib/aarch64-linux-gnu" ]; then
     # searches by default and Buildroot's does not. Adding it explicitly
     # is what lets a non-Debian toolchain use a Debian sysroot.
     archopts="$archopts -I$MPC_SYSROOT/usr/include/aarch64-linux-gnu"
+    # And the same multiarch problem on the link side, which bites
+    # harder because it is silent in the wrong direction. Debian keeps
+    # Scrt1.o, crti.o, crtn.o and libc.so under
+    # /usr/lib/aarch64-linux-gnu; Buildroot's gcc looks only in
+    # <sysroot>/usr/lib and <sysroot>/lib. -B adds a startfile prefix,
+    # -L the library search path, and -rpath-link lets ld resolve the
+    # DT_NEEDED of a shared library without recording a host path.
+    ldextra="-B$MPC_SYSROOT/usr/lib/aarch64-linux-gnu"
+    for d in usr/lib/aarch64-linux-gnu lib/aarch64-linux-gnu usr/lib; do
+        ldextra="$ldextra -L$MPC_SYSROOT/$d -Wl,-rpath-link,$MPC_SYSROOT/$d"
+    done
     echo "sysroot: $MPC_SYSROOT (the netbooted Debian root)"
 else
-    echo "sysroot: $staging_dir (Buildroot - the board must be running it)" >&2
+    # Refuse rather than warn. This branch is how a Buildroot-linked
+    # binary shipped in the first place: the message went to stderr, the
+    # build succeeded, and the difference only appeared as an instant
+    # segfault on the board an hour later. The appliance runs Debian; a
+    # silent fallback to a sysroot it does not boot produces a binary
+    # that is wrong in a way nothing on this host can detect.
+    printf 'error: no Debian sysroot at %s\n' "$MPC_SYSROOT" >&2
+    printf '       the board boots Raspberry Pi OS; linking against\n' >&2
+    printf '       Buildroot staging produces a binary it cannot run.\n' >&2
+    printf '       Set MPC_SYSROOT, or mount the netboot root.\n' >&2
+    exit 1
 fi
 
 # pkg-config has to look inside the sysroot, and Debian keeps its .pc
@@ -181,7 +203,7 @@ make -C "$mame_source_dir" \
     OVERRIDE_LD="${cross_prefix}g++" \
     AR="${cross_prefix}ar" \
     ARCHOPTS="$archopts" \
-    LDOPTS="--sysroot=$staging_dir -Wl,-z,max-page-size=$max_page" \
+    LDOPTS="--sysroot=$staging_dir $ldextra -Wl,-z,max-page-size=$max_page" \
     ${MAME_EXTRA_OPTS:-} \
     -j"$mame_jobs"
 
