@@ -186,6 +186,38 @@ if [ -d "$TARGET/boot/firmware" ] && [ -d "$TFTP" ]; then
 	echo "  restored the Pi OS kernel, config.txt and overlays into $TFTP"
 fi
 
+# The RT kernel, if one has been built. Image and DTB go to TFTP, and -
+# the part that is easy to forget - the modules go into the NFS root,
+# because a kernel whose modules are missing boots and then quietly has
+# no I2S, no gadget, no overlay support: it looks tuned and is actually
+# gutted. config.txt gets an explicit kernel= line because on a Pi 5 the
+# firmware's default pick is kernel_2712.img, which stays the stock
+# fallback: put the SD card... rather, flip the kernel= line back and the
+# board is stock again, which is the rollback story.
+RTK="$REPO/.cache/rt-kernel/linux"
+if [ -s "$RTK/arch/arm64/boot/Image" ] && [ -d "$TFTP" ]; then
+	BRBIN="$REPO/.cache/br-rpi5/host/bin"
+	rel=$(cat "$RTK/include/config/kernel.release" 2>/dev/null || echo unknown)
+	if [ ! -d "$TARGET/lib/modules/$rel" ]; then
+		echo "  installing modules $rel into the rootfs..."
+		PATH="$BRBIN:$PATH" make -C "$RTK" ARCH=arm64 \
+			CROSS_COMPILE=aarch64-linux- \
+			INSTALL_MOD_PATH="$TARGET" modules_install >/dev/null 2>&1 ||
+			echo "  WARNING: modules_install failed; NOT switching kernels" >&2
+	fi
+	if [ -d "$TARGET/lib/modules/$rel" ]; then
+		cp "$RTK/arch/arm64/boot/Image" "$TFTP/kernel_2712_rt.img"
+		cp "$RTK/arch/arm64/boot/dts/broadcom/bcm2712-rpi-5-b.dtb" \
+			"$TFTP/" 2>/dev/null || true
+		if grep -q "^kernel=" "$TFTP/config.txt" 2>/dev/null; then
+			sed -i "s/^kernel=.*/kernel=kernel_2712_rt.img/" "$TFTP/config.txt"
+		else
+			printf '\nkernel=kernel_2712_rt.img\n' >> "$TFTP/config.txt"
+		fi
+		echo "  RT kernel $rel staged (kernel= set in TFTP config.txt)"
+	fi
+fi
+
 # The realtime cmdline has to go where a netbooted board actually reads
 # it. tune-boot.sh edits /boot/firmware/cmdline.txt, which is correct for
 # a card in a slot and completely ignored over the network - the kernel
@@ -198,13 +230,12 @@ fi
 CMDLINE="$TFTP/cmdline.txt"
 if [ -f "$CMDLINE" ]; then
 	line=$(tr -d '\n' < "$CMDLINE")
-	# nohz_full and rcu_nocbs are deliberately absent: Raspberry Pi OS
-	# ships CONFIG_NO_HZ_IDLE with "# CONFIG_NO_HZ_FULL is not set", so
-	# the kernel accepts those arguments and ignores them. Passing an
-	# option that cannot work reads, later, as a tuning that is already
-	# applied - and measured 3us worst case without them anyway. They
-	# would need a custom kernel to mean anything.
-	for opt in irqaffinity=0-1 audit=0; do
+	# nohz_full and rcu_nocbs were absent while the board ran the stock
+	# Pi OS kernel, which ships without CONFIG_NO_HZ_FULL and silently
+	# ignores them - an option that cannot work reads, later, as a tuning
+	# already applied. The mpcpi-rt kernel is built with NO_HZ_FULL and
+	# RCU_NOCB_CPU, so on it they mean exactly what they say.
+	for opt in nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1 audit=0; do
 		case " $line " in
 			*" $opt "*) ;;
 			*) line="$line $opt" ;;

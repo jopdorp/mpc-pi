@@ -33,6 +33,21 @@ else
 	note "systemd-analyze unavailable"
 fi
 
+hdr "kernel"
+# uname -v, not /sys/kernel/realtime: that file does not exist on 6.12
+# even on a PREEMPT_RT build, so testing for it reports a stock kernel
+# on an RT one. The version string carries the preemption model.
+if uname -v | grep -q PREEMPT_RT; then
+	ok "PREEMPT_RT kernel ($(uname -r))"
+else
+	note "not PREEMPT_RT ($(uname -r)) - run scripts/build-rt-kernel.sh"
+fi
+if [ "$(cat /sys/devices/system/cpu/nohz_full 2>/dev/null)" = "2-3" ]; then
+	ok "nohz_full=2-3 honoured"
+else
+	bad "nohz_full not in effect (needs CONFIG_NO_HZ_FULL)"
+fi
+
 hdr "cpu"
 gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "?")
 [ "$gov" = "performance" ] && ok "governor performance" || bad "governor is $gov"
