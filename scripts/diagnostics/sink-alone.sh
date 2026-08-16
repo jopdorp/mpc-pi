@@ -78,6 +78,14 @@ for q in $QUANTA; do
 	setsid $R pw-play "$TONE" >/dev/null 2>&1 &
 	player=$!
 	sleep 8
+	# What ALSA was actually given, read while the device is open - the
+	# node is closed and the file empty at every other moment. This is
+	# where the whole problem was visible and never looked at: a
+	# 1024-frame period behind a 32768-frame buffer under a 32-frame
+	# quantum.
+	hw=$(tr '\n' ' ' < /proc/asound/card0/pcm1p/sub0/hw_params 2>/dev/null |
+		sed -E 's/.*(period_size: [0-9]+) (buffer_size: [0-9]+).*/\1 \2/')
+	printf '  q=%-3s hw: %s\n' "$q" "${hw:-device not open}"
 	line=$(driver_err)
 	a=$(printf '%s' "$line" | awk '{print $9}')
 	if [ -z "$a" ]; then

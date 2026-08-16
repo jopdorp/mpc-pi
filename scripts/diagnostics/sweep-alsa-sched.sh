@@ -80,9 +80,10 @@ for cfg in "tsched 0" "48 8" "48 4" "32 8" "32 4"; do
 	set -- $cfg
 	echo "=== period-size=$1 period-num=$2 ===" | tee -a "$OUT"
 	apply "$1" "$2"
-	hw=$(cat /proc/asound/card0/pcm1p/sub0/hw_params 2>/dev/null |
-		tr '\n' ' ' | sed 's/  */ /g')
-	echo "  hw_params: ${hw:-（idle）}" | tee -a "$OUT"
+	# hw_params is printed by sink-alone itself, while the device is
+	# open. Reading it here would always find the file empty: the sink
+	# is idle between runs, and an empty hw_params reads as "no
+	# information" rather than "not measured".
 	MPCPI_REPEATS=3 sh /opt/mpc-pi-src/scripts/diagnostics/sink-alone.sh 48 32 |
 		grep --line-buffered -E "^  q=" | tee -a "$OUT"
 done
