@@ -17,17 +17,28 @@
 #
 # Every audio period begins with interrupt 141, queued behind a source
 # firing five times more often, at the same threaded-IRQ priority of 50.
-# That is a wake-up latency tail, and a wake-up latency tail is exactly
-# what the xrun measurements show: the rate tracks the callback RATE and
-# ignores the load, staying put when every plugin in the session is
-# switched off and the graph drops to a third of its period.
 #
 # So: everything on core 0, audio alone on core 1 - the same core as
 # PipeWire's data loop, deliberately, because the interrupt's whole job
 # is to wake that loop and a same-core wake needs no IPI. Then lift the
 # audio IRQ thread above the rest, which is the half that affinity alone
-# cannot do: two threads at priority 50 on different cores do not
-# queue behind each other, but a shared DMA engine's other clients do.
+# cannot do: two threads at priority 50 on different cores do not queue
+# behind each other, but a shared DMA engine's other clients do.
+#
+# HONESTLY: this did not fix anything, and it is kept because it is
+# right, not because it worked. It was applied in pursuit of the xrun
+# tail and measured immediately afterwards, twice, against the same
+# configuration - empty graph, two DSP threads, medians of four
+# ten-second windows:
+#
+#            before      after run 1   after run 2
+#   q48        74            76            79
+#   q32       142           157           151
+#
+# No effect, or a hair worse. Whatever makes an unloaded graph miss
+# eleven deadlines a second at 34% of its period, it is not this
+# interrupt's placement. Do not let this file's existence stand in for
+# an explanation of the tail; the explanation is still missing.
 AUDIO_CORE_MASK=2      # core 1
 OTHER_CORE_MASK=1      # core 0
 found=""
