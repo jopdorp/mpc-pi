@@ -170,6 +170,48 @@ cat > /etc/security/limits.d/95-mpcpi.conf <<'EOF'
 EOF
 usermod -aG audio "${SUDO_USER:-pi}" 2>/dev/null || true
 
+# The appliance runs its audio as a real user, because PipeWire refuses
+# to run as root - ConditionUser=!root, deliberately, upstream - and a
+# headless netbooted board has nobody logged in to own the graph. So
+# create the user the instrument runs as, and let it linger: lingering is
+# what starts a user's systemd session at boot with no login, which is
+# how a graph exists on a machine that never sees a keyboard.
+#
+# input and plugdev are for the Maschine: it is a USB HID device the hub
+# opens directly, and root is not available to open it.
+log "appliance user"
+if ! id mpc >/dev/null 2>&1; then
+	useradd -m -s /bin/bash -G audio,video,plugdev,input,render mpc
+	echo "  created user mpc"
+else
+	usermod -aG audio,video,plugdev,input,render mpc
+fi
+loginctl enable-linger mpc 2>/dev/null || true
+
+MPC_UID=$(id -u mpc)
+run_as_mpc() {
+	sudo -u mpc XDG_RUNTIME_DIR="/run/user/$MPC_UID" \
+		DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$MPC_UID/bus" "$@"
+}
+# Wait for logind to build the runtime directory; enabling the units
+# before it exists fails in a way that looks like a broken install.
+for _ in $(seq 1 20); do
+	[ -d "/run/user/$MPC_UID" ] && break
+	sleep 0.5
+done
+if [ -d "/run/user/$MPC_UID" ]; then
+	run_as_mpc systemctl --user enable --now pipewire.socket pipewire \
+		wireplumber >/dev/null 2>&1 || true
+	sleep 2
+	if [ -S "/run/user/$MPC_UID/pipewire-0" ]; then
+		echo "  pipewire running for user mpc"
+	else
+		echo "  WARNING: pipewire did not come up for user mpc" >&2
+	fi
+else
+	echo "  WARNING: /run/user/$MPC_UID never appeared; linger not active" >&2
+fi
+
 # --- services --------------------------------------------------------
 
 log "services"
