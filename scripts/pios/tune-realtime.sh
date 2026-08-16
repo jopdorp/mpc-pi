@@ -381,8 +381,18 @@ WPGRP
 #    in the driver, not a hardware limit, and the real constraint a few
 #    lines below it (period_bytes_min * periods_min = 2 * max_psize,
 #    the two-USB-packet floor) is preserved by the change. With the
-#    patch the board-side buffer at quantum 32 is 64 frames - 1.45ms
-#    instead of 2.9ms.
+#    patch the board-side buffer at quantum 32 is 64 frames instead of
+#    128, and the MEASURED fill - which is what latency actually is -
+#    drops from 96 frames (2.18ms) to 64 (1.45ms).
+#
+#    Left at 4 pending a comparison that has not been completed. One
+#    valid delivery measurement exists at 2 periods (full desk, emulator
+#    live, tone verified alone on its channel, host recorder at its own
+#    default): 22 defects in 60 seconds. There is no matching 4-period
+#    number, because the gadget wedged with EIO partway through every
+#    attempt at one, so whether those 22 events are the cost of the
+#    shallower buffer or simply the floor is unknown. 4 is the stock
+#    depth and the conservative choice until that A/B exists.
 cat > /etc/wireplumber/wireplumber.conf.d/99-mpcpi-usb-sched.conf <<'WPUSB'
 monitor.alsa.rules = [
   {
@@ -394,7 +404,7 @@ monitor.alsa.rules = [
       update-props = {
         api.alsa.disable-tsched = true
         api.alsa.period-size = 32
-        api.alsa.period-num = 2
+        api.alsa.period-num = 4
         api.alsa.headroom = 0
         node.pause-on-idle = false
         session.suspend-timeout-seconds = 0
