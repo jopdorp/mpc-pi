@@ -51,7 +51,15 @@ ardour_env || { echo "no Ardour"; exit 1; }
 # whose ERR column counts something else entirely.
 sample() {
 	$R timeout 8 pw-top -b -n 2 2>/dev/null > /tmp/pwtop.$$
-	grep -E "^R +[0-9]+ +0 +0" /tmp/pwtop.$$ | tail -1
+	# Ardour is the follower with no format and NO NAME - the row ends
+	# at the bare "+" of the tree drawing. The earlier "0 0 follower,
+	# tail -1" matched pw-play and the emulator nodes as well, and which
+	# one tail picked depended on listing order: one run read a MAME
+	# node (xruns=0, BUSY 0.0us), the next read something else entirely,
+	# and one window even produced a negative driver delta. Every row a
+	# measurement depends on must be selected by a property only the
+	# intended node has.
+	grep -E "^R +[0-9]+ +0 +0" /tmp/pwtop.$$ | grep -E "\+ *$" | tail -1
 }
 
 # The DRIVER row, from the same capture. Without it a rising client ERR
