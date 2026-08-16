@@ -23,12 +23,19 @@ sys.path.insert(0, os.path.join(
 import plugins                                            # noqa: E402
 
 
-def _first_uri(kind, index=0):
-    """The preferred URI for a role of this kind."""
+def _first_uri(kind, index=0, alternative=0):
+    """The preferred URI for a role of this kind.
+
+    `index` picks the ROLE (a kind can have several, e.g. two drive
+    pedals); `alternative` picks within that role's own URI list, which
+    is ordered best-first. The two were conflated once and the light
+    profile silently returned the same plugin as the full one.
+    """
     roles = plugins.role_for_kind(kind)
     if not roles:
         return None
-    return roles[min(index, len(roles) - 1)]["uris"][0]
+    uris = roles[min(index, len(roles) - 1)]["uris"]
+    return uris[min(alternative, len(uris) - 1)]
 
 
 # Guitar: tuner first so it hears the dry string; overdrive into the amp;
@@ -124,15 +131,35 @@ CHAINS = {
 }
 
 
-def resolve(chain, amp_engine="guitarix"):
+# Roles list their URIs best-first, and "best" has meant "most capable".
+# On this board capability is not free: a 16-band parametric EQ costs
+# about 31us per instance and the desk carries seven of them, while the
+# design uses roughly three bands. LIGHT picks the next URI in the same
+# role instead - the cheaper plugin that was always listed as the
+# fallback - so the trade is a profile switch rather than a rewrite, and
+# the chain shape, the panel and the OSC addresses do not move.
+# NOT multiband. Its "lighter" alternative is a linear-phase multiband
+# clipper, which measured 5745 samples of latency - 130ms at 44.1k, on
+# the master, in the live monitor path. That is the same mistake the
+# limiter's lookahead was, made while fixing the limiter's lookahead:
+# cheaper per sample, catastrophic per note. The multiband ships
+# bypassed anyway, so it costs nothing to leave it capable.
+LIGHT_KINDS = ("eq", "comp")
+
+
+def resolve(chain, amp_engine="guitarix", profile="full"):
     """Attach the preferred URI to every slot.
 
     `amp_engine` swaps only the amp slot. The cab slot stays either way:
     guitarix needs it because it models the cab separately, and NAM needs
     it because amp-only captures have no cab in them. That is why the
     engine is invisible downstream - the chain shape does not change.
+
+    `profile` is "full" or "light"; light drops to the second URI in a
+    role for the kinds whose capable version is expensive.
     """
     assert amp_engine in plugins.AMP_ENGINES, amp_engine
+    assert profile in ("full", "light"), profile
     out = []
     for slot in chain:
         entry = dict(slot)
@@ -148,7 +175,11 @@ def resolve(chain, amp_engine="guitarix"):
                                0.0 if plugins.NAM_DEFAULT_TIER == "lite"
                                else 1.0}
         else:
-            entry["uri"] = _first_uri(slot["kind"], slot.get("role", 0))
+            alternative = 0
+            if profile == "light" and slot["kind"] in LIGHT_KINDS:
+                alternative = 1
+            entry["uri"] = _first_uri(slot["kind"], slot.get("role", 0),
+                                      alternative)
         # Slot-level params ride along, merged under any the engine
         # choice already set. Without this the manifest could declare a
         # setting - the limiter's lookahead, say - and the session would

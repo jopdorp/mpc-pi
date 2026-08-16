@@ -24,7 +24,62 @@ for c in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
 	[ -w "$c" ] && echo performance > "$c" 2>/dev/null || true
 done
 systemctl enable cpufrequtils >/dev/null 2>&1 || true
-echo "  governor: performance on all cores"
+
+# Our own unit as well, because the package's did not survive a reboot:
+# the board came back on "ondemand" at 1.8GHz instead of 2.4GHz. That is
+# a quarter of the clock missing, and worse for a tail than for a mean -
+# every frequency transition is itself a stall, so an instrument pays
+# twice for scaling it never wanted.
+#
+# The same unit pins /dev/cpu_dma_latency to 0 for as long as it runs.
+# Writing the file is not enough: the constraint lives only while the fd
+# is open, which is why cyclictest opens it and why holding it is a
+# service rather than a setting. Deep idle states cost microseconds to
+# leave, and a core that idles between 726us callbacks takes that hit
+# every single period.
+cat > /usr/local/sbin/mpcpi-latency-hold <<'HOLD'
+#!/usr/bin/env python3
+"""Hold the CPU out of deep idle, and the governor at performance."""
+import os
+import time
+
+for cpu in range(os.cpu_count() or 4):
+    path = "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor" % cpu
+    try:
+        with open(path, "w") as f:
+            f.write("performance")
+    except OSError:
+        pass
+
+# The constraint is released when this descriptor closes, so the process
+# must stay alive. It costs nothing while it sleeps.
+try:
+    fd = os.open("/dev/cpu_dma_latency", os.O_WRONLY)
+    os.write(fd, b"\x00\x00\x00\x00")
+except OSError:
+    fd = None
+
+while True:
+    time.sleep(3600)
+HOLD
+chmod 0755 /usr/local/sbin/mpcpi-latency-hold
+cat > /etc/systemd/system/mpcpi-latency-hold.service <<'UNIT'
+[Unit]
+Description=Pin the governor and hold the CPU out of deep idle
+After=basic.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/mpcpi-latency-hold
+Restart=always
+CPUAffinity=0
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now mpcpi-latency-hold >/dev/null 2>&1 || true
+echo "  governor: performance, pinned by mpcpi-latency-hold"
 
 log "kernel cmdline"
 CMD="$BOOT/cmdline.txt"
@@ -201,7 +256,11 @@ for u in pipewire wireplumber; do
 	install -d "/etc/systemd/user/$u.service.d"
 	cat > "/etc/systemd/user/$u.service.d/mpcpi-affinity.conf" <<'UNIT'
 [Service]
-CPUAffinity=2-3
+# Core 1 alone: the data-loop is one RT thread and wants one quiet core
+# to itself. Sharing 2-3 with Ardour's two DSP workers put three RT
+# threads on two cores, which showed up as a tail - mean B/Q 0.78 at
+# quantum 32 while xruns ran at 15/s.
+CPUAffinity=1
 UNIT
 done
 echo "  pipewire + wireplumber pinned to cores 2-3 (user units)"

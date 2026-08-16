@@ -230,19 +230,30 @@ fi
 CMDLINE="$TFTP/cmdline.txt"
 if [ -f "$CMDLINE" ]; then
 	line=$(tr -d '\n' < "$CMDLINE")
-	# nohz_full and rcu_nocbs were absent while the board ran the stock
-	# Pi OS kernel, which ships without CONFIG_NO_HZ_FULL and silently
-	# ignores them - an option that cannot work reads, later, as a tuning
-	# already applied. The mpcpi-rt kernel is built with NO_HZ_FULL and
-	# RCU_NOCB_CPU, so on it they mean exactly what they say.
-	for opt in nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1 audit=0; do
-		case " $line " in
-			*" $opt "*) ;;
-			*) line="$line $opt" ;;
-		esac
+	# Normalise rather than append. An append-if-missing loop cannot
+	# replace an option whose VALUE changed: widening isolation from 2-3
+	# to 1-3 left both on the line at once, and a kernel handed
+	# isolcpus=2-3 and nohz_full=1-3 together does something nobody
+	# intended and nobody can read off the file.
+	for key in isolcpus nohz_full rcu_nocbs irqaffinity audit; do
+		line=$(printf '%s' "$line" | sed -E "s/(^| )$key=[^ ]*//g")
 	done
-	printf '%s\n' "$line" > "$CMDLINE"
-	echo "  realtime cmdline in TFTP: nohz_full, rcu_nocbs, irqaffinity"
+	# Three isolated cores, not two, and every interrupt on core 0.
+	#
+	# Two was one short. The RT population is PipeWire's data-loop at 88
+	# plus Ardour's two DSP workers, and on two cores one worker always
+	# shares with the data-loop - measured as a tail rather than a
+	# throughput wall: at quantum 32 the mean stayed at B/Q 0.78 while
+	# xruns ran at 15/s, which is what contention looks like when the
+	# work itself fits.
+	#
+	# Spreading Ardour onto the housekeeping cores is far worse, not
+	# better: cores 1-3 gave 27759 xruns per 20s against 315 on 2-3,
+	# because those carry every interrupt and all of userspace. Make a
+	# third core quiet; do not borrow a noisy one.
+	line="$line isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 irqaffinity=0 audit=0"
+	printf '%s\n' "$(printf '%s' "$line" | tr -s ' ')" > "$CMDLINE"
+	echo "  realtime cmdline: isolcpus=1-3, irqaffinity=0"
 fi
 
 # Enabling a unit in the rootfs does nothing to an already-running

@@ -348,6 +348,30 @@ step("save session", function()
 	session:save_state("", false, false, false, false, false)
 end)
 
+-- The live path's worst-case plugin latency, AFTER parameters are
+-- applied. Two plugins have already got into this desk carrying large
+-- latency while costing almost no CPU - a lookahead limiter at 220
+-- samples and a linear-phase multiband clipper at 5745 - so the number
+-- is reported on every build rather than discovered by someone playing
+-- through it.
+local worst, worst_name = 0, "-"
+for r in session:get_routes():iter() do
+	local i = 0
+	while true do
+		local proc = r:nth_processor(i)
+		if proc:isnil() then break end
+		if not proc:to_insert():isnil() and proc:active() then
+			local lat = 0
+			pcall(function() lat = proc:signal_latency() end)
+			if lat > worst then
+				worst, worst_name = lat, r:name() .. "/" .. proc:display_name()
+			end
+		end
+		i = i + 1
+	end
+end
+say(string.format("MAX-LATENCY %d samples (%s)", worst, worst_name))
+
 print("TEMPLATE-SUMMARY-BEGIN")
 for _, line in ipairs(results) do print(line) end
 print("TEMPLATE-SUMMARY-END")
