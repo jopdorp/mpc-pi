@@ -73,6 +73,14 @@ dtoverlay=vc4-kms-v3d,noaudio
 # bcm2712-rpi-5-b.dtb.
 dtoverlay=dwc2,dr_mode=peripheral
 
+# ===== BOOT TIME =====
+# Radios the instrument never uses, and which cost real boot time:
+# loading the wireless regulatory database took 1.59s and Bluetooth core
+# init 0.81s, measured from dmesg timestamp gaps. The Maschine and the
+# computer both arrive over USB; there is nothing to associate with.
+dtoverlay=disable-wifi
+dtoverlay=disable-bt
+
 # ===== DISPLAY =====
 # The panel LCD is delivered to external hardware over USB by the MK1 daemon,
 # so no display is required in normal operation. HDMI stays available for

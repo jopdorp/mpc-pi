@@ -82,14 +82,18 @@ fi
 # PipeWire's data loop (88) because it is upstream of it: the interrupt
 # is what makes the loop runnable, and a wake source that waits behind
 # the thing it wakes has inverted the order.
+# One `ps` rather than a cat per process. Walking /proc/[0-9]*/comm
+# forks a couple of hundred times and made this unit the second slowest
+# thing in the boot at 4.1 seconds - on a script whose entire job is a
+# few writes to sysfs.
+#
 # Matched on comm, never with pgrep -f: the pattern would appear in
 # pgrep's own command line, and a self-match here would chrt this
 # script instead of the interrupt thread.
-for p in /proc/[0-9]*; do
-	comm=$(cat "$p/comm" 2>/dev/null) || continue
+ps -eo pid=,comm= 2>/dev/null | while read -r pid comm; do
 	case "$comm" in
 		irq/*dw_axi_dmac*|irq/*i2s*)
-			chrt -f -p 95 "${p##*/}" 2>/dev/null &&
+			chrt -f -p 95 "$pid" 2>/dev/null &&
 				echo "  ${comm}: rt prio 95 on core 1"
 			;;
 	esac

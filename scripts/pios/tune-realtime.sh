@@ -128,14 +128,30 @@ log "units that never finish"
 #
 # cloud-init has no role on a fixed-function instrument and costs
 # 4.5 seconds.
-systemctl disable --now userconfig.service >/dev/null 2>&1 || true
-systemctl mask userconfig.service >/dev/null 2>&1 || true
-systemctl disable --now systemd-networkd-wait-online.service >/dev/null 2>&1 || true
-systemctl mask systemd-networkd-wait-online.service >/dev/null 2>&1 || true
-for u in cloud-init cloud-init-main cloud-init-local cloud-config cloud-final; do
+# Masked, not merely disabled: several of these get pulled back in by
+# something else's Wants=. NetworkManager kept starting after a disable
+# because rpi-usb-gadget-ics.service wants it - a Pi OS internet-sharing
+# service this appliance does not use, since it presents its own gadget.
+for u in userconfig systemd-networkd-wait-online NetworkManager \
+         NetworkManager-wait-online rpi-usb-gadget-ics sshswitch \
+         bluetooth hciuart wpa_supplicant systemd-rfkill \
+         cloud-init cloud-init-main cloud-init-local cloud-config cloud-final \
+         udisks2 console-setup keyboard-setup e2scrub_reap ModemManager \
+         avahi-daemon triggerhappy packagekit rpi-eeprom-update; do
 	systemctl disable --now "$u.service" >/dev/null 2>&1 || true
+	systemctl mask "$u.service" >/dev/null 2>&1 || true
 done
-echo "  userconfig, networkd-wait-online and cloud-init disabled"
+for t in apt-daily apt-daily-upgrade man-db e2scrub_all fstrim; do
+	systemctl disable --now "$t.timer" >/dev/null 2>&1 || true
+done
+# An instrument has no display manager to reach.
+systemctl set-default multi-user.target >/dev/null 2>&1 || true
+echo "  boot-blocking and unused units masked"
+
+# NOT masked, learned by measuring: systemd-hostnamed looks like an easy
+# 1.7s but removing it made ssh.service go from 1.1s to 4.1s and
+# sshswitch to 5.8s, for a net LOSS of two and a half seconds. Name
+# resolution is on more paths than it appears.
 
 log "swap and memory"
 # Swap is unbounded latency. An instrument that swaps has already failed.
