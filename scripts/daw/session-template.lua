@@ -72,12 +72,40 @@ step("create channel strips", function()
 	end
 end)
 
+-- The eight individual-out tracks exist to record the emulator's
+-- separate voices, which is a deliberate act, not the normal state of
+-- the instrument. Left active they are charged every callback whether
+-- anything is recording or not: the graph's fixed cost measured 334us
+-- at quantum 32 and 339us at 48 - near-constant, because it is
+-- per-callback overhead rather than per-sample work, so a smaller
+-- buffer does not shrink it, it just eats a larger share of a shorter
+-- period. At quantum 32 that floor is 46% of the whole budget before a
+-- single effect runs.
+--
+-- So they are created and then deactivated. Arming one for recording
+-- reactivates it; the panel's LOOP page is where that happens.
+-- MPC_INDIVIDUAL_ACTIVE=1 keeps the old behaviour for comparison.
+local individual_active = os.getenv("MPC_INDIVIDUAL_ACTIVE") == "1"
+
 step("create individual-out tracks", function()
 	-- The emulator exposes its eight individual outs as a separate node
 	-- (MPC_OUTPUT_MODE=all); one mono track each so the MPC's drums can
 	-- be mixed per voice group.
 	for i = 1, 8 do
 		tracks["MPC" .. i] = add_audio("MPC" .. i, 1)
+	end
+	if not individual_active then
+		local off = 0
+		for i = 1, 8 do
+			-- Two arguments, always: set_active(false) with one
+			-- argument segfaults luasession outright.
+			local ok = pcall(function()
+				tracks["MPC" .. i]:set_active(false, nil)
+			end)
+			if ok then off = off + 1 end
+		end
+		say(string.format("  %d individual-out tracks deactivated "
+			.. "(arm one to record it)", off))
 	end
 end)
 
