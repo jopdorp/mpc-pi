@@ -106,6 +106,37 @@ done
 printf '%s %s\n' "$line" "$WANT" | tr -s ' ' > "$CMD"
 echo "  cmdline: $WANT"
 
+log "units that never finish"
+# Boot did not complete. `systemd-analyze` answered "Bootup is not yet
+# finished" on a board that had been up for an hour and three quarters,
+# and `systemctl list-jobs` showed why: userconfig.service still
+# RUNNING, with multi-user.target, cloud-init.target, cloud-final and
+# graphical.target all queued behind it.
+#
+# userconfig is Raspberry Pi OS's first-boot account setup. It waits on
+# a console that an appliance never answers, so it waits forever. Every
+# ssh session all day printed its banner - "SSH may not work until a
+# valid user has been set up" - which states the problem exactly, and
+# which was filtered out as noise every single time.
+#
+# systemd-networkd-wait-online is the second one, burning 2min 388ms
+# before timing out. This board netboots: the kernel brings the
+# interface up for the NFS root before userspace starts, so there is
+# nothing to wait for. It is also why network-online.target never
+# activates, which silently swallowed the netconsole unit until that
+# was ordered After=basic.target instead.
+#
+# cloud-init has no role on a fixed-function instrument and costs
+# 4.5 seconds.
+systemctl disable --now userconfig.service >/dev/null 2>&1 || true
+systemctl mask userconfig.service >/dev/null 2>&1 || true
+systemctl disable --now systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+systemctl mask systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+for u in cloud-init cloud-init-main cloud-init-local cloud-config cloud-final; do
+	systemctl disable --now "$u.service" >/dev/null 2>&1 || true
+done
+echo "  userconfig, networkd-wait-online and cloud-init disabled"
+
 log "swap and memory"
 # Swap is unbounded latency. An instrument that swaps has already failed.
 systemctl disable --now dphys-swapfile >/dev/null 2>&1 || true
