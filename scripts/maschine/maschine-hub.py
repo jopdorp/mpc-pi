@@ -332,6 +332,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fifo", default=FIFO)
     ap.add_argument("--midi", default="/dev/snd/midiC1D0")
+    ap.add_argument("--pc-midi", default=None,
+                    help="also mirror the controller to this MIDI port "
+                         "(the USB gadget's cable 2), so a computer sees "
+                         "the Maschine as an ordinary MIDI controller")
     ap.add_argument("--left", default=LCD_L)
     ap.add_argument("--right", default=LCD_R)
     ap.add_argument("--self-test", action="store_true")
@@ -377,6 +381,16 @@ def main():
     except OSError:
         print("maschine-hub: no MIDI port at %s" % args.midi, file=sys.stderr)
 
+    # The mirror is best-effort by design: the gadget only exists while a
+    # computer is plugged in, and the instrument must not care.
+    pc = None
+    if args.pc_midi:
+        try:
+            pc = open(args.pc_midi, "wb", buffering=0)
+        except OSError:
+            print("maschine-hub: no PC MIDI at %s" % args.pc_midi,
+                  file=sys.stderr)
+
     while True:
         for events in (mk1.poll(router),):
             for kind, payload in events:
@@ -384,6 +398,14 @@ def main():
                     os.write(fifo, (payload + "\n").encode())
                 elif kind == "midi" and midi is not None:
                     midi.write(encode_midi(payload))
+                if pc is not None and kind == "midi":
+                    # Same bytes the rig hears: pads with real velocity,
+                    # panel keys as notes. A DAW maps them like any pad
+                    # controller.
+                    try:
+                        pc.write(encode_midi(payload))
+                    except OSError:
+                        pc = None
         mk1.push_screen(0, args.left, packer)
         mk1.push_screen(1, args.right, packer)
         time.sleep(0.002)

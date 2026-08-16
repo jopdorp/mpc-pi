@@ -40,9 +40,11 @@ stop() {
 	[ -d "$G" ] || return 0
 	if [ -s "$G/UDC" ]; then : > "$G/UDC"; fi
 	rm -f "$G"/configs/c.1/uac2.usb0 2>/dev/null || true
+	rm -f "$G"/configs/c.1/midi.usb0 2>/dev/null || true
 	rmdir "$G"/configs/c.1/strings/0x409 2>/dev/null || true
 	rmdir "$G"/configs/c.1 2>/dev/null || true
 	rmdir "$G"/functions/uac2.usb0 2>/dev/null || true
+	rmdir "$G"/functions/midi.usb0 2>/dev/null || true
 	rmdir "$G"/strings/0x409 2>/dev/null || true
 	rmdir "$G" 2>/dev/null || true
 }
@@ -94,10 +96,26 @@ echo 1 > "$F/p_hs_bint" 2>/dev/null || true
 echo 1 > "$F/c_hs_bint" 2>/dev/null || true
 echo "${MPC_USB_REQS:-2}" > "$F/req_number" 2>/dev/null || true
 
+# MIDI rides the same composite gadget: one cable, audio and MIDI both.
+# Two virtual cables, because they are two different instruments to the
+# computer: port 1 is the MPC (notes and clock, either direction, so the
+# DAW can slave to the MPC or the MPC to the DAW - clock is just
+# realtime bytes and mastership is whoever you tell to send them), and
+# port 2 is the Maschine's controls as ordinary notes and CCs. The MK1
+# itself is not class-compliant and the hub owns it; what the computer
+# gets is the decoded controller, which is what "use it as a normal MIDI
+# controller" means everywhere outside NI's own software.
+mkdir -p "$G/functions/midi.usb0"
+M=$G/functions/midi.usb0
+echo "MPC2000XL MIDI" > "$M/id" 2>/dev/null || true
+echo 2 > "$M/in_ports"
+echo 2 > "$M/out_ports"
+
 mkdir -p "$G/configs/c.1/strings/0x409"
 echo "UAC2" > "$G/configs/c.1/strings/0x409/configuration"
 echo 250 > "$G/configs/c.1/MaxPower"
 ln -s "$F" "$G/configs/c.1/"
+ln -s "$M" "$G/configs/c.1/"
 
 echo "$udc" > "$G/UDC"
-echo "mpc-usb-gadget: bound to $udc (${CHANNELS_IN} in / ${CHANNELS_OUT} out @ ${RATE})"
+echo "mpc-usb-gadget: bound to $udc (${CHANNELS_IN} up / ${CHANNELS_OUT} down @ ${RATE}, 2x MIDI)"
