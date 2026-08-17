@@ -1,52 +1,60 @@
 From: mpc-pi
-Subject: [PATCH] pipewire: size the output cushion in quanta, and stop one late callback blanking the stream
+Subject: [PATCH] pipewire: buffer->requested may be zero, and every use of it was unguarded
 
-Measured from the codec's monitor ports on the Raspberry Pi appliance - the
-samples the DAC actually receives, rather than a counter:
+THE HOLE, in one line: pw_buffer::requested is the number of frames PipeWire
+wants, and PipeWire is permitted to leave it at ZERO, meaning "give what you
+can" - the documented client pattern is to fall back to the buffer's own
+capacity. stream_sink_event_process() used it raw:
 
-    7.81s of audio, 69 dropouts, EVERY ONE exactly 64 samples
+    std::memset(output, 0, buffer->requested * ...);
+    stream->m_buffer.get(output, buffer->requested);
+    sbuf->datas[0].chunk->size = buffer->requested * stream->m_channels * 2;
 
-One graph quantum each, ~8.8 per second. The device was clean throughout (ALSA
-xruns zero) and the emulator was running well above realtime, so neither end was
-at fault: single cycles where the producer had nothing ready and the callback
-handed the graph a buffer of silence.
+so a cycle that arrives with requested == 0 memsets nothing, fetches nothing,
+and queues a chunk of size 0. The stream contributes NOTHING to that graph
+cycle and the sink mixes silence for it.
 
-Two causes, both here.
+Every property of the defect on the Raspberry Pi appliance follows from that,
+and no other explanation accounted for all of them:
 
-The cushion was "one quantum plus one producer update" - 96 frames at a 64-frame
-quantum, 2.2ms - which absorbs no jitter at all. It is now a configurable number
-of quanta (MAME_PIPEWIRE_PREBUFFER_QUANTA, default 4). At q64 that is 5.8ms of
-output cushion, still an instrument latency, unlike the 23ms that a 1024-frame
-quantum costs to paper over the same jitter.
+  * exactly one quantum of zeros per hole, never a partial one;
+  * ~9-20 holes per second of sounding audio at a 64-frame quantum;
+  * invisible to every counter in the system - abuffer::get() is never reached,
+    so MAME's own underrun counter does not move; ALSA is fed on time, so there
+    is no xrun; pw-top reports nothing;
+  * survives with the prebuffer memset path disabled entirely
+    (MAME_PIPEWIRE_REARM_AFTER set absurdly high) and with the buffer pool
+    deepened until dequeue never fails (MAME_PIPEWIRE_BUFFERS=16, dropped-cycle
+    counter reading zero), which is how we know MAME was not writing the zeros;
+  * measured at the DAC by capturing the sink's monitor ports, because the
+    emulator's own -wavwrite render is clean and every counter in between says
+    everything is fine.
 
-And a single short callback re-armed prebuffering, which replaces the following
-callbacks with memset(0) until the cushion refills. abuffer::get() already
-handles a shortfall gently - it repeats the last sample, explicitly "to prevent
-audible pop" - so re-arming on top of that turned one frame of lateness into
-whole buffers of digital silence, which is why every gap measured was an exact
-multiple of the buffer size. The cushion is now rebuilt only after
-MAME_PIPEWIRE_REARM_AFTER consecutive short callbacks (default 8).
+The value is now clamped to the buffer's capacity and falls back to it when
+zero, and the zero-request cycles are counted and reported so this can never
+again be invisible.
 
-Also in this patch, both found while chasing the above:
+Also in this patch, all found while narrowing to the above:
 
-  * The pacing loop was unbounded, exiting only when the ring had drained to the
-    cushion, so emulation progress was conditional on PipeWire continuing to
-    consume. When consumption stalled the emulator stalled: at a 256-frame
-    quantum the machine froze outright, LCD export stale, CPU at a few percent,
-    systemd still reporting the service active, and the MPC stuck on its boot
-    screen with nothing logging an error. MAME_PIPEWIRE_PACE_BUDGET_US bounds it.
+  * pw_stream_connect() passed the format param alone, with no SPA_PARAM_Buffers,
+    leaving the pool at PipeWire's default; when it ran dry the callback returned
+    without queueing, which is a second silent way to drop a cycle. Now requests
+    MAME_PIPEWIRE_BUFFERS (default 8) and counts dequeue failures.
+  * The output cushion was "one quantum plus one producer update" - 96 frames at
+    q64, 2.2ms. Now MAME_PIPEWIRE_PREBUFFER_QUANTA quanta deep (default 4).
+  * A single short callback re-armed prebuffering, replacing following callbacks
+    with memset(0) until the cushion refilled, turning one late frame into whole
+    buffers of silence. Now gated on MAME_PIPEWIRE_REARM_AFTER.
+  * The pacing wait was unbounded and never slept: it could hang the emulation
+    thread on a stalled consumer (at a 256-frame quantum the machine froze on
+    its boot screen with the service still "active") and otherwise spun at 100%
+    CPU producing 5.9% of realtime. Bounded by MAME_PIPEWIRE_PACE_BUDGET_US.
+  * m_prebuffer_frames and m_producer_frames are running maxima that only grow;
+    restarting pacing now resets them.
+  * MAME_PIPEWIRE_LATE_US makes the late-update threshold settable.
 
-  * m_prebuffer_frames and m_producer_frames are running maxima that only grow,
-    and restarting pacing cleared the buffers but not those, so one oversized
-    write inflated the cushion for the rest of the session.
-
-  * MAME_PIPEWIRE_LATE_US makes the late-update threshold settable; hardcoded at
-    5500us it showed only the worst outliers.
-
-Note for whoever reads pw-top next: its client ERR column is not a dropout
-counter. docs/system-placement.md already records that the emulator's nodes
-accrued 1,600/s of it while the audio was provably clean, and this patch's
-author spent an evening re-learning it.
+See docs/audio-chain.md for the stage-by-stage map this was found with, and for
+the metrics that lie (pw-top's client ERR column, pw-record --target).
 ---
  src/osd/modules/sound/pipewire_sound.cpp | 
 
@@ -61,24 +69,26 @@ diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pi
  #include <cstring>
  #include <fstream>
  #include <map>
-@@ -114,6 +115,7 @@
+@@ -114,6 +115,9 @@
  		uint32_t m_updates_since_report;
  		uint32_t m_prebuffer_frames;
  		uint32_t m_producer_frames;
 +		uint32_t m_consecutive_underruns;
++		uint32_t m_dequeue_failures;
++		uint32_t m_zero_requests;
  		uint32_t m_last_underrun_requested;
  		uint32_t m_last_underrun_available;
  		int64_t m_last_underrun_callback_gap_us;
-@@ -122,7 +124,7 @@
+@@ -122,7 +126,7 @@
  		std::chrono::steady_clock::time_point m_last_callback;
  		std::vector<int16_t> m_capture;
  
 -		stream_info(sound_pipewire *wire, bool is_output, uint32_t osdid, uint32_t channels, uint32_t rate, std::string name = {}) : m_wire(wire), m_is_output(is_output), m_wait_stream(true), m_osdid(osdid), m_channels(channels), m_rate(rate), m_name(std::move(name)), m_stream(nullptr), m_buffer(channels, rate), m_last_underruns(0), m_last_overruns(0), m_observed_underruns(0), m_observed_overruns(0), m_updates_since_report(0), m_prebuffer_frames(0), m_producer_frames(0), m_last_underrun_requested(0), m_last_underrun_available(0), m_last_underrun_callback_gap_us(0), m_prebuffering(true), m_buffer_stats_ready(false) {}
-+		stream_info(sound_pipewire *wire, bool is_output, uint32_t osdid, uint32_t channels, uint32_t rate, std::string name = {}) : m_wire(wire), m_is_output(is_output), m_wait_stream(true), m_osdid(osdid), m_channels(channels), m_rate(rate), m_name(std::move(name)), m_stream(nullptr), m_buffer(channels, rate), m_last_underruns(0), m_last_overruns(0), m_observed_underruns(0), m_observed_overruns(0), m_updates_since_report(0), m_prebuffer_frames(0), m_producer_frames(0), m_consecutive_underruns(0), m_last_underrun_requested(0), m_last_underrun_available(0), m_last_underrun_callback_gap_us(0), m_prebuffering(true), m_buffer_stats_ready(false) {}
++		stream_info(sound_pipewire *wire, bool is_output, uint32_t osdid, uint32_t channels, uint32_t rate, std::string name = {}) : m_wire(wire), m_is_output(is_output), m_wait_stream(true), m_osdid(osdid), m_channels(channels), m_rate(rate), m_name(std::move(name)), m_stream(nullptr), m_buffer(channels, rate), m_last_underruns(0), m_last_overruns(0), m_observed_underruns(0), m_observed_overruns(0), m_updates_since_report(0), m_prebuffer_frames(0), m_producer_frames(0), m_consecutive_underruns(0), m_dequeue_failures(0), m_zero_requests(0), m_last_underrun_requested(0), m_last_underrun_available(0), m_last_underrun_callback_gap_us(0), m_prebuffering(true), m_buffer_stats_ready(false) {}
  	};
  
  	static const pw_core_events     core_events;
-@@ -138,6 +140,17 @@
+@@ -138,6 +142,19 @@
  	std::map<uint32_t, stream_info> m_streams;
  	osd_common_t *m_osd = nullptr;
  	bool m_realtime_pacing = false;
@@ -93,10 +103,12 @@ diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pi
 +	uint32_t m_rearm_after = 8;
 +	// Output cushion depth, in graph quanta. MAME_PIPEWIRE_PREBUFFER_QUANTA.
 +	uint32_t m_prebuffer_quanta = 4;
++	// Buffers requested from PipeWire per stream. MAME_PIPEWIRE_BUFFERS.
++	uint32_t m_buffer_request = 8;
  	bool m_audio_clock = false;
  	bool m_report_stats = false;
  	std::string m_capture_path;
-@@ -516,6 +529,30 @@
+@@ -516,6 +533,36 @@
  	m_osd = &downcast<osd_common_t &>(osd);
  	m_audio_clock = std::getenv("MAME_PIPEWIRE_AUDIO_CLOCK") != nullptr;
  	m_report_stats = std::getenv("MAME_PIPEWIRE_STATS") != nullptr;
@@ -105,6 +117,12 @@ diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pi
 +		const long parsed = std::strtol(budget, nullptr, 10);
 +		if (parsed > 0)
 +			m_pace_budget_us = uint32_t(parsed);
++	}
++	if (const char *const bufs = std::getenv("MAME_PIPEWIRE_BUFFERS"))
++	{
++		const long parsed = std::strtol(bufs, nullptr, 10);
++		if (parsed >= 2)
++			m_buffer_request = uint32_t(parsed);
 +	}
 +	if (const char *const quanta = std::getenv("MAME_PIPEWIRE_PREBUFFER_QUANTA"))
 +	{
@@ -127,12 +145,66 @@ diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pi
  	if (const char *const capture_path = std::getenv("MAME_PIPEWIRE_CAPTURE_WAV"))
  		m_capture_path = capture_path;
  	spa_zero(m_core_listener);
-@@ -682,11 +719,25 @@
+@@ -678,15 +725,79 @@
+ {
+ 	pw_buffer *buffer = pw_stream_dequeue_buffer(stream->m_stream);
+ 	if(!buffer)
++	{
++		// The buffer pool is empty, so this graph cycle gets NOTHING from us
++		// and the sink mixes silence for it - exactly one quantum of zeros.
++		//
++		// Nothing else in the system records this. abuffer::get() is never
++		// reached, so MAME's underrun counter does not move; ALSA was fed on
++		// time, so there is no xrun; pw-top shows nothing. On the Raspberry Pi
++		// appliance this was ~9 holes per second at a 64-frame quantum, each
++		// exactly 64 samples, found only by capturing the codec's monitor ports
++		// and looking at the samples themselves.
++		stream->m_dequeue_failures++;
++		if (stream->m_wire->m_report_stats &&
++				!(stream->m_dequeue_failures % 32))
++			osd_printf_warning(
++				"PipeWire: stream %s has no buffer to fill; %u graph cycles dropped\n",
++				stream->m_name.c_str(),
++				stream->m_dequeue_failures);
+ 		return;
++	}
  
  	spa_buffer *sbuf = buffer->buffer;
  	int16_t *const output = (int16_t *)(sbuf->datas[0].data);
 -	// Keep one graph quantum plus one producer update ready.  The extra update
 -	// prevents a single late producer tick from immediately starving PipeWire.
++
++	// buffer->requested may be ZERO, and every use of it below was unguarded.
++	//
++	// PipeWire sets requested to the frames it wants, but it is permitted to
++	// leave it at 0, meaning "give what you can"; the documented client pattern
++	// is to fall back to the buffer's own capacity. Used raw, a zero request
++	// makes this callback memset zero bytes, fetch zero frames, and then queue a
++	// chunk of size 0 - so the stream contributes NOTHING to that graph cycle
++	// and the sink mixes silence for it.
++	//
++	// Every property of the holes measured on the Raspberry Pi appliance follows
++	// from that: exactly one quantum of zeros, ~9-20 per second, invisible to
++	// every counter in the system (abuffer::get() is never reached so MAME's
++	// underrun counter does not move, ALSA is fed on time so there is no xrun,
++	// and pw-top shows nothing), and surviving with both the prebuffer memset
++	// and the buffer-pool fix disabled.
++	const uint32_t capacity = sbuf->datas[0].maxsize /
++			(stream->m_channels * sizeof(int16_t));
++	uint32_t wanted = buffer->requested;
++	if (wanted == 0)
++	{
++		stream->m_zero_requests++;
++		if (stream->m_wire->m_report_stats && !(stream->m_zero_requests % 32))
++			osd_printf_warning(
++				"PipeWire: stream %s got requested=0 on %u cycles; filling %u frames instead\n",
++				stream->m_name.c_str(), stream->m_zero_requests, capacity);
++		wanted = capacity;
++	}
++	else if (wanted > capacity)
++	{
++		wanted = capacity;
++	}
 +	// Keep a few graph quanta ready, not one quantum plus one producer update.
 +	//
 +	// "One quantum plus one update" is 96 frames at a 64-frame quantum - 2.2ms -
@@ -151,13 +223,29 @@ diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pi
  	stream->m_prebuffer_frames = std::max(
  			stream->m_prebuffer_frames,
 -			uint32_t(buffer->requested) + stream->m_producer_frames);
-+			std::max(uint32_t(buffer->requested) * m_prebuffer_quanta,
-+					uint32_t(buffer->requested) + stream->m_producer_frames));
++			std::max(wanted * m_prebuffer_quanta,
++					wanted + stream->m_producer_frames));
  	const auto callback_now = std::chrono::steady_clock::now();
  	const auto callback_gap_us = stream->m_last_callback.time_since_epoch().count()
  		? std::chrono::duration_cast<std::chrono::microseconds>(callback_now - stream->m_last_callback).count()
-@@ -707,7 +758,29 @@
- 			stream->m_last_underrun_requested = buffer->requested;
+@@ -694,28 +805,50 @@
+ 	stream->m_last_callback = callback_now;
+ 	if (stream->m_prebuffering && (stream->m_buffer.available() < stream->m_prebuffer_frames))
+ 	{
+-		std::memset(output, 0, buffer->requested * stream->m_channels * sizeof(*output));
++		std::memset(output, 0, wanted * stream->m_channels * sizeof(*output));
+ 	}
+ 	else
+ 	{
+ 		stream->m_prebuffering = false;
+ 		const uint32_t underruns = stream->m_buffer.underruns();
+ 		const uint32_t available = stream->m_buffer.available();
+-		stream->m_buffer.get(output, buffer->requested);
++		stream->m_buffer.get(output, wanted);
+ 		if (stream->m_buffer.underruns() != underruns)
+ 		{
+-			stream->m_last_underrun_requested = buffer->requested;
++			stream->m_last_underrun_requested = wanted;
  			stream->m_last_underrun_available = available;
  			stream->m_last_underrun_callback_gap_us = callback_gap_us;
 -			stream->m_prebuffering = true;
@@ -187,7 +275,69 @@ diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pi
  		}
  	}
  	if (!stream->m_wire->m_capture_path.empty() && (stream->m_name == ":speaker"))
-@@ -1017,6 +1090,14 @@
+-		stream->m_capture.insert(stream->m_capture.end(), output, output + (buffer->requested * stream->m_channels));
++		stream->m_capture.insert(stream->m_capture.end(), output, output + (wanted * stream->m_channels));
+ 	pw_thread_loop_signal(stream->m_wire->m_loop, false);
+ 	sbuf->datas[0].chunk->offset = 0;
+ 	sbuf->datas[0].chunk->stride = stream->m_channels * 2;
+-	sbuf->datas[0].chunk->size = buffer->requested * stream->m_channels * 2;
++	sbuf->datas[0].chunk->size = wanted * stream->m_channels * 2;
+ 
+ 	pw_stream_queue_buffer(stream->m_stream, buffer);
+ }
+@@ -730,7 +863,25 @@
+ {
+ 	pw_buffer *buffer = pw_stream_dequeue_buffer(stream->m_stream);
+ 	if(!buffer)
++	{
++		// The buffer pool is empty, so this graph cycle gets NOTHING from us
++		// and the sink mixes silence for it - exactly one quantum of zeros.
++		//
++		// Nothing else in the system records this. abuffer::get() is never
++		// reached, so MAME's underrun counter does not move; ALSA was fed on
++		// time, so there is no xrun; pw-top shows nothing. On the Raspberry Pi
++		// appliance this was ~9 holes per second at a 64-frame quantum, each
++		// exactly 64 samples, found only by capturing the codec's monitor ports
++		// and looking at the samples themselves.
++		stream->m_dequeue_failures++;
++		if (stream->m_wire->m_report_stats &&
++				!(stream->m_dequeue_failures % 32))
++			osd_printf_warning(
++				"PipeWire: stream %s has no buffer to fill; %u graph cycles dropped\n",
++				stream->m_name.c_str(),
++				stream->m_dequeue_failures);
+ 		return;
++	}
+ 
+ 	spa_buffer *sbuf = buffer->buffer;
+ 	stream->m_buffer.push((int16_t *)(sbuf->datas[0].data), sbuf->datas[0].chunk->size / stream->m_channels / 2);
+@@ -818,13 +969,23 @@
+ 
+ 	uint8_t buffer[1024];
+ 	spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+-	params = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &format);
++	const spa_pod *connect_params[2];
++	connect_params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &format);
++	// ASK FOR BUFFERS. This connected with the format alone, leaving the buffer
++	// count to PipeWire's default, which is small. When the pool runs dry the
++	// process callback above cannot fill anything and the cycle is lost.
++	// MAME_PIPEWIRE_BUFFERS sets the request; the range lets the server settle
++	// lower if it must.
++	connect_params[1] = (const spa_pod *)spa_pod_builder_add_object(&b,
++			SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
++			SPA_PARAM_BUFFERS_buffers,
++			SPA_POD_CHOICE_RANGE_Int(m_buffer_request, 2, 64));
+ 
+ 	pw_stream_connect(stream.m_stream,
+ 					  PW_DIRECTION_OUTPUT,
+ 					  PW_ID_ANY,
+ 					  pw_stream_flags(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
+-					  &params, 1);
++					  connect_params, 2);
+ 
+ 	while(stream.m_wait_stream)
+ 		pw_thread_loop_wait(m_loop);
+@@ -1017,6 +1178,14 @@
  				if (!stream.m_is_output)
  					continue;
  				stream.m_buffer.clear();
@@ -202,7 +352,7 @@ diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pi
  				stream.m_prebuffering = true;
  				stream.m_buffer_stats_ready = false;
  				stream.m_observed_underruns = 0;
-@@ -1028,7 +1109,11 @@
+@@ -1028,7 +1197,11 @@
  	else if (m_realtime_pacing)
  	{
  		const auto gap_us = std::chrono::duration_cast<std::chrono::microseconds>(update_now - m_last_main_update).count();
@@ -215,7 +365,7 @@ diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pi
  		{
  			uint32_t queued = 0;
  			auto primary = m_streams.find(m_primary_output_id);
-@@ -1044,6 +1129,23 @@
+@@ -1044,6 +1217,23 @@
  		m_main_update_count++;
  	}
  
@@ -239,7 +389,7 @@ diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pi
  	while (m_realtime_pacing)
  	{
  		auto const primary = m_streams.find(m_primary_output_id);
-@@ -1051,13 +1153,48 @@
+@@ -1051,13 +1241,48 @@
  				(primary->second.m_buffer.available() <= primary->second.m_prebuffer_frames))
  			break;
  
