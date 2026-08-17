@@ -43,6 +43,24 @@ libsndfile1
 libsamplerate0
 libmpg123-0t64
 libmp3lame0
+# SDL2 dlopens these rather than declaring them, so nothing pulls them in.
+# The emulator failed to start on the first provisioned card with
+# "libEGL.so.1: cannot open shared object file" - a library that is right
+# there in ldd's output but was assumed to arrive as somebody's dependency.
+#
+# The lesson generalises: for a hand-built binary, "it appears in ldd" is not
+# the same as "some package depends on it". Every line here was resolved from
+# the emulator's own ldd output on a working board.
+libegl1
+libgl1
+libglvnd0
+libgbm1
+libdrm2
+libwayland-egl1
+libwayland-client0
+libwayland-cursor0
+libxkbcommon0
+libdecor-0-0
 
 # --- the control surface -----------------------------------------------
 # pyusb, for the Maschine MK1 hub. Note the kernel's own snd-usb-caiaq

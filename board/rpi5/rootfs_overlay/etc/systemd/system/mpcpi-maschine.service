@@ -1,0 +1,27 @@
+[Unit]
+Description=Maschine MK1 hub - both screens and all input, one owner
+# ONE process owns the controller. Two would fight over the USB interface:
+# the device has a single interface, claiming it twice fails as EBUSY, and
+# that reads like a permissions problem rather than a second claimant.
+#
+# Ordered after the boot animation for exactly that reason - the animation
+# holds the device for its seven seconds and must finish before the hub
+# takes over.
+After=basic.target mpcpi-boot-animation.service mpcpi-daw-ui.service
+Wants=mpcpi-daw-ui.service
+# The panel is optional hardware; the instrument plays without it.
+ConditionPathExistsGlob=/sys/bus/usb/devices/*/idVendor
+
+[Service]
+Type=simple
+# Core 0. It drives screens and lamps over USB and must never compete with
+# the graph on the isolated cores: a display frame is 24 USB transfers and
+# the audio callback cannot be made to wait behind one.
+CPUAffinity=0
+Nice=3
+ExecStart=/opt/mpc-pi-src/scripts/maschine/maschine-hub.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

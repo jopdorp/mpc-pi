@@ -193,13 +193,26 @@ KNOBS_RIGHT_BY_PAGE = {
     "EDIT": "move region / fade in / fade out / region gain",
 }
 
-# MK1's three MASTER knobs are separate hardware, not a jog encoder.
+# The three MASTER knobs are separate hardware, not a jog encoder, and they
+# carry the three continuous controls that do not belong to a mixer strip:
+#
+#   VOLUME -> the DAW's master fader
+#   TEMPO  -> the MPC's NOTE VARIATION slider
+#   SWING  -> the MPC's DATA wheel
+#
+# That last one matters most. The DATA wheel is the MPC's primary value
+# control - used constantly for browsing and entry - so it gets a dedicated
+# physical knob rather than a modifier combination. Putting it on SHIFT +
+# knob would make the most-used continuous control on the instrument
+# two-handed.
+#
+# With DATA on its own knob, all eight under-screen knobs are free to be the
+# eight DAW tracks, one each, and SHIFT is left unspent.
 MASTER_KNOBS = {
-    "volume": "appliance output level",
-    "tempo": "mpc:tempo (via the DATA wheel on the tempo field)",
-    "swing": "mpc:swing",
+    "volume": "daw:master",
+    "tempo": "mpc:note_variation",
+    "swing": "mpc:data_wheel",
 }
-
 
 def describe():
     """Human-readable dump, used by the docs and by bring-up."""

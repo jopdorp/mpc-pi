@@ -33,7 +33,7 @@ EP_CTRL = 0x81
 # wire slots. That model was wrong - the encoders are not sequential values
 # at all - so the permutation described a layout that does not exist.
 ENCODER_WIRE_TO_LOGICAL = (8, 4, 10, 7, 3, 9, 6, 2, 0, 5, 1)
-MASTER_KNOBS = ("volume", "tempo", "swing")
+MASTER_NAMES = ("volume", "tempo", "swing")
 MK1_VENDOR = 0x17CC
 
 LCD_L = "/dev/shm/mpc-lcd"
@@ -162,6 +162,27 @@ class Router:
 
     # --- encoders ---
 
+    def master(self, name, delta):
+        """The three master knobs: VOLUME, TEMPO, SWING.
+
+        Separate hardware from the eight under-screen knobs, and routed by
+        name so they can never fall into knob() as columns 8-10 and quietly
+        move a mixer strip.
+
+        Targets come from control_map.MASTER_KNOBS: the DAW's master fader,
+        the MPC's note-variation slider, and the MPC's DATA wheel. Anything
+        beginning "mpc:" is a MIDI target for the emulator; the rest is a DAW
+        command.
+        """
+        target = control_map.MASTER_KNOBS.get(name)
+        if target is None:
+            return []
+        if target.startswith("mpc:"):
+            return [("midi", "%s:%+d" % (target, delta))]
+        # "master +4", not "master master +4": the DAW master is not a
+        # named strip, it is the one thing a master command can mean.
+        return [("cmd", "master %+d" % delta)]
+
     def knob(self, index, delta):
         """Eight knobs under the screens: ONE PER MIXER STRIP.
 
@@ -174,13 +195,13 @@ class Router:
         AUX with no knob at all: half the desk was unreachable while four
         knobs duplicated things the MPC's own panel already does.
 
-        Those MPC controls are not lost - they move to SHIFT, which is where
-        a second layer belongs on a surface with no spare knobs. The three
+        The MPC's own continuous controls did not need a layer here in the
+        end: the DATA wheel and the note-variation slider went to the SWING
+        and TEMPO knobs, which are separate hardware. So SHIFT stays unspent
+        and all eight knobs mean one thing each. The three
         master knobs (VOLUME/TEMPO/SWING) are separate hardware and are
         routed by name, never through here.
         """
-        if self.shift and index < len(control_map.KNOBS_LEFT):
-            return [("midi", control_map.KNOBS_LEFT[index])]
         if self.page in ("MIX", "LOOP"):
             strip = self.strips[index] if index < len(self.strips) else None
             if strip:
@@ -226,9 +247,14 @@ def self_test():
     r.page = "MIX"
     for i, strip in enumerate(r.strips):
         assert r.knob(i, 1) == [("cmd", "knob MIX %s +1" % strip)], i
-    # The MPC layer moved to shift rather than being dropped.
+    # The DATA wheel is the SWING knob now - a dedicated control, not a
+    # modifier combination, because it is the MPC's most used value control.
+    assert r.master("swing", +3) == [("midi", "mpc:data_wheel:+3")]
+    assert r.master("tempo", -2) == [("midi", "mpc:note_variation:-2")]
+    assert r.master("volume", +4) == [("cmd", "master +4")]
+    # SHIFT no longer steals a knob.
     r.shift = True
-    assert r.knob(0, 1) == [("midi", "mpc:data_wheel")]
+    assert r.knob(0, 1) == [("cmd", "knob MIX MPC +1")]
     r.shift = False
     r.page = "MIX"
     # Knob 5 is the FIFTH strip now, not the first. Under the old split it
@@ -408,12 +434,7 @@ class Mk1:
                 if logical < 8:
                     out += router.knob(logical, delta)
                 else:
-                    # VOLUME / TEMPO / SWING are separate hardware, not
-                    # display knobs. Routed by name so they cannot fall
-                    # into router.knob() as columns 4-6 and quietly move a
-                    # mixer strip.
-                    out.append(("cmd", "master %s %+d"
-                                % (MASTER_KNOBS[logical - 8], delta)))
+                    out += router.master(MASTER_NAMES[logical - 8], delta)
         return out
 
 

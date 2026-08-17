@@ -1,20 +1,24 @@
-# An external USB audio interface may join the graph, but must never drive it.
+# The external USB audio interface is the LOCAL monitoring path - the
+# stand-in for the ADC/DAC that will eventually be wired to the I2S header.
 #
-# The appliance's clock is a null-audio-sink at a fixed 32-frame quantum, and
-# everything else follows it. A USB interface plugged in for monitoring or
-# testing arrives with a perfectly respectable driver priority and can win
-# the election, at which point the whole graph reclocks to whatever that
-# device can manage - which for a full-speed codec is nowhere near 32
-# frames. The instrument's latency would then depend on what someone
-# happened to plug in.
+# So it is not merely tolerated: it carries what the player hears, and its
+# output latency matters. An earlier version of this file gave it a
+# 256-frame period specifically to keep it out of the way, which is the
+# right rule for an accessory and the wrong one for the monitor path.
 #
-# So: allowed, unsuspended, and pinned to a low driver priority. It also
-# stays OUT of node.group "mpcpi-audio", because driver election happens
-# per group and membership is what would let it compete at all.
+# What it must still NOT do is drive the graph. The appliance's clock is a
+# null-audio-sink at a fixed 32-frame quantum and everything follows it; if
+# this device won the driver election, the whole graph would reclock to
+# whatever a full-speed codec can manage and the instrument's latency would
+# depend on what is plugged in. Driver election happens per node.group, so
+# keeping it in its own group is what stops it competing at all - low
+# priority alone would not.
 #
-# This is written against the DEVICE's nodes, not the device: node
-# properties in a device rule do nothing, which is a trap this project has
-# already paid for once.
+# Period: start at 64 frames and let it fail upward rather than assuming.
+# This is a FULL SPEED device (1ms USB frames), so 32 is likely unreachable
+# and 64 is the honest first attempt. api.alsa.period-size is a request, not
+# a guarantee - check the running value in /proc/asound/cardN/pcm0p/sub0/
+# hw_params rather than trusting this file.
 monitor.alsa.rules = [
   {
     matches = [
@@ -37,12 +41,13 @@ monitor.alsa.rules = [
         # produces a gap the next time something plays through it.
         node.pause-on-idle = false
         session.suspend-timeout-seconds = 0
-        # Let it choose a period it can actually meet. The 32-frame period
-        # forced on the gadget is not achievable on a full-speed codec, and
-        # forcing it produces continuous xruns that look like a fault in the
-        # appliance rather than a mismatch with the accessory.
-        api.alsa.period-size = 256
-        api.alsa.headroom    = 128
+        # As low as this device can hold. It is the monitoring path, so its
+        # output latency is the latency the player feels when the gadget is
+        # not the destination.
+        api.alsa.period-size = 64
+        api.alsa.period-num  = 2
+        api.alsa.headroom    = 32
+        api.alsa.disable-batch = true
       }
     }
   }

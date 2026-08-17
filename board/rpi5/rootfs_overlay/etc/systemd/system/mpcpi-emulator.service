@@ -1,0 +1,44 @@
+[Unit]
+Description=MPC2000XL emulator
+# The audio graph must exist first: the emulator opens a PipeWire sink at
+# startup and exits if it cannot.
+After=basic.target sound.target user@1001.service
+Wants=user@1001.service
+# ROMs are not redistributable and may simply be absent on a fresh card. An
+# instrument that cannot find them should not spin in a restart loop.
+ConditionPathExists=/opt/mpc-roms
+ConditionPathExists=/usr/local/bin/mpc
+
+[Service]
+Type=simple
+User=mpc
+Group=mpc
+# Core 3 with SCHED_RR. Cores 1-3 are isolated for audio: PipeWire's data
+# loop owns core 1, the graph's workers 2-3. The emulator measured 11.8% of
+# one core at 100% speed, so it shares 3 rather than needing its own.
+ExecStart=/usr/bin/taskset --cpu-list 3 /usr/bin/chrt --rr 20 \
+    /usr/local/bin/mpc mpc2000xl \
+    -rompath /opt/mpc-roms \
+    -cfg_directory /var/lib/mpcpi/cfg \
+    -nvram_directory /var/lib/mpcpi/nvram \
+    -sound pipewire -samplerate 44100 -video none
+# No -seconds_to_run: that flag belongs to measurement harnesses. An
+# instrument runs until it is switched off.
+# chrt --rr needs an RT budget, and a systemd service does NOT get one from
+# /etc/security/limits.d - that is PAM, which only applies to login sessions.
+# Without these the unit failed 18 times with "chrt: failed to set pid 0's
+# policy: Operation not permitted", which reads like a missing capability
+# rather than a missing rlimit.
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+LimitNICE=-19
+Environment=SDL_VIDEODRIVER=dummy
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Restart=on-failure
+RestartSec=2
+# Writable state, created on first start rather than assumed.
+StateDirectory=mpcpi
+StateDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
