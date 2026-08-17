@@ -509,7 +509,17 @@ def control_map_buttons():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fifo", default=FIFO)
-    ap.add_argument("--midi", default="/dev/snd/midiC1D0")
+    # VirMIDI 0-0's raw device. Writing here makes the bytes appear as INPUT
+    # on that same port, which is what the emulator opens with
+    # -midiin "VirMIDI 0-0".
+    #
+    # This defaulted to /dev/snd/midiC1D0, which is a card NUMBER, and card
+    # numbering follows enumeration order: card 1 was the UAC2 gadget on the
+    # netboot root and is the USB audio codec on the SD card. So the hub was
+    # writing MIDI into an audio interface, and no pad reached the emulator.
+    ap.add_argument("--midi", default="/dev/snd/midiC0D0",
+                    help="raw MIDI device to write pads/buttons into; must be "
+                         "the port the emulator opens with -midiin")
     ap.add_argument("--pc-midi", default=None,
                     help="also mirror the controller to this MIDI port "
                          "(the USB gadget's cable 2), so a computer sees "
