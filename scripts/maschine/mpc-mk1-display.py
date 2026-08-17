@@ -43,22 +43,27 @@ FRAME_BYTES = 21 * 502 + 338  # 10880 = DISPLAY_H * ROW_BYTES
 # while Macchina maps lit pixels straight to 0x1F. If cabl is right, our
 # whole brightness hierarchy renders upside down. One frame on hardware
 # settles it; until then this is a single flag rather than a rewrite.
-# Polarity: SETTLED ON HARDWARE 2026-08-17, and the default is now 1.
+# Polarity: SETTLED ON HARDWARE 2026-08-17. 0x1F is BRIGHT, no inversion.
 #
-# A split frame with level 0x00 on the left half and 0x1F on the right was
-# viewed head-on: the RIGHT half - level 0x1F - is the DARKER one. So a
-# high wire value is DARK and 0x00 is light. The panel is inverse video,
-# which matches reviews describing the MK1 that way next to the MK2, and
-# matches cabl's setPixel storing the complement.
+# Decided by a four-step staircase of RAW wire values 0x00, 0x0A, 0x15,
+# 0x1F left to right, read head-on at contrast 0x25: the blocks run dark
+# to bright in that order. A monotonic ramp is self-labelling - whichever
+# end is brighter names the polarity - so it beats any split-screen test
+# where the observer has to remember which half was which.
 #
-# This code takes `lit` as brightness INTENT (0 = background, 31 = full
-# brightness), so intent must be complemented before it goes on the wire
-# for bright things to look bright. Hence INVERT defaults to on.
+# This overturned two earlier readings, and both were wrong for reasons
+# worth keeping:
 #
-# Read the panel HEAD-ON when checking this. These LCDs shift so much
-# with viewing angle that the first observation of this very test read the
-# opposite way round, and the wrong conclusion was briefly committed.
-INVERT = os.environ.get("MPC_MK1_INVERT", "1") not in ("0", "", "no")
+#   * The first was taken off-axis. These STN panels shift so far with
+#     viewing angle that they can appear to inverse. Read them head-on.
+#   * The second was taken at contrast 0x3F, which crushes the entire
+#     range toward dark - the same staircase at 0x3F is barely
+#     distinguishable. High contrast on this panel is not more contrast.
+#
+# So Macchina's straight mapping is right (`dstColor = srcColor ? 0x1F :
+# 0x00`), and cabl's complement must belong to a layer above this one.
+# Use contrast 0x25, which is what cabl's own init ends with.
+INVERT = os.environ.get("MPC_MK1_INVERT", "0") not in ("0", "", "no")
 
 HEADER_FMT = "<4sIHHI"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)

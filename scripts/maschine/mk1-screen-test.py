@@ -28,6 +28,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mk1_leds as L                                       # noqa: E402
 
 EP_DISPLAY = 0x08
+
+# Contrast register value. 0x25 is what cabl's init ends with, and it is
+# also what the hardware wants: a four-step staircase is clearly graded at
+# 0x25 and barely distinguishable at 0x3F, because high values crush the
+# range toward dark. Higher is NOT more contrast on this panel.
+CONTRAST_DEFAULT = 0x25
 DISPLAY_W, DISPLAY_H = 255, 64
 ROW_BYTES = 170                      # 85 triples x 2 bytes
 FRAME_BYTES = 21 * 502 + 338         # 10880 = DISPLAY_H * ROW_BYTES
@@ -188,7 +194,7 @@ class Mk1Screens:
         time.sleep(0.02)
         W(0x00, 0x04, 0xBC, 0x02, 0x01, 0x01)
         W(0x00, 0x01, 0xA6)
-        W(0x00, 0x03, 0x81, 0x25, 0x02)  # contrast 0x25
+        W(0x00, 0x03, 0x81, CONTRAST_DEFAULT, 0x02)
 
     def send_frame(self, index, frame):
         assert len(frame) == FRAME_BYTES, len(frame)

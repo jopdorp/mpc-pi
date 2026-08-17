@@ -119,20 +119,33 @@ launcher's `internal-pads` mode (patch 0020) through a virtual MIDI port.
 - https://github.com/fzero/maschine-mk1 (Linux-focused MK1 notes)
 
 
-## Display polarity - SETTLED (2026-08-17)
+## Display polarity - SETTLED: 0x1F is BRIGHT, no inversion
 
-**A high wire value is DARK.** A split frame with level `0x00` on the left
-half and `0x1F` on the right, viewed head-on, shows the right half darker.
-The panel is inverse video, which matches reviews describing the MK1 that
-way next to the MK2, and matches cabl's `setPixel` storing the complement.
+Decided by a four-step staircase of **raw** wire values `0x00`, `0x0A`,
+`0x15`, `0x1F` left to right, read head-on at contrast `0x25`. The blocks
+run dark to bright in that order, so a high wire value is bright and no
+complement is needed. `MPC_MK1_INVERT` defaults to **0**.
 
-`mpc-mk1-display.py` takes `lit` as brightness *intent* (0 = background,
-31 = full), so intent is complemented before it goes on the wire.
-`MPC_MK1_INVERT` therefore now defaults to **1**.
+A monotonic ramp is self-labelling: whichever end is brighter names the
+polarity. That is why it settled a question two split-screen tests got
+wrong in opposite directions - a split requires the observer to remember
+which half carried which value, and this panel makes that harder than it
+sounds.
 
-**Read the panel head-on.** These LCDs shift so far with viewing angle
-that the first observation of this very test read the opposite way round,
-and the wrong default was briefly committed on the strength of it.
+Both earlier readings were wrong, for reasons worth keeping:
+
+- **The first was taken off-axis.** These STN panels shift far enough with
+  viewing angle to appear inverted. Read them head-on, always.
+- **The second was taken at contrast `0x3F`.** That crushes the whole
+  range toward dark: the identical staircase at `0x3F` is barely
+  distinguishable, while at `0x25` it is obvious. **Higher contrast on
+  this panel is not more contrast.** Use `0x25`, which is what cabl's own
+  init ends with.
+
+The practical consequence: a wrong polarity default was committed twice
+before this, each time on a single visual observation. One reading of a
+low-contrast LCD is not evidence; a self-labelling gradient at a known
+contrast is.
 
 ## Verified control inventory
 
