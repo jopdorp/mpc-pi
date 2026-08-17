@@ -94,7 +94,12 @@ Environment=MPC_DSP_READ_MODE=window
 Environment=MPC_PANEL_TIMER_COUNTDOWN=countdown
 Environment=MPC_SOUND_UPDATES_PER_QUANTUM=4
 Environment=MAME_MPC_DSP_DMA_TURBO=8
-Environment=MAME_MPC_MIDI_POLL_HZ=8000
+# 8000Hz overran the firmware's own input queue - the emulator logged
+# "MPC fast-pad input queue overflow; dropping byte" continuously once the hub
+# started sending. The turbo preset picked 8000 for a measurement harness that
+# feeds MIDI in bursts, not for a live controller streaming encoder detents.
+# 1000Hz is still far above the panel link's real rate.
+Environment=MAME_MPC_MIDI_POLL_HZ=1000
 Environment=MAME_MPC_LCD_EXPORT=/dev/shm/mpc-lcd
 Environment=SDL_VIDEODRIVER=dummy
 Environment=XDG_RUNTIME_DIR=/run/user/1001
