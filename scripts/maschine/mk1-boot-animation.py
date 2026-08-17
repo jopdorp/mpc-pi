@@ -409,8 +409,21 @@ def build_frames(fps=18, rng=None):
     return frames
 
 
-FULL = 0x7F                 # the hardware maximum, not LedBank.BRIGHT
-NEAR = 0x38
+# Brightness budget. This device is bus-powered and a Pi 5 caps TOTAL USB
+# current at 600mA unless usb_max_current_enable=1 is set in config.txt.
+#
+# 0x7F on all 57 lamps plus two backlights, held indefinitely, is the state
+# this animation used to finish in - and twice now the controller has gone
+# unresponsive after heavy LED use: control transfers timing out, all
+# endpoints failing, recoverable only by unplugging. No over-current is
+# logged and throttled reads 0x0, so this is consistent rather than proven,
+# but a decorative animation is the wrong place to find out.
+#
+# So FULL is used only for brief peaks - the detonation lasts four frames -
+# and HOLD is what any sustained state settles to.
+FULL = 0x7F                 # peak only, never held
+HOLD = 0x38                 # sustained brightness, clearly lit
+NEAR = 0x2A
 FAINT = 0x0E
 
 
@@ -480,6 +493,8 @@ def leds_for(phase, t, bank, ray_angle):
 
     elif phase == "flash":
         bank.all(FULL)
+        bank.backlight(0x7F)        # peak, four frames only
+        return
 
     elif phase == "waves":
         # Four shells, launched in sequence, crossing the panel and beyond.
@@ -493,7 +508,7 @@ def leds_for(phase, t, bank, ray_angle):
             # Inner lamps arrive first, so the light spreads outwards
             # instead of the whole panel stepping on at once.
             up = max(0.0, min(1.0, (t * 1.6) - r * 0.5))
-            bank.set(name, int(FULL * up))
+            bank.set(name, int(HOLD * up))
     bank.backlight(0x7F)
 
 
@@ -511,16 +526,42 @@ class Screens:
                 self.dev.detach_kernel_driver(0)
         except (usb.core.USBError, NotImplementedError):
             pass
-        try:
-            self.dev.set_configuration()
-        except usb.core.USBError:
-            pass
-        try:
-            usb.util.claim_interface(self.dev, 0)
-        except usb.core.USBError:
-            pass
-        self.dev.set_interface_altsetting(interface=0,
-                                          alternate_setting=L.ALTSETTING)
+        # Deliberately tolerant, and retried. This device's open sequence is
+        # not deterministic: set_configuration() succeeds on one run and
+        # returns LIBUSB_ERROR_OTHER on the next, and set_interface_altsetting
+        # fails the same way depending on what the previous process left
+        # behind. Neither error names a cause.
+        #
+        # This matters more here than in a bring-up tool: the animation runs
+        # at power-on, and a raised exception there would be a service
+        # failure on every boot where the last shutdown left the device in
+        # the wrong state. Releasing and re-claiming the interface clears it.
+        last = None
+        for attempt in (0, 1, 2):
+            if attempt:
+                try:
+                    usb.util.release_interface(self.dev, 0)
+                except usb.core.USBError:
+                    pass
+                time.sleep(0.4)
+            try:
+                self.dev.set_configuration()
+            except usb.core.USBError:
+                pass
+            try:
+                usb.util.claim_interface(self.dev, 0)
+            except usb.core.USBError:
+                pass
+            try:
+                self.dev.set_interface_altsetting(
+                    interface=0, alternate_setting=L.ALTSETTING)
+                last = None
+                break
+            except usb.core.USBError as e:
+                last = e
+        if last is not None:
+            raise SystemExit("cannot select altsetting %d: %s"
+                             % (L.ALTSETTING, last))
         self.writes = 0
         self.recoveries = 0
         self.led_fails = 0
@@ -682,11 +723,11 @@ def main():
               "%d led retries)"
               % (len(frames), el, len(frames) / el, s.recoveries, s.led_fails))
         if not loop:
-            # Leave it LIT. The animation ends on a bright panel and the
-            # UI takes over from there; blanking it here would undo the
-            # ending.
-            bank.all(FULL)
-            bank.backlight(0x7F)
+            # Leave it LIT, but at the sustained level rather than the
+            # peak: this is the state the panel sits in until the UI takes
+            # over, and it is held for minutes rather than frames.
+            bank.all(HOLD)
+            bank.backlight(L.BACKLIGHT_DEFAULT)
             bank.flush(lambda ep, data: s._led(ep, data), force=True)
             return 0
 

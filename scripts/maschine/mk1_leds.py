@@ -108,10 +108,17 @@ GROUP1 = slice(31, 62)
 GROUP0_HEADER = (0x0C, 0x00)
 GROUP1_HEADER = (0x0C, 0x1E)
 
-# cabl uses 0x5C; maximum is 0x7F and the panels want it. "Too dark" on
-# this device is usually the backlight, not the contrast - they are
-# separate axes and each is useless against the other's problem.
-BACKLIGHT_DEFAULT = 0x7F
+# cabl uses 0x5C, the maximum is 0x7F, and "too dark" on this device is
+# usually the backlight rather than the contrast - they are separate axes
+# and each is useless against the other's problem.
+#
+# 0x68 is a compromise: clearly brighter than cabl's default, but not the
+# maximum. This is a bus-powered device on a port a Pi 5 limits to 600mA
+# total, and it has twice gone unresponsive after sustained full-brightness
+# LED use. Peaks are fine; holding the maximum for minutes is what to
+# avoid. Raise it with MPC_MK1_BACKLIGHT once usb_max_current_enable=1 is
+# set and a 5A supply is confirmed.
+BACKLIGHT_DEFAULT = 0x68
 BRIGHT = 0x7F
 DIM = 0x20
 OFF = 0x00
