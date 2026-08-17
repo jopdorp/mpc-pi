@@ -80,12 +80,20 @@ log "kernel: the RT build, under its own name"
 # linux-image-*-rpi-2712, and it is exactly how the stock kernel silently
 # replaced our PREEMPT_RT one on the netboot root - the board then ran
 # 6.18.34+rpt for an unknown stretch while every doc claimed RT.
-KREL=$(uname -r)
-case "$KREL" in
-	*mpcpi-rt*) ;;
-	*) echo "  WARNING: this Pi is running $KREL, not an RT kernel." >&2
-	   echo "           Copying its modules would ship the wrong set." >&2 ;;
-esac
+# The module set is chosen by PATTERN, not by uname -r. Provisioning must
+# not depend on which kernel this Pi happens to be running: the netboot
+# rig has silently reverted to the stock kernel more than once (an apt
+# upgrade, then our own `start` overwriting the kernel= line), and
+# copying /lib/modules/$(uname -r) at those moments would ship stock
+# modules onto a card that boots the RT image - a kernel with no modules
+# it can load, which fails at boot rather than at provisioning time.
+KREL=$(basename "$(ls -d /lib/modules/*mpcpi-rt* 2>/dev/null | head -1)" 2>/dev/null)
+[ -n "$KREL" ] && [ -d "/lib/modules/$KREL" ] ||
+	die "no RT module tree under /lib/modules - build and install the RT
+     kernel's modules before provisioning a card. Running kernel is
+     $(uname -r), which is not what the card will boot."
+[ "$KREL" = "$(uname -r)" ] ||
+	echo "  note: this Pi runs $(uname -r); shipping $KREL to match the RT image"
 if [ -f /boot/firmware/kernel-mpcpi-rt.img ]; then
 	cp /boot/firmware/kernel-mpcpi-rt.img "$MNT/boot/firmware/"
 elif [ -f "$SRC/../.cache/rt-kernel/linux/arch/arm64/boot/Image" ]; then
@@ -99,10 +107,12 @@ else
 		die "could not obtain the RT kernel"
 fi
 mkdir -p "$MNT/lib/modules"
-if [ -d "/lib/modules/$KREL" ]; then
-	rsync -a --delete "/lib/modules/$KREL" "$MNT/lib/modules/"
-	echo "  modules: $KREL"
-fi
+rsync -a --delete "/lib/modules/$KREL" "$MNT/lib/modules/"
+echo "  modules: $KREL"
+# depmod against the card's tree, not this running kernel's. Without -b
+# it would regenerate the HOST's maps and leave the card's stale.
+chroot "$MNT" depmod -a "$KREL" 2>/dev/null ||
+	echo "  note: depmod deferred to first boot"
 echo "  image  : kernel-mpcpi-rt.img"
 
 log "boot configuration"
