@@ -1,3 +1,28 @@
+> **READ FIRST — every measurement below is suspect (2026-08-17).**
+>
+> The board was found running the **stock Pi OS kernel**, not the
+> PREEMPT_RT build: `uname -v` = `#1 SMP PREEMPT Debian 1:6.18.34-1+rpt1`,
+> and `/sys/kernel/realtime` absent. `linux-image-6.18.34+rpt-rpi-2712`
+> is installed, and it writes `kernel_2712.img` — the exact filename
+> `build-rt-kernel.sh` uses. An apt upgrade overwrote our kernel with the
+> stock one. The RT modules were still sitting in
+> `/lib/modules/6.12.103-mpcpi-rt+`, unused.
+>
+> Separately, `/proc/cmdline` read `isolcpus=2-3 threadirqs` — no
+> `nohz_full`, no `rcu_nocbs`, no `irqaffinity=0`, no `audit=0`, and
+> **core 1 not isolated**, which is the core the audio interrupt is
+> pinned to. A netbooting Pi reads `cmdline.txt` over TFTP, so the line
+> `tune-realtime.sh` wrote to the board's own `/boot/firmware` was never
+> used. That hardcoded TFTP line dates to the netboot script's first
+> commit, so it applied for the whole life of the netboot rig.
+>
+> How much of the work below ran on RT is not yet known. What is known:
+> the unexplained xrun tail, and `mpcpi-irq-affinity`'s recorded null
+> result, were both measured against isolation that was not in effect.
+> Both need re-measuring on a verified RT kernel before their conclusions
+> mean anything. Fixed in `board/rpi5/cmdline-tuning` and
+> `mpcpi-netboot kernel rt`; see `board/rpi5/cmdline-tuning.md`.
+
 # System placement: everything measured, and what it turned out to mean
 
 Written after six single-variable experiments in a row failed to move a

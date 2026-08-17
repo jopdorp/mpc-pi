@@ -40,6 +40,10 @@ LOGFILE="/srv/tftp/mpcpi-netboot.log"   # world-readable: the
 IFACE_FILE="/etc/mpcpi-netboot.iface"
 
 NM_DROPIN=/etc/NetworkManager/conf.d/99-mpcpi-netboot.conf
+# The PREEMPT_RT kernel, selected host-side rather than on the board.
+RT_TREE="$REPO/.cache/rt-kernel/linux"
+RT_IMAGE="$RT_TREE/arch/arm64/boot/Image"
+RT_NAME="kernel-mpcpi-rt.img"
 
 die() { echo "mpcpi-netboot: $*" >&2; exit 1; }
 
@@ -94,6 +98,59 @@ pick_iface() {
 
 IFACE=$(pick_iface)
 
+# Which kernel TFTP hands the board, chosen HERE and not on the board.
+#
+# This exists because of two separate failures. First: an apt upgrade
+# installed linux-image-6.18.34+rpt-rpi-2712, which writes
+# kernel_2712.img - the exact filename build-rt-kernel.sh uses - so the
+# stock kernel silently replaced the PREEMPT_RT one and the board ran
+# 6.18.34+rpt SMP PREEMPT for an unknown stretch of this project. The RT
+# image now goes in under its own name, where apt has no reason to tread.
+#
+# Second: recovery. Selecting a kernel by editing the board's own
+# /boot/firmware means a kernel that fails to boot can only be undone
+# from the board - which is exactly the machine that is now unreachable.
+# The netboot server is the right place for the switch: `kernel stock`
+# plus a power cycle recovers from any bad kernel with no access to the
+# board at all.
+kernel_select() {
+	[ "$(id -u)" -eq 0 ] || die "must run as root"
+	local want="${1:-}"
+	local cfg="$TFTP_ROOT/config.txt"
+	[ -f "$cfg" ] || die "no $cfg - run start first"
+
+	case "$want" in
+	rt)
+		[ -f "$RT_IMAGE" ] || die "no RT kernel at $RT_IMAGE (build it: scripts/build-rt-kernel.sh)"
+		cp "$RT_IMAGE" "$TFTP_ROOT/$RT_NAME" || die "could not stage $RT_NAME"
+		# The RT tree's own DTBs and overlays, so a 6.12 kernel is not
+		# handed device trees built against 6.18.
+		cp "$RT_TREE"/arch/arm64/boot/dts/broadcom/bcm2712*.dtb \
+			"$TFTP_ROOT/" 2>/dev/null
+		if [ -d "$RT_TREE/arch/arm64/boot/dts/overlays" ]; then
+			mkdir -p "$TFTP_ROOT/overlays"
+			cp "$RT_TREE"/arch/arm64/boot/dts/overlays/*.dtbo \
+				"$RT_TREE"/arch/arm64/boot/dts/overlays/overlay_map.dtb \
+				"$TFTP_ROOT/overlays/" 2>/dev/null
+		fi
+		sed -i '/^kernel=/d' "$cfg"
+		printf 'kernel=%s\n' "$RT_NAME" >> "$cfg"
+		echo "serving PREEMPT_RT: $RT_NAME"
+		echo "  $(strings -a "$RT_IMAGE" | grep -oE '6\.[0-9]+\.[0-9]+-mpcpi-rt[^ ]*' | head -1)"
+		echo "  the board needs matching /lib/modules - check after boot:"
+		echo "    uname -r; cat /sys/kernel/realtime"
+		echo "  if it does not come back: sudo $0 kernel stock, then power cycle"
+		;;
+	stock)
+		sed -i '/^kernel=/d' "$cfg"
+		echo "serving the stock Pi OS kernel (no kernel= line)"
+		;;
+	*)
+		die "usage: $0 kernel rt|stock"
+		;;
+	esac
+}
+
 status() {
 	echo "interface : ${IFACE:-none found}"
 	if [ -n "$IFACE" ]; then
@@ -120,6 +177,15 @@ status() {
 			grep -E "^--interface|^--tftp-root" | sed 's/^/            /'
 	else
 		echo "dnsmasq   : not running"
+	fi
+	# Which kernel is served, by name. The stock kernel replacing the RT
+	# one went unnoticed precisely because nothing ever printed this.
+	ksel=$(grep -E '^kernel=' "$TFTP_ROOT/config.txt" 2>/dev/null | tail -1 | cut -d= -f2)
+	if [ -n "$ksel" ]; then
+		echo "kernel    : $ksel $([ -f "$TFTP_ROOT/$ksel" ] && echo "(staged)" || echo "(MISSING from $TFTP_ROOT)")"
+	else
+		echo "kernel    : stock Pi OS (no kernel= line) - NOT PREEMPT_RT"
+		[ -f "$RT_IMAGE" ] && echo "            an RT kernel is built: sudo $0 kernel rt"
 	fi
 	echo "tftp root : $TFTP_ROOT $([ -d "$TFTP_ROOT" ] && echo "($(ls -1 "$TFTP_ROOT" 2>/dev/null | wc -l) files)" || echo '(absent)')"
 	echo "nfs root  : $NFS_ROOT $([ -d "$NFS_ROOT" ] && echo present || echo MISSING)"
@@ -294,6 +360,7 @@ case "${1:-status}" in
 	start) start ;;
 	stop) stop ;;
 	status) status ;;
+	kernel) kernel_select "${2:-}" ;;
 	log) tail -n "${2:-40}" "$LOGFILE" 2>/dev/null || echo "no log yet" ;;
 	sniff)
 		# Capture on the netboot link and summarise who is talking.
@@ -394,5 +461,5 @@ case "${1:-status}" in
 		"$REPO/scripts/netboot/deploy-daw.sh" "$NFS_ROOT" || true
 		echo "redeployed kernel, dtbs, overlays and DAW layer"
 		;;
-	*) die "usage: mpcpi-netboot start|stop|status|log [n]|deploy|root [pios|buildroot]|fetch-pios" ;;
+	*) die "usage: mpcpi-netboot start|stop|status|kernel rt|stock|log [n]|deploy|root [pios|buildroot]|fetch-pios" ;;
 esac
