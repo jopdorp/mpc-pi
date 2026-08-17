@@ -21,8 +21,16 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control_map                                        # noqa: E402
 
+import mk1_display                                          # noqa: E402
 import mk1_encoders                                      # noqa: E402
 import mk1_leds                                          # noqa: E402
+
+MPC_SCREEN = 0        # left: the emulator's LCD
+DAW_SCREEN = 1        # right: our own panel renderer
+
+# Dark content on a light field, on both screens. Override with
+# MPC_MK1_SCREEN_INVERT=0 to get light-on-dark back.
+INVERT_SCREEN = os.environ.get("MPC_MK1_SCREEN_INVERT", "1") not in ("0", "", "no")
 
 EP_PADS = 0x84
 EP_CTRL = 0x81
@@ -533,13 +541,56 @@ def main():
     spec.loader.exec_module(disp)
 
     def packer(dev, index, px, w, h):
-        frame = disp.pack_display(w, h, px)
-        # The display bridge owns the wire format; reuse it rather than
-        # duplicating the chunking here, so a protocol fix lands once.
-        saved = disp.Mk1Usb.__new__(disp.Mk1Usb)
-        saved.dev, saved.d = dev, index << 1
-        saved._w = disp.Mk1Usb._w.__get__(saved)
-        disp.Mk1Usb.send_frame(saved, frame)
+        """Pack and send one screen, draining the input queue as it goes.
+
+        Two things the hub was getting wrong.
+        //
+        It wrote frames without draining, and this device accepts writes
+        while its input queue is backed up then FAILS them - the hub
+        crash-looped on "USBError [Errno 5]" after a frame or two, which is
+        why one screen appeared and the other stayed black with vertical
+        tearing: partial frames from a process that kept restarting. The pad
+        stream delivers a report every ~24ms and a frame is 24 writes, so the
+        queue refills mid-frame; a sip before each chunk is what keeps it
+        clear.
+        //
+        And it packed the MPC's 1-bit LCD through pack_display's default,
+        which scales a source byte as a brightness LEVEL. A 1-bit panel's
+        pixels are 1, so lit pixels came out at level 1 of 31 - present, but
+        so dim as to be barely there. level=0x1F makes a lit pixel fully lit,
+        which is what a monochrome source means.
+        """
+        # BOTH screens render inverted: dark content on a light field.
+        #
+        # That is how the MPC2000XL's own LCD reads - dark pixels on light
+        # green - so a set pixel in its framebuffer means DARK, and mapping
+        # set -> bright turned the panel inside out with the text becoming
+        # the background. The DAW panel is our own renderer and could go
+        # either way; inverted matches the MPC beside it and is easier to
+        # read on a dim STN panel, where a mostly-lit field gives the eye
+        # more to work with than a mostly-dark one.
+        #
+        # Kept per-call rather than global because the two screens genuinely
+        # could need opposite senses - one flag for both is what made
+        # MPC_MK1_INVERT unable to serve either properly.
+        frame = disp.pack_display(w, h, px, level=0x1F, invert=INVERT_SCREEN)
+
+        for pkt in mk1_display.frame_packets(index, frame, disp.FRAME_BYTES):
+            for ep in mk1_leds.IN_ENDPOINTS:
+                try:
+                    dev.read(ep, 512, timeout=1)
+                except Exception:
+                    pass
+            for _ in range(20):
+                try:
+                    dev.write(disp.EP_DISPLAY, pkt, timeout=250)
+                    break
+                except Exception:
+                    for ep in mk1_leds.IN_ENDPOINTS:
+                        try:
+                            dev.read(ep, 512, timeout=3)
+                        except Exception:
+                            pass
 
     fifo = None
     if os.path.exists(args.fifo):

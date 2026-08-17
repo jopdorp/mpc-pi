@@ -96,7 +96,7 @@ def read_frame(path):
     return seq, width, height, pixels
 
 
-def pack_display(width, height, pixels, level=None):
+def pack_display(width, height, pixels, level=None, invert=None):
     """Pack a frame into the MK1's 5-bpp 3-pixels-per-2-bytes layout,
     placed at the top-left of the 255x64 panel.
 
@@ -115,7 +115,11 @@ def pack_display(width, height, pixels, level=None):
             if x < width and y < height and pixels[y * width + x]:
                 lit = level if level is not None else min(
                     0x1F, pixels[y * width + x])
-            if INVERT:
+            # Per-call invert wins over the global default. The two screens
+            # need OPPOSITE senses - the MPC's LCD is dark-on-light, our DAW
+            # panel is drawn light-on-dark - so one global flag cannot serve
+            # both, which is what MPC_MK1_INVERT was trying to do.
+            if INVERT if invert is None else invert:
                 lit = 0x1F - lit
             triple = x // 3
             block = x % 3
