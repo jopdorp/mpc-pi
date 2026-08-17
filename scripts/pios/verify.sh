@@ -109,6 +109,26 @@ else
 	echo "      sudo mpcpi-netboot start"
 fi
 
+hdr "network"
+# A board that boots with no network is not obviously broken from the front
+# panel, and it cannot be reached to be told so. This check exists because
+# the appliance masked NetworkManager while shipping no networkd config: on
+# netboot the kernel had already addressed the interface, so the gap stayed
+# hidden until the first boot from an SD card, which came up silent.
+wired=$(ls /sys/class/net | grep -E '^(eth|en)' | head -1)
+if [ -z "$wired" ]; then
+	note "no wired interface present"
+elif ip -4 addr show "$wired" 2>/dev/null | grep -q 'inet '; then
+	ok "$wired has $(ip -4 -br addr show "$wired" | awk '{print $3}')"
+else
+	bad "$wired has NO IPv4 address"
+	grep -q 'ip=dhcp' /proc/cmdline &&
+		echo "    netbooted, so the kernel should have addressed it" ||
+		echo "    booted from local storage: needs /etc/systemd/network/*.network"
+	ls /etc/systemd/network/*.network >/dev/null 2>&1 ||
+		echo "    none present - that is the cause"
+fi
+
 hdr "cpu"
 gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "?")
 [ "$gov" = "performance" ] && ok "governor performance" || bad "governor is $gov"

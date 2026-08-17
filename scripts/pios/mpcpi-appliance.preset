@@ -37,8 +37,15 @@ disable systemd-networkd-wait-online.service
 disable NetworkManager-wait-online.service
 
 # --- networking the appliance does not use ----------------------------
-# systemd-networkd owns eth0; NetworkManager reported it as "connected
-# (externally)" while costing 4.7-5.5s. It is pulled back in by
+# systemd-networkd owns eth0 - but ONLY because
+# etc/systemd/network/10-wired.network in the rootfs overlay tells it to.
+# That file did not exist for a long time and nothing noticed, because a
+# netbooted board is addressed by the kernel (ip=dhcp) before userspace
+# runs. Masking NetworkManager without it produces a card that boots
+# perfectly and has no network whatsoever.
+#
+# NetworkManager reported the link as "connected (externally)" while
+# costing 4.7-5.5s. It is pulled back in by
 # rpi-usb-gadget-ics, Pi OS's USB internet-sharing service, which is
 # redundant on a board that presents its own UAC2 gadget.
 disable NetworkManager.service

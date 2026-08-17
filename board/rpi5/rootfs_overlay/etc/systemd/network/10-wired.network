@@ -1,0 +1,34 @@
+# Wired ethernet, for a board that boots from its own card.
+#
+# This file did not exist, and its absence was invisible for as long as the
+# board netbooted: a netbooted Pi gets its address from the kernel command
+# line (ip=dhcp) before userspace starts, so nothing in userspace ever had
+# to configure the interface.
+#
+# The appliance preset enables systemd-networkd and masks NetworkManager -
+# with a comment claiming "systemd-networkd owns eth0", which was not true.
+# The kernel owned it. Boot the same configuration from an SD card, where
+# there is no ip=dhcp, and the result is a board with no network at all:
+# it boots correctly, answers nothing, and does not even send a DHCP
+# request to explain itself.
+#
+# Match is deliberately broad. Pi OS ships 99-default.link and
+# 73-usb-net-by-mac.link symlinked to /dev/null, which disables systemd's
+# interface renaming, so the name can be eth0 or an enx* MAC-derived form
+# depending on release.
+[Match]
+Name=eth* en*
+Type=ether
+
+[Network]
+DHCP=yes
+# The appliance is a USB audio device, not a router. It needs an address
+# and a resolver, nothing more.
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+
+[DHCPv4]
+UseDomains=yes
+# Do not wait around for a lease before considering the link configured;
+# networkd-wait-online is disabled precisely so boot does not block on it.
+SendRelease=no
