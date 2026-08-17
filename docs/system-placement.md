@@ -191,3 +191,30 @@ waveform *with its routing verified*. Prefer them, in that order.
 The general lesson, which cost most of a day twice over: when many
 independent levers all fail to move a number, stop pulling levers and
 suspect the number.
+
+## External USB audio interfaces (2026-08-17)
+
+Class-compliant USB audio works with nothing added: `CONFIG_SND_USB_AUDIO=m`
+is already in the RT kernel and `snd-usb-audio` enumerates the device on
+plug-in. A TI PCM2900C codec came up unprompted as ALSA card 3, full speed,
+S16_LE stereo at 32000/44100/48000.
+
+What needed adding was a rule to stop it taking over. The appliance's clock
+is a null-audio-sink at a fixed 32-frame quantum and everything else
+follows it; a USB interface arrives with an ordinary driver priority and can
+win the election, reclocking the entire graph to whatever it can manage.
+For a full-speed codec that is nowhere near 32 frames, so the instrument's
+latency would come to depend on what someone happened to plug in.
+
+`etc/wireplumber/wireplumber.conf.d/94-mpcpi-external-usb-audio.rules`
+allows it, keeps it unsuspended, pins it to driver priority 50, and puts it
+in a different `node.group` - driver election is per group, so group
+membership is what would let it compete at all. It also gives it a
+256-frame period rather than the appliance's 32: forcing 32 on an interface
+that cannot meet it produces continuous xruns that look like a fault in the
+appliance rather than a mismatch with the accessory.
+
+The match is written against the device's NODES, not the device. Node
+properties inside a device rule do nothing - a trap this project has
+already paid for once, when a `disable-tsched` fix sat in a device rule and
+every measurement for days ran on 1024-frame timer periods.
