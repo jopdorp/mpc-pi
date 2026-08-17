@@ -44,6 +44,12 @@ NM_DROPIN=/etc/NetworkManager/conf.d/99-mpcpi-netboot.conf
 RT_TREE="$REPO/.cache/rt-kernel/linux"
 RT_IMAGE="$RT_TREE/arch/arm64/boot/Image"
 RT_NAME="kernel-mpcpi-rt.img"
+# Which kernel was chosen, remembered across `start`. populate_tftp
+# re-copies config.txt from the root filesystem, which silently threw
+# away the kernel= line - so `start` quietly reverted the board to the
+# stock kernel. That is the same class of loss as the apt upgrade this
+# selector exists to survive.
+KERNEL_SEL_FILE="/etc/mpcpi-netboot.kernel"
 
 die() { echo "mpcpi-netboot: $*" >&2; exit 1; }
 
@@ -135,6 +141,7 @@ kernel_select() {
 		fi
 		sed -i '/^kernel=/d' "$cfg"
 		printf 'kernel=%s\n' "$RT_NAME" >> "$cfg"
+		echo rt > "$KERNEL_SEL_FILE"
 		echo "serving PREEMPT_RT: $RT_NAME"
 		echo "  $(strings -a "$RT_IMAGE" | grep -oE '6\.[0-9]+\.[0-9]+-mpcpi-rt[^ ]*' | head -1)"
 		echo "  the board needs matching /lib/modules - check after boot:"
@@ -143,6 +150,7 @@ kernel_select() {
 		;;
 	stock)
 		sed -i '/^kernel=/d' "$cfg"
+		echo stock > "$KERNEL_SEL_FILE"
 		echo "serving the stock Pi OS kernel (no kernel= line)"
 		;;
 	*)
@@ -269,6 +277,11 @@ start() {
 
 	mkdir -p "$TFTP_ROOT"
 	populate_tftp
+	# Re-apply the remembered kernel choice: populate_tftp has just
+	# overwritten config.txt with the root filesystem's copy.
+	if [ "$(cat "$KERNEL_SEL_FILE" 2>/dev/null)" = "rt" ]; then
+		kernel_select rt | sed 's/^/  /'
+	fi
 
 	# Root over NFS, and keep the appliance's own isolcpus/threadirqs
 	# tuning so a netbooted rig behaves like a flashed one.
