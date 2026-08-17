@@ -164,7 +164,7 @@ Environment=MAME_PIPEWIRE_AUDIO_CLOCK=1
 # the pair has to move together. It was left at 16 (sized for q32) while the
 # graph ran at 256, i.e. sixteen tiny pushes per graph cycle, and the clicks in
 # the captured audio roughly doubled.
-Environment=MAME_SOUND_UPDATE_FRAMES=16
+Environment=MAME_SOUND_UPDATE_FRAMES=32
 Environment=MAME_SOUND_UPDATE_RATE=44100
 Environment=MAME_MPC_MIDI_FAST_INPUT=1
 Environment=MAME_MPC_MIDI_INTERNAL_PADS=1
