@@ -588,6 +588,30 @@ class Screens:
                 except self.core.USBError:
                     break
 
+    def w_sync(self, data, tries=40):
+        """Write with the input queue emptied FIRST, every time.
+
+        For initialisation, not frames. The device accepts writes while its
+        input queue is backed up and then discards them, so an optimistic
+        init silently fails: the 22-command sequence - including 0xAF,
+        display on - never reaches the controller and the panel stays dark
+        with no error to read.
+        //
+        This animation appeared to work for a while only because it was
+        being run by hand AFTER mk1-screen-test.py had already initialised
+        the panels. On a fresh boot it is the first thing to touch the
+        device, and the screens stayed black while the lamps danced.
+        """
+        for _ in range(tries):
+            self.drain()
+            try:
+                self.dev.write(EP_DISPLAY, data, timeout=250)
+                self.writes += 1
+                return
+            except self.core.USBError:
+                self.recoveries += 1
+        raise RuntimeError("init write failed")
+
     def w(self, data, tries=30):
         """Write first, drain only if it fails.
 
@@ -607,7 +631,7 @@ class Screens:
 
     def init_display(self, index):
         d = index << 1
-        C = lambda *b: self.w(bytes((d, 0x00, len(b)) + b))
+        C = lambda *b: self.w_sync(bytes((d, 0x00, len(b)) + b))
         C(0x01, 0x30)
         C(0x04, 0xCA, 0x04, 0x0F, 0x00)
         time.sleep(0.02)
@@ -637,15 +661,32 @@ class Screens:
         C(0x01, 0xA6)
         C(0x03, 0x81, CONTRAST, 0x02)
 
+    def _sip(self):
+        """One cheap read per endpoint. Called before every chunk.
+
+        A frame is 24 writes and the pad stream delivers a report every
+        ~24ms, so draining once per frame leaves the queue refilling
+        part-way through and the rest of the chunks discarded. A single
+        1ms read per chunk costs ~25ms a frame and keeps the pipe clear.
+        """
+        for ep in L.IN_ENDPOINTS:
+            try:
+                self.dev.read(ep, 512, timeout=1)
+            except self.core.USBError:
+                pass
+
     def send(self, index, frame):
         d = index << 1
+        self._sip()
         self.w(bytes([d, 0x00, 0x03, 0x75, 0x00, 0x3F]))
         self.w(bytes([d, 0x00, 0x03, 0x15, 0x00, 0x54]))
         self.w(bytes([d, 0x01, 0xF7, 0x5C]) + frame[0:502])
         off = 502
         while off + 502 <= FRAME_BYTES - 338:
+            self._sip()
             self.w(bytes([d + 1, 0x01, 0xF6]) + frame[off:off + 502])
             off += 502
+        self._sip()
         self.w(bytes([d + 1, 0x01, 0x52]) + frame[off:FRAME_BYTES])
 
     def backlight(self, value=0x7F):
