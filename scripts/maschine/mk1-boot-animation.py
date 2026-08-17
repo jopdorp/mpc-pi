@@ -49,6 +49,28 @@ FRAME_WHITE = b"\xff" * FRAME_BYTES
 FRAME_BLACK = b"\x00" * FRAME_BYTES
 
 
+def uniform_frame(level):
+    """A whole panel at one level.
+
+    Built by packing a single row and tiling it. Ramping the entire field
+    through pack_sparse would mean 16,320 pixels per frame - the one case
+    where sparse packing is the wrong tool.
+    """
+    v = max(0, min(0x1F, int(level)))
+    row = bytearray(ROW_BYTES)
+    for x in range(W):
+        bi = (x // 3) * 2
+        block = x % 3
+        if block == 0:
+            row[bi] = (row[bi] & 0x07) | (v << 3)
+        elif block == 1:
+            row[bi] = (row[bi] & 0xF8) | (v >> 2)
+            row[bi + 1] = (row[bi + 1] & 0x3F) | ((v & 0x03) << 6)
+        else:
+            row[bi + 1] = (row[bi + 1] & 0xC1) | (v << 1)
+    return bytes(row) * H
+
+
 def pack_sparse(lit):
     """Pack {(x, y): level} onto a black field.
 
@@ -94,7 +116,22 @@ def glow(lit, x, y, level, radius):
             add(lit, x + dx, y + dy, int(level * (1.0 - d / (radius + 0.001))))
 
 
-def ray(lit, angle, r0, r1, level, squash=1.0, taper=True):
+def blob(lit, x, y, level):
+    """A star with a body. Centre plus a plus-shape at half level.
+
+    One lit pixel is invisible on this panel - dim STN, 32 levels, and only
+    64 rows - so every star is five pixels. It is the cheapest shape that
+    actually reads.
+    """
+    add(lit, x, y, level)
+    half = level >> 1
+    add(lit, x + 1, y, half)
+    add(lit, x - 1, y, half)
+    add(lit, x, y + 1, half)
+    add(lit, x, y - 1, half)
+
+
+def ray(lit, angle, r0, r1, level, squash=1.0, taper=True, thick=2):
     """A straight beam from the core outwards.
 
     Rays are what make the disc read as *turning* rather than as a ring of
@@ -108,7 +145,13 @@ def ray(lit, angle, r0, r1, level, squash=1.0, taper=True):
         t = i / steps
         r = r0 + (r1 - r0) * t
         v = level * (1.0 - t) if taper else level
-        add(lit, CX + r * ca, CY + r * sa, int(v))
+        x, y = CX + r * ca, CY + r * sa
+        add(lit, x, y, int(v))
+        # Widen the beam vertically. A one-pixel line across a 64-row panel
+        # disappears; two or three rows is a beam.
+        for o in range(1, thick):
+            add(lit, x, y + o, int(v * 0.55))
+            add(lit, x, y - o, int(v * 0.55))
 
 
 def wavefront(lit, radius, level, squash=0.62, thickness=2):
@@ -138,7 +181,7 @@ class Star:
         # Inner orbits move faster, as gravity requires. Without this the
         # field rotates like a painted wheel.
         self.speed = 2.4 / math.sqrt(self.radius) * rng.uniform(0.85, 1.15)
-        self.level = rng.randint(9, 0x1F)
+        self.level = rng.randint(0x14, 0x1F)
         self.squash = rng.uniform(0.22, 0.30)
 
     def step(self, dt, shrink=1.0):
@@ -217,7 +260,7 @@ LAMP_NAMES = tuple(LAMP_XY)
 
 # Phase boundaries as fractions of the whole, shared by the display
 # renderer and the LED choreographer so the two cannot drift apart.
-PHASES = ("ignition", "orbit", "collapse", "flash", "waves", "remnant")
+PHASES = ("ignition", "orbit", "collapse", "flash", "waves", "afterglow")
 
 
 def build_frames(fps=18, rng=None):
@@ -231,7 +274,7 @@ def build_frames(fps=18, rng=None):
     Returns [(packed_frame, phase, phase_t)].
     """
     rng = rng or random.Random(0xACE)
-    stars = [Star(rng) for _ in range(64)]
+    stars = [Star(rng) for _ in range(96)]
     frames = []
     dt = 1.0 / fps
 
@@ -250,7 +293,7 @@ def build_frames(fps=18, rng=None):
         lit = {}
         for st in stars:
             x, y = st.pos()
-            add(lit, x, y, int(st.level * t * 0.7))
+            blob(lit, x, y, int(st.level * t * 0.9))
             st.step(dt)
         emit(lit, "ignition", t)
 
@@ -261,13 +304,13 @@ def build_frames(fps=18, rng=None):
         lit = {}
         for st in stars:
             x, y = st.pos()
-            add(lit, x, y, st.level)
-            st.trail(lit, dt, n=3)
+            blob(lit, x, y, st.level)
+            st.trail(lit, dt, n=5)
             st.step(dt)
         ray_phase += 2.6 * dt
         for k in range(n_rays):
             a = ray_phase + math.tau * k / n_rays
-            ray(lit, a, 6, 30 + 74 * t, int(7 + 12 * t), squash=0.30)
+            ray(lit, a, 6, 30 + 90 * t, int(0x12 + 13 * t), squash=0.30, thick=3)
         glow(lit, CX, CY, int(6 + 12 * t), 3 + 3 * t)
         emit(lit, "orbit", t)
 
@@ -279,14 +322,13 @@ def build_frames(fps=18, rng=None):
         lit = {}
         for st in stars:
             x, y = st.pos()
-            add(lit, x, y, min(0x1F, int(st.level * (1 + 1.6 * t))))
-            st.trail(lit, dt, n=4, gain=1 + t)
+            blob(lit, x, y, min(0x1F, int(st.level * (1 + 1.6 * t))))
+            st.trail(lit, dt, n=6, gain=1 + t)
             st.step(dt * (1 + 2.5 * t), shrink=1.0 - 0.16 * t)
         ray_phase += (2.6 + 16.0 * t) * dt
         for k in range(n_rays):
             a = ray_phase + math.tau * k / n_rays
-            ray(lit, a, 4, (104 * (1 - t)) + 12, int(0x1F * (0.6 + 0.4 * t)),
-                squash=0.30)
+            ray(lit, a, 4, (110 * (1 - t)) + 14, 0x1F, squash=0.30, thick=4)
         glow(lit, CX, CY, 0x1F, 4 + 10 * t)
         emit(lit, "collapse", t)
 
@@ -300,11 +342,11 @@ def build_frames(fps=18, rng=None):
     # 5. WAVES - a train of shells, each launched later and fading as it
     # goes, with debris thrown out along straight rays.
     debris = []
-    for _ in range(38):
+    for _ in range(64):
         a = rng.uniform(0, math.tau)
         debris.append([CX, CY, math.cos(a) * rng.uniform(45, 165),
-                       math.sin(a) * rng.uniform(10, 38), rng.randint(12, 0x1F)])
-    burst_rays = [rng.uniform(0, math.tau) for _ in range(9)]
+                       math.sin(a) * rng.uniform(10, 38), rng.randint(0x16, 0x1F)])
+    burst_rays = [rng.uniform(0, math.tau) for _ in range(14)]
     n = max(1, int(1.9 * fps))
     N_SHELLS = 6
     for i in range(n):
@@ -321,29 +363,48 @@ def build_frames(fps=18, rng=None):
             if shell:
                 level = int(level * (0.85 ** shell))
             wavefront(lit, radius, level, squash=0.62,
-                      thickness=3 if shell == 0 else 2)
+                      thickness=4 if shell == 0 else 3)
         for a in burst_rays:
-            ray(lit, a, 6 + t * 40, 6 + t * 150, int(0x1F * (1.0 - t) ** 2),
-                squash=0.34)
+            ray(lit, a, 6 + t * 40, 6 + t * 170, int(0x1F * (1.0 - t) ** 1.1),
+                squash=0.34, thick=3)
         for d in debris:
             d[0] += d[2] * dt
             d[1] += d[3] * dt
-            add(lit, d[0], d[1], int(d[4] * (1.0 - t)))
+            blob(lit, d[0], d[1], int(d[4] * (1.0 - t)))
         glow(lit, CX, CY, int(0x1F * (1.0 - t) ** 2), 2 + 9 * (1.0 - t))
         emit(lit, "waves", t)
 
-    # 6. REMNANT - a dim core with the last debris drifting, which is where
-    # the UI takes over.
-    n = max(1, int(0.8 * fps))
+    # 6. AFTERGLOW - the panel fills with light and stays there.
+    #
+    # Ending bright rather than dark matters for an instrument: a screen
+    # that fades to black at the end of its power-on looks like it gave up,
+    # and the UI that takes over has to light the panel again anyway. This
+    # hands over a lit screen.
+    n = max(1, int(0.7 * fps))
     for i in range(n):
         t = i / n
-        lit = {}
-        glow(lit, CX, CY, int(10 * (1.0 - t) + 4), 3)
-        for d in debris:
-            d[0] += d[2] * dt * 0.3
-            d[1] += d[3] * dt * 0.3
-            add(lit, d[0], d[1], int(6 * (1.0 - t)))
-        emit(lit, "remnant", t)
+        base = uniform_frame(0x1F * (t ** 0.7))
+        # The last debris is still visible until the field overtakes it,
+        # so the glow looks like it comes from the explosion rather than
+        # from a separate fade-in.
+        if t < 0.55:
+            lit = {}
+            for d in debris:
+                d[0] += d[2] * dt * 0.35
+                d[1] += d[3] * dt * 0.35
+                blob(lit, d[0], d[1], int(0x1F * (1.0 - t / 0.55)))
+            glow(lit, CX, CY, int(0x1F * (1.0 - t)), 4)
+            over = bytearray(base)
+            spark = pack_sparse(lit)
+            for k in range(FRAME_BYTES):
+                if spark[k] > over[k]:
+                    over[k] = spark[k]
+            frames.append((bytes(over), "afterglow", t))
+        else:
+            frames.append((base, "afterglow", t))
+    # Hold the lit panel for a moment so the handover is not a flicker.
+    for _ in range(3):
+        frames.append((FRAME_WHITE, "afterglow", 1.0))
 
     return frames
 
@@ -425,10 +486,14 @@ def leds_for(phase, t, bank, ray_angle):
         _wave(bank, [(t - k * 0.16) * 1.65 for k in range(4)],
               width=0.075, level=FULL)
 
-    else:                                   # remnant
+    else:                                   # afterglow
+        # Rise to full and stay there, matching the screens.
         for name in LAMP_NAMES:
             r = LAMP_DIST[name]
-            bank.set(name, int(FAINT * (1.0 - r) * (1.0 - t)))
+            # Inner lamps arrive first, so the light spreads outwards
+            # instead of the whole panel stepping on at once.
+            up = max(0.0, min(1.0, (t * 1.6) - r * 0.5))
+            bank.set(name, int(FULL * up))
     bank.backlight(0x7F)
 
 
@@ -589,6 +654,16 @@ def main():
         t0 = time.time()
         ray_angle = 0.0
         for i, (frame, phase, pt) in enumerate(frames):
+            # Drain ONCE per frame before sending it. Writes to 0x08 return
+            # success while the device's input queue is backed up and then
+            # discard the data - the same accept-and-discard that made the
+            # display endpoint look like the right place for the LED block.
+            # So "no errors, nothing on screen" is the expected symptom of
+            # not draining, and the first version of this animation had
+            # exactly that: the pads danced and the panels stayed black.
+            # Once per frame, not once per write: 24 drains per frame is
+            # what dropped the earlier bring-up tool to 3fps.
+            s.drain()
             s.send(0, frame)
             s.send(1, frame)
             # Same sweep rate the display rays use, so the light on the
@@ -607,9 +682,11 @@ def main():
               "%d led retries)"
               % (len(frames), el, len(frames) / el, s.recoveries, s.led_fails))
         if not loop:
-            # Leave the panel dark and quiet for whatever runs next.
-            bank.all(L.OFF)
-            bank.backlight(0x5C)
+            # Leave it LIT. The animation ends on a bright panel and the
+            # UI takes over from there; blanking it here would undo the
+            # ending.
+            bank.all(FULL)
+            bank.backlight(0x7F)
             bank.flush(lambda ep, data: s._led(ep, data), force=True)
             return 0
 
