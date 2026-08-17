@@ -105,15 +105,33 @@ part2="${target}p2"
 if [ -b "$part2" ]; then
 	echo "growing $part2 to fill the card..."
 	# growpart is in cloud-guest-utils; parted's resizepart is the fallback.
+	grown=""
 	if command -v growpart >/dev/null 2>&1; then
-		growpart "$target" 2 || echo "  growpart declined (already full?)"
+		growpart "$target" 2 && grown=1
 	else
-		parted -s "$target" resizepart 2 100% || echo "  resizepart declined"
+		parted -s "$target" resizepart 2 100% && grown=1
 	fi
 	partx -u "$target" 2>/dev/null || true
-	e2fsck -fp "$part2" || true
-	resize2fs "$part2"
-	echo "  $(lsblk -no SIZE "$part2" | tr -d ' ') root partition"
+	if [ -n "$grown" ]; then
+		e2fsck -fp "$part2" || true
+		resize2fs "$part2"
+	fi
+	size=$(lsblk -bno SIZE "$part2" | head -1 | tr -d ' ')
+	card=$(lsblk -bno SIZE "$target" | head -1 | tr -d ' ')
+	# Say plainly when the grow did not happen. This printed "growpart
+	# declined (already full?)" after a failure and left a 2.3GB root on
+	# a 7.4GB card - 86% full, too small for the payload - while reading
+	# like a successful no-op.
+	if [ -n "$size" ] && [ -n "$card" ] &&
+		[ "$size" -lt $((card * 70 / 100)) ]; then
+		echo
+		echo "  NOTE: root is $(numfmt --to=iec "$size") on a $(numfmt --to=iec "$card") card - NOT grown."
+		echo "  growpart needs root to make the kernel re-read the partition"
+		echo "  table, and this script runs unprivileged via the disk group."
+		echo "  provision-card.sh grows it on the Pi, where it has root."
+	else
+		echo "  root partition $(numfmt --to=iec "$size")"
+	fi
 fi
 
 echo

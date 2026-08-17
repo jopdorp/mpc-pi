@@ -1,0 +1,77 @@
+# What the appliance installs on top of Raspberry Pi OS Lite.
+#
+# Curated, not dumped. `apt-mark showmanual` on the development board
+# returns 260 packages, almost all of which are the Pi OS base plus
+# things installed while working. A manifest that large documents an
+# accident; this one is a decision.
+#
+# Comments and blank lines are ignored. One package per line.
+
+# --- audio transport ---------------------------------------------------
+pipewire
+pipewire-alsa
+pipewire-jack
+wireplumber
+alsa-utils
+
+# --- the DAW -----------------------------------------------------------
+ardour
+lua5.1
+luajit
+lilv-utils
+
+# --- plugins the shipped session instantiates --------------------------
+# Pinned by name because the session template fails to load without
+# them, and a missing plugin in Ardour is a silently bypassed insert
+# rather than an error.
+guitarix
+dragonfly-reverb
+lsp-plugins-lv2
+x42-plugins
+zam-plugins
+
+# --- emulator runtime --------------------------------------------------
+# /usr/local/bin/mpc is a hand-built binary, NOT a package. Nothing in
+# apt depends on it, so nothing pulls these in - they are the libraries
+# `ldd` resolves against the built emulator, and without them it will
+# not start on a fresh image. Everything else it needs arrives as a
+# dependency of the packages above; these are the ones that do not.
+libsdl2-2.0-0
+libsdl2-ttf-2.0-0
+libpulse0
+libsndfile1
+libsamplerate0
+libmpg123-0t64
+libmp3lame0
+
+# --- the control surface -----------------------------------------------
+# pyusb, for the Maschine MK1 hub. Note the kernel's own snd-usb-caiaq
+# is deliberately blacklisted - see modprobe.d/blacklist-caiaq.conf.
+python3-usb
+
+# --- measurement and diagnosis -----------------------------------------
+# Kept on the appliance on purpose: every latency claim in this project
+# is supposed to be re-checkable on the device itself rather than taken
+# on trust.
+rt-tests
+usbutils
+strace
+htop
+
+# --- system --------------------------------------------------------------
+parted
+dosfstools
+rsync
+
+# --- deliberately NOT installed -----------------------------------------
+# network-manager   - systemd-networkd owns eth0; NM cost 4.7-5.5s of boot
+#                     and was pulled back in by rpi-usb-gadget-ics
+# udisks2, cloud-init, raspi-config, rpi-connect-lite
+#                   - desktop and provisioning machinery an instrument
+#                     never reaches
+# bluez, wpasupplicant
+#                   - radios are off at the firmware level in config.txt
+# build-essential, gdb, *-dev, linux-headers-*
+#                   - the appliance does not compile anything; builds
+#                     happen on the development host and are copied in
+# snd-usb-caiaq's userspace (none) - see above
