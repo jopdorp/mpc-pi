@@ -159,6 +159,50 @@ Every "0 dropouts" result in the sections above measured the wrong thing. The
 cushion sweep (69/35/21) counted zeros that came from the prebuffer memset, not
 from the actual defect. Use underruns per second from here on.
 
+## Confirmed by ear, stage by stage
+
+Every step below was judged by listening, not by a counter, after counters had
+misled this investigation repeatedly.
+
+| What was played | Result |
+|-----------------|--------|
+| MAME's mixer output (`-wavwrite`) | CLEAN |
+| That same file through the Pi's own DAC | CLEAN |
+| `pw-play` of it WHILE MAME ran, same graph/device/quantum | CLEAN - both audible at once, MAME crackling beside it |
+| The bytes MAME hands PipeWire (`MAME_PIPEWIRE_CAPTURE_WAV`) | CRACKLES |
+
+Nothing shared can be at fault when two streams sharing all of it behave
+differently in the same instant. The corruption is inside MAME, between its
+mixer and the buffer it queues.
+
+The mechanism is `abuffer::get()` padding with the last sample - a buzz, not
+silence, which is why every zero-hunting measurement here reported success while
+the player heard a mess. The capture of the handover contains 146 such runs.
+
+Cushion depth reduces the rate without curing it:
+
+| cushion | underruns/s |
+|---------|-------------|
+| 4 quanta (256 frames) | 257 |
+| 8 quanta (512) | 256 |
+| 32 quanta (2048, 46ms) | 56 |
+
+A 46ms cushion cannot be drained 56 times a second by jitter, so something is
+actively preventing it from staying filled. The pacing loop is the suspect: it
+is already proven not to sleep (it spun a whole core while producing 5.9% of
+realtime before being bounded), and it is the only code that deliberately holds
+the producer back.
+
+Note also that unthrottled runs report ZERO underruns and still crackle, so
+there are likely two mechanisms, not one - the underruns are real damage in the
+throttled case, and something else is wrong when the emulator free-runs.
+
+### To get the handover capture
+
+`MAME_PIPEWIRE_CAPTURE_WAV` is written by `write_capture()`, which is only
+called from `stream_close()`. MAME ignores SIGTERM, so `systemctl stop` never
+produces the file. Use `-seconds_to_run N`, which exits cleanly on its own.
+
 ## Where it stands
 
 Stage 6a is closed (dropped cycles now 0). 6b and 6c are mitigated and
