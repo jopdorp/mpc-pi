@@ -98,7 +98,12 @@ CMD="$BOOT/cmdline.txt"
 # nohz_full stops the scheduler tick on those cores and rcu_nocbs moves
 # RCU callback work off them; without both, isolcpus still leaves
 # periodic interruptions that show up as occasional long cycles.
-WANT="isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 irqaffinity=0 threadirqs audit=0"
+# Single source of truth, shared with mpcpi-netboot - see
+# board/rpi5/cmdline-tuning.md for why that matters.
+TUNING_FILE="$(dirname "$0")/../../board/rpi5/cmdline-tuning"
+[ -r "$TUNING_FILE" ] || TUNING_FILE=/opt/mpc-pi-src/board/rpi5/cmdline-tuning
+WANT=$(tr -d '\n' < "$TUNING_FILE" 2>/dev/null)
+[ -n "$WANT" ] || { echo "  ERROR: no cmdline tuning file" >&2; exit 1; }
 line=$(tr -d '\n' < "$CMD")
 for key in isolcpus nohz_full rcu_nocbs irqaffinity threadirqs audit; do
 	line=$(printf '%s' "$line" | sed -E "s/(^| )$key(=[^ ]*)?//g")

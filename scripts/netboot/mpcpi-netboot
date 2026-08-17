@@ -200,11 +200,23 @@ start() {
 
 	# Root over NFS, and keep the appliance's own isolcpus/threadirqs
 	# tuning so a netbooted rig behaves like a flashed one.
+	# The tuning comes from board/rpi5/cmdline-tuning, NOT from a string
+	# typed here. It was typed here once - "isolcpus=2-3 threadirqs" -
+	# and because a netbooting Pi reads cmdline.txt over TFTP rather
+	# than from its root, that thin line silently overrode everything
+	# tune-realtime.sh wrote, for the whole life of this script. The
+	# board ran without nohz_full, rcu_nocbs, irqaffinity or audit=0,
+	# and with core 1 unisolated - the very core the audio interrupt is
+	# pinned to. See board/rpi5/cmdline-tuning.md.
+	local tuning
+	tuning=$(tr -d '\n' < "$REPO/board/rpi5/cmdline-tuning" 2>/dev/null)
+	[ -n "$tuning" ] || die "no $REPO/board/rpi5/cmdline-tuning"
 	{
 		printf 'console=serial0,115200 console=tty1 '
 		printf 'root=/dev/nfs nfsroot=%s:%s,vers=3,tcp rw ' "$SERVER_IP" "$NFS_ROOT"
-		printf 'ip=dhcp rootwait isolcpus=2-3 threadirqs\n'
+		printf 'ip=dhcp rootwait %s\n' "$tuning"
 	} > "$TFTP_ROOT/cmdline.txt"
+	echo "  cmdline tuning: $tuning"
 
 	if ! grep -qF "$NFS_ROOT" /etc/exports 2>/dev/null; then
 		echo "$NFS_ROOT $SUBNET(rw,sync,no_subtree_check,no_root_squash)" \
