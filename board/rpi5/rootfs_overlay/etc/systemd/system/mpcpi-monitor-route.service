@@ -1,0 +1,24 @@
+[Unit]
+Description=Link the instrument to the local monitoring output
+# Without this the appliance boots to a working graph, a running emulator and
+# SILENCE: the links from the emulator's outputs to the monitoring sink simply
+# do not exist. Nothing fails, nothing logs, and the only symptom is that you
+# cannot hear anything.
+#
+# PartOf the emulator so it re-runs whenever the emulator restarts: the
+# emulator's nodes are recreated with new ids each time, and the old links die
+# with the old nodes.
+After=mpcpi-emulator.service
+Requires=mpcpi-emulator.service
+PartOf=mpcpi-emulator.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The graph needs a moment after the emulator's nodes appear before they can
+# be linked. Retrying is cheaper than guessing a delay: the script is
+# idempotent, a duplicate link is refused rather than doubled.
+ExecStart=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8; do /usr/bin/mpc-monitor-route.sh link && exit 0; sleep 2; done; exit 1'
+
+[Install]
+WantedBy=multi-user.target

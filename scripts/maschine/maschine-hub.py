@@ -22,8 +22,31 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control_map                                        # noqa: E402
 
 import mk1_display                                          # noqa: E402
+
+# The display bridge, loaded here rather than inside main(). It was a local of
+# main(), which is fine for the packer defined there but invisible to Mk1's
+# methods - init_panel failed with "name 'disp' is not defined" the moment it
+# tried to initialise a panel. Its filename has a hyphen, so it cannot be a
+# plain import.
+import importlib.util as _ilu                               # noqa: E402
+_spec = _ilu.spec_from_file_location(
+    "disp", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "mpc-mk1-display.py"))
+disp = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(disp)
 import mk1_encoders                                      # noqa: E402
 import mk1_leds                                          # noqa: E402
+
+class _FrameFailed(Exception):
+    """One frame could not be delivered. Transient on this device."""
+
+
+# Screen refresh budget. A mixer readout does not need more, and the device
+# cannot sustain more alongside its input stream.
+FRAME_INTERVAL = float(os.environ.get("MPCPI_FRAME_INTERVAL", "0.1"))
+# How many consecutive failed frames mean the controller is really gone. One
+# is normal; a run of them is not.
+FRAME_FAIL_LIMIT = int(os.environ.get("MPCPI_FRAME_FAIL_LIMIT", "12"))
 
 MPC_SCREEN = 0        # left: the emulator's LCD
 DAW_SCREEN = 1        # right: our own panel renderer
@@ -353,6 +376,92 @@ class Mk1:
         self.encoders = mk1_encoders.EncoderTracker()
         self.frames = {}
         self.leds = mk1_leds.LedBank()
+        self.init_panel()
+
+    def release(self):
+        """Give the interface back, so the NEXT start can claim it.
+
+        Without this, a hub that exits for any reason leaves the interface
+        claimed and the following start fails with "cannot select altsetting 1:
+        Other error". That is what turned one bad frame into 27 restarts and a
+        progressively more wedged device - the failure was not the crash, it
+        was that nothing cleaned up after it.
+        """
+        try:
+            self.usb.util.release_interface(self.dev, 0)
+        except Exception:
+            pass
+        try:
+            self.usb.util.dispose_resources(self.dev)
+        except Exception:
+            pass
+
+    def init_panel(self):
+        """Initialise both displays and light the backlight.
+
+        THE HUB NEVER DID THIS. It only ever sent frames, and appeared to work
+        because the boot animation had initialised the panels moments earlier.
+        Unplug and replug the controller - or restart the hub after the
+        animation is long gone - and every frame goes into a panel that was
+        never switched on. The screens stay dark with nothing failing.
+        //
+        Writes drain first, because init commands are exactly what gets
+        accepted-and-discarded when the input queue is backed up. 22 commands
+        once, so the cost is irrelevant.
+        """
+        def w(data):
+            for _ in range(40):
+                for ep in mk1_leds.IN_ENDPOINTS:
+                    try:
+                        self.dev.read(ep, 512, timeout=2)
+                    except Exception:
+                        pass
+                try:
+                    self.dev.write(disp.EP_DISPLAY, data, timeout=250)
+                    return
+                except Exception:
+                    continue
+            raise RuntimeError("display init write failed")
+
+        # AUTO_MSG first: it enables the button and encoder reports, and
+        # sending it after the display init disturbs the display controller.
+        for _ in range(6):
+            try:
+                self.dev.write(mk1_leds.EP_OUT, bytes(mk1_leds.AUTO_MSG),
+                               timeout=300)
+                break
+            except Exception:
+                for ep in mk1_leds.IN_ENDPOINTS:
+                    try:
+                        self.dev.read(ep, 512, timeout=3)
+                    except Exception:
+                        pass
+
+        for index in (0, 1):
+            for pkt in mk1_display.packets(index, disp.CONTRAST):
+                if pkt is None:
+                    time.sleep(mk1_display.SLEEP_SECONDS)
+                else:
+                    w(pkt)
+
+        # The backlight is an LED byte: without it both panels stay dark
+        # however correct the frames are.
+        self.leds.all(mk1_leds.OFF)
+        self.leds.backlight(mk1_leds.BACKLIGHT_DEFAULT)
+        self.leds.flush(lambda ep, data: self._led_write(ep, data), force=True)
+
+    def _led_write(self, ep, data):
+        for _ in range(20):
+            for e in mk1_leds.IN_ENDPOINTS:
+                try:
+                    self.dev.read(e, 512, timeout=2)
+                except Exception:
+                    pass
+            try:
+                self.dev.write(ep, data, timeout=250)
+                return
+            except Exception:
+                continue
 
     def _interfaces(self):
         try:
@@ -543,12 +652,11 @@ def main():
         print("maschine-hub: %s" % exc, file=sys.stderr)
         return 1
 
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "disp", os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "mpc-mk1-display.py"))
-    disp = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(disp)
+    # Events decoded while pushing a frame are collected here and dispatched
+    # by the caller, so nothing read during a screen update is lost.
+    out = []
+    self_ref = [None]
+    router_ref = [router]
 
     def packer(dev, index, px, w, h):
         """Pack and send one screen, draining the input queue as it goes.
@@ -585,22 +693,58 @@ def main():
         # MPC_MK1_INVERT unable to serve either properly.
         frame = disp.pack_display(w, h, px, level=0x1F, invert=INVERT_SCREEN)
 
-        for pkt in mk1_display.frame_packets(index, frame, disp.FRAME_BYTES):
+        # The drain below DECODES what it reads instead of discarding it.
+        #
+        # This is what made input and display appear to break each other. A
+        # frame is 24 chunks and each one drains the IN endpoints first - which
+        # is required, or the device rejects the write - so a frame threw away
+        # up to 48 reports. Every button press that happened to land during a
+        # screen update was silently eaten, and screen updates are almost
+        # always happening. The hub emitted zero MIDI over thirty seconds of
+        # button pressing while decoding those same buttons correctly in
+        # isolation.
+        #
+        # Draining and decoding are the same operation. Anything else loses
+        # input.
+        def sip():
             for ep in mk1_leds.IN_ENDPOINTS:
                 try:
-                    dev.read(ep, 512, timeout=1)
+                    data = dev.read(ep, 512, timeout=1)
+                except Exception:
+                    continue
+                if not len(data):
+                    continue
+                try:
+                    if ep == EP_PADS:
+                        out.extend(self_ref[0]._pads(data, router_ref[0]))
+                    else:
+                        out.extend(self_ref[0]._ctrl(data, router_ref[0]))
                 except Exception:
                     pass
+
+        for pkt in mk1_display.frame_packets(index, frame, disp.FRAME_BYTES):
+            sip()
+            sent = False
             for _ in range(20):
                 try:
                     dev.write(disp.EP_DISPLAY, pkt, timeout=250)
+                    sent = True
                     break
                 except Exception:
-                    for ep in mk1_leds.IN_ENDPOINTS:
-                        try:
-                            dev.read(ep, 512, timeout=3)
-                        except Exception:
-                            pass
+                    sip()
+            if not sent:
+                # Report, do not raise on a single chunk.
+                #
+                # Raising here produced a doom loop: 27 restarts, and each
+                # dying process left the interface claimed, so the next start
+                # failed with "cannot select altsetting 1" and the device got
+                # progressively more wedged. The screens appeared for a moment
+                # each cycle and vanished.
+                #
+                # A transient failure is normal on this device. Only sustained
+                # failure means the controller is really gone, and that is
+                # counted by the caller.
+                raise _FrameFailed("chunk rejected after 20 attempts")
 
     fifo = None
     if os.path.exists(args.fifo):
@@ -622,6 +766,13 @@ def main():
             print("maschine-hub: no PC MIDI at %s" % args.pc_midi,
                   file=sys.stderr)
 
+    last_frame = 0.0
+    frame_fails = 0
+    # Release the interface no matter how this ends - clean return, exception,
+    # or SIGTERM from systemctl restart. This is the difference between a
+    # restart that works and a restart that cannot open the device.
+    import atexit
+    atexit.register(mk1.release)
     while True:
         for events in (mk1.poll(router),):
             for kind, payload in events:
@@ -637,8 +788,47 @@ def main():
                         pc.write(encode_midi(payload))
                     except OSError:
                         pc = None
-        mk1.push_screen(0, args.left, packer)
-        mk1.push_screen(1, args.right, packer)
+        # Screens at a BUDGET, not as fast as the loop spins.
+        #
+        # This pushed both screens every 2ms - up to 500 frames a second,
+        # 12,000 USB transfers, on a device that is also streaming pad and
+        # encoder reports and that fails writes whenever its input queue backs
+        # up. The input path and the display path were starving each other,
+        # which is why fixing one kept breaking the other.
+        #
+        # Ten frames a second is more than a mixer readout needs, and
+        # push_screen already skips an unchanged frame, so the real rate is
+        # lower still.
+        now = time.monotonic()
+        if now - last_frame >= FRAME_INTERVAL:
+            last_frame = now
+            self_ref[0] = mk1
+            try:
+                mk1.push_screen(0, args.left, packer)
+                mk1.push_screen(1, args.right, packer)
+                frame_fails = 0
+            except _FrameFailed as e:
+                frame_fails += 1
+                if frame_fails >= FRAME_FAIL_LIMIT:
+                    print("maschine-hub: %d consecutive frame failures; "
+                          "the controller is gone" % frame_fails,
+                          file=sys.stderr)
+                    return 1
+        # Dispatch anything decoded while a frame was being pushed. Without
+        # this the events are collected and dropped, which is no better than
+        # discarding the reports.
+        if out:
+            for kind, payload in out:
+                if kind == "cmd" and fifo is not None:
+                    os.write(fifo, (payload + "\n").encode())
+                elif kind == "midi" and midi is not None:
+                    midi.write(encode_midi(payload))
+                    if pc is not None:
+                        try:
+                            pc.write(encode_midi(payload))
+                        except OSError:
+                            pc = None
+            del out[:]
         time.sleep(0.002)
 
 

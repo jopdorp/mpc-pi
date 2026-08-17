@@ -39,16 +39,41 @@ link_pair() {
 
 case "${1:-link}" in
 link)
-	# The emulator's own outputs. :outputs is the main pair; :speaker is the
-	# MPC's internal speaker; :fdc is the floppy drive, which is a genuine
-	# part of the instrument's sound and deliberately included.
-	for src in ":outputs" ":speaker"; do
+	# ONLY the main stereo pair.
+	#
+	# The emulator exposes several sources - :outputs (main L/R), :speaker (the
+	# MPC's internal monitor speaker) and :fdc (the floppy drive). Linking more
+	# than one SUMS them into the same two channels, which is not monitoring,
+	# it is a mix nobody asked for: the internal speaker duplicates the main
+	# output and the floppy adds mechanical noise on top.
+	#
+	# This project has been burnt by exactly that before - 44 emulator links
+	# summed onto a measurement tone's channels and produced thousands of
+	# apparent defects that were entirely the routing.
+	#
+	# Set MPCPI_MONITOR_SOURCES to override, e.g. ":outputs :speaker".
+	for src in ${MPCPI_MONITOR_SOURCES:-":outputs"}; do
 		$R pw-link -o 2>/dev/null | grep -q "^$src:" && link_pair "$src"
 	done
-	# Ardour's master, when the session is up.
-	master=$($R pw-link -o 2>/dev/null | grep -iE "^(Ardour|ardour).*master" |
-		head -1 | cut -d: -f1)
-	[ -n "$master" ] && link_pair "$master"
+	# Ardour's master, alongside the MPC. Both instruments into the one stereo
+	# pair is deliberate here: it is the monitor mix - the MPC and the DAW are
+	# the two things being played, and hearing both is the point.
+	#
+	# That is a different thing from what the source filter above prevents.
+	# There, :outputs and :speaker are the SAME audio twice plus floppy noise,
+	# which is duplication. Here they are two separate instruments.
+	#
+	# Set MPCPI_MONITOR_ARDOUR=0 to hear only the MPC.
+	if [ "${MPCPI_MONITOR_ARDOUR:-1}" != "0" ]; then
+		master=$($R pw-link -o 2>/dev/null |
+			grep -iE "ardour.*(master|Master)" | head -1 | cut -d: -f1)
+		if [ -n "$master" ]; then
+			link_pair "$master"
+			printf '  + ardour master: %s\n' "$master"
+		else
+			printf '  (no ardour master port yet)\n'
+		fi
+	fi
 	printf 'monitoring on %s\n' "$sink"
 	$R pw-link -l 2>/dev/null | grep -c "$SINK_MATCH" |
 		sed 's/^/  links: /'
