@@ -9,7 +9,15 @@ After=basic.target
 ConditionPathExistsGlob=/sys/bus/usb/devices/*/idVendor
 
 [Service]
-Type=oneshot
+# Type=simple, NOT oneshot. With oneshot, multi-user.target waits for the
+# process to EXIT - and this one runs for about seven seconds by design. It
+# added 9.4s to the measured boot: basic.target was reached at 3.2s and ssh
+# at 3.2s, while multi-user.target sat at 12.7s waiting for an animation.
+#
+# "Do not delay anything" was the intent from the start; oneshot is simply
+# the wrong type for a process that is supposed to run alongside the rest of
+# the boot rather than in front of it.
+Type=simple
 # Core 0, deliberately. Cores 1-3 are isolated for audio, and a boot
 # animation has no business competing with the graph for them.
 CPUAffinity=0
@@ -19,7 +27,6 @@ ExecStart=/opt/mpc-pi-src/scripts/maschine/mk1-boot-animation.py
 # process, that is not a boot failure.
 SuccessExitStatus=0 1
 TimeoutStartSec=25
-# Do not delay anything waiting for it to finish.
 RemainAfterExit=no
 
 [Install]
