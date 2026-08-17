@@ -32,6 +32,14 @@ ExecStart=/usr/bin/taskset --cpu-list 3 /usr/bin/chrt --rr 20 \
 LimitRTPRIO=95
 LimitMEMLOCK=infinity
 LimitNICE=-19
+# The MPC's LCD, exported for the Maschine's left screen. Patch 0039 makes
+# this opt-in via the environment: without it the emulator runs perfectly and
+# /dev/shm/mpc-lcd never appears, so the left screen has no source and stays
+# blank with nothing failing anywhere.
+#
+# Written only on CHANGED frames (patch 0033's dirty detector), which is
+# exactly the cadence a bulk USB display wants.
+Environment=MAME_MPC_LCD_EXPORT=/dev/shm/mpc-lcd
 Environment=SDL_VIDEODRIVER=dummy
 Environment=XDG_RUNTIME_DIR=/run/user/1001
 Restart=on-failure

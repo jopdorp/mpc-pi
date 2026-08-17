@@ -302,7 +302,44 @@ class Mk1:
                     self.dev.detach_kernel_driver(n)
             except (usb.core.USBError, NotImplementedError):
                 pass
-        self.dev.set_configuration()
+        # Claim and select the altsetting FIRST; set_configuration only as a
+        # fallback. Every open that called set_configuration first has
+        # eventually failed with LIBUSB_ERROR_OTHER or EIO, and every one that
+        # went straight to claim + altsetting has worked. This class still had
+        # the old order, so the hub crash-looped on "USBError [Errno 5]
+        # Input/Output Error" while the animation - which was fixed - worked
+        # fine on the same device.
+        #
+        # ALTSETTING 1 is mandatory: in the default altsetting the pad
+        # endpoint 0x84 and the display endpoint 0x08 do not exist at all.
+        last = None
+        for attempt in range(3):
+            if attempt == 1:
+                try:
+                    self.dev.set_configuration()
+                except usb.core.USBError:
+                    pass
+            elif attempt == 2:
+                try:
+                    usb.util.release_interface(self.dev, 0)
+                except usb.core.USBError:
+                    pass
+                time.sleep(0.4)
+            try:
+                usb.util.claim_interface(self.dev, 0)
+            except usb.core.USBError:
+                pass
+            try:
+                self.dev.set_interface_altsetting(
+                    interface=0, alternate_setting=mk1_leds.ALTSETTING)
+                last = None
+                break
+            except usb.core.USBError as e:
+                last = e
+        if last is not None:
+            raise RuntimeError(
+                "cannot select altsetting %d: %s - unplug and replug the "
+                "controller" % (mk1_leds.ALTSETTING, last))
         self.pad_state = [0] * 16
         self.buttons = 0
         self.encoders = mk1_encoders.EncoderTracker()
