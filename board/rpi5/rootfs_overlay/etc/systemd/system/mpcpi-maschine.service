@@ -13,10 +13,11 @@ Wants=mpcpi-daw-ui.service
 ConditionPathExistsGlob=/sys/bus/usb/devices/*/idVendor
 
 [Service]
-# Log every dispatched control event to the journal. On by default: this is a
-# prototype instrument, the events are low-rate, and its absence cost four
-# rounds of diagnosing "the buttons do nothing" by reading code.
-Environment=MPCPI_HUB_TRACE=1
+# MPCPI_HUB_TRACE=1 logs every dispatched control event to the journal. OFF by
+# default: it is invaluable for "the buttons do nothing" but it writes a journal
+# line per event from inside the frame loop, and the screens visibly slowed.
+# Enable it with `systemctl edit mpcpi-maschine` when diagnosing input.
+Environment=MPCPI_FRAME_INTERVAL=0.0167
 Type=simple
 # Core 0. It drives screens and lamps over USB and must never compete with
 # the graph on the isolated cores: a display frame is 24 USB transfers and

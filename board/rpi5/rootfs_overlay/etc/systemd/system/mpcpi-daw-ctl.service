@@ -1,0 +1,38 @@
+[Unit]
+Description=DAW control - reads /run/daw-ctl.fifo, maintains the screen state
+# This unit existed only as generated text inside scripts/pios/provision.sh, so
+# it was never in the overlay and never installed on the card. The consequences
+# were both visible and misattributed for hours:
+#
+#   * Nothing read /run/daw-ctl.fifo, so every DAW command the Maschine sent
+#     went to a pipe with no reader. That is also the ENXIO/EPIPE case that used
+#     to kill the hub outright (see maschine-hub.py's _deliver_cmd).
+#   * Nothing wrote /dev/shm/daw-ui-state.json, so the panel renderer had no
+#     state to draw. It dutifully rendered its built-in sample page once and
+#     then skipped every frame as unchanged - which looked exactly like "the
+#     right screen is frozen" and "the screen only updates once a second".
+#
+# The renderer is downstream of this: daw-ctl writes the state, the renderer
+# turns it into a frame, the hub pushes the frame. All three have to run.
+After=mpcpi-daw-ui.service mpcpi-daw.service
+Wants=mpcpi-daw-ui.service
+
+[Service]
+Type=simple
+User=mpc
+Group=mpc
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+# The FIFO has to exist before anything opens it for writing: the hub tolerates
+# its absence now, but a control surface whose commands vanish for the first
+# seconds of every boot is not something to leave to ordering luck.
+# '+' runs this step as root even though the service itself is User=mpc.
+# Without it the chown fails - mpc cannot chown - and the whole unit refused to
+# start on ExecStartPre.
+ExecStartPre=+/bin/sh -c 'test -p /run/daw-ctl.fifo || mkfifo -m 0660 /run/daw-ctl.fifo; chown mpc:mpc /run/daw-ctl.fifo'
+ExecStart=/usr/bin/python3 /opt/mpc-pi-src/scripts/daw/daw-ctl \
+    --fifo /run/daw-ctl.fifo --state /dev/shm/daw-ui-state.json
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

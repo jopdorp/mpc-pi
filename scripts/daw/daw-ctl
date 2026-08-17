@@ -242,10 +242,24 @@ class Daw:
         }
 
     def write_state(self, path=STATE):
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.ui_state(), f)
-        os.replace(tmp, path)
+        # The temp name carries the pid. With a fixed ".tmp" two instances -
+        # the service and someone running this by hand to see what it does -
+        # write the same temp path, and whichever renames second dies with
+        # FileNotFoundError because the first already moved it away. The
+        # write-then-rename is there to keep the reader from ever seeing a
+        # half-written frame; it should not also be a way to crash.
+        tmp = "%s.%d.tmp" % (path, os.getpid())
+        try:
+            with open(tmp, "w") as f:
+                json.dump(self.ui_state(), f)
+            os.replace(tmp, path)
+        except OSError:
+            # A screen that misses one frame is not a reason to take the
+            # control process down; the next command writes another.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def self_test():
