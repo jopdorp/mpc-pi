@@ -39,6 +39,8 @@ LOGFILE="/srv/tftp/mpcpi-netboot.log"   # world-readable: the
                                         # diagnosis needs no root
 IFACE_FILE="/etc/mpcpi-netboot.iface"
 
+NM_DROPIN=/etc/NetworkManager/conf.d/99-mpcpi-netboot.conf
+
 die() { echo "mpcpi-netboot: $*" >&2; exit 1; }
 
 # The Pi 5 boots from EEPROM: it needs a kernel, the DTBs, the overlays
@@ -96,7 +98,21 @@ status() {
 	echo "interface : ${IFACE:-none found}"
 	if [ -n "$IFACE" ]; then
 		echo "carrier   : $(cat "/sys/class/net/$IFACE/carrier" 2>/dev/null || echo '?') (1 = cable present)"
-		echo "address   : $(ip -4 -br addr show "$IFACE" 2>/dev/null | awk '{print $3}')"
+		addr=$(ip -4 -br addr show "$IFACE" 2>/dev/null | awk '{print $3}')
+		if [ "$addr" = "$SERVER_IP/24" ]; then
+			echo "address   : $addr"
+		elif [ -z "$addr" ]; then
+			# The exact shape of the outage this check exists for.
+			echo "address   : NONE - the server has no address."
+			echo "            The board can netboot only when $IFACE holds"
+			echo "            $SERVER_IP. Re-run: sudo $0 start"
+			nmcli -t -f DEVICE,STATE device 2>/dev/null |
+				grep "^$IFACE:" | grep -q ":unmanaged" ||
+				echo "            NetworkManager still manages $IFACE - it took the"
+			echo "            address once before; start writes $NM_DROPIN to stop that."
+		else
+			echo "address   : $addr - WRONG, expected $SERVER_IP/24"
+		fi
 	fi
 	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
 		echo "dnsmasq   : running (pid $(cat "$PIDFILE"))"
@@ -145,6 +161,26 @@ start() {
 	fi
 
 	echo "using interface $IFACE"
+
+	# Take the interface away from NetworkManager BEFORE addressing it.
+	# `ip addr add` is a hand-placed address, and NetworkManager flushes
+	# hand-placed addresses the moment it decides to manage a link - on a
+	# carrier bounce, on a service restart, on resume from suspend. That
+	# is not hypothetical: this server ran for a day, the link flapped
+	# once, and NM took enp45s0 back to "connecting (getting IP
+	# configuration)" - trying to OBTAIN a lease on the interface whose
+	# whole job is to SERVE them. The address vanished, dnsmasq kept
+	# running and kept logging, and the board netbooted into nothing for
+	# hours while every symptom pointed at the board.
+	if command -v nmcli >/dev/null 2>&1; then
+		mkdir -p /etc/NetworkManager/conf.d
+		printf '# %s serves DHCP/TFTP for the Pi; NM must not touch it.\n[keyfile]\nunmanaged-devices=interface-name:%s\n' \
+			"$IFACE" "$IFACE" > "$NM_DROPIN"
+		nmcli device set "$IFACE" managed no >/dev/null 2>&1
+		nmcli general reload conf >/dev/null 2>&1
+		echo "  NetworkManager told to leave $IFACE alone ($NM_DROPIN)"
+	fi
+
 	ip addr flush dev "$IFACE" 2>/dev/null
 	ip addr add "$SERVER_IP/24" dev "$IFACE" || die "could not set $SERVER_IP"
 	ip link set "$IFACE" up
