@@ -1,0 +1,26 @@
+[Unit]
+Description=Supernova power-on animation on the Maschine's screens and lamps
+# basic.target, NOT network-online.target: this board netboots during
+# development, where network-online never activates and anything ordered
+# after it is silently never queued.
+After=basic.target
+# The controller may not be plugged in. A missing device must not hold up
+# an instrument that works perfectly well without its control surface.
+ConditionPathExistsGlob=/sys/bus/usb/devices/*/idVendor
+
+[Service]
+Type=oneshot
+# Core 0, deliberately. Cores 1-3 are isolated for audio, and a boot
+# animation has no business competing with the graph for them.
+CPUAffinity=0
+Nice=5
+ExecStart=/opt/mpc-pi-src/scripts/maschine/mk1-boot-animation.py
+# It is decoration. If the Maschine is absent, asleep, or held by another
+# process, that is not a boot failure.
+SuccessExitStatus=0 1
+TimeoutStartSec=25
+# Do not delay anything waiting for it to finish.
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

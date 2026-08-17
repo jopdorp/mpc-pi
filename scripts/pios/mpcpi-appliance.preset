@@ -15,6 +15,10 @@
 enable mpcpi-latency-hold.service
 enable mpcpi-irq-affinity.service
 enable mpcpi-netconsole.service
+# Decoration, and enabled on purpose: an instrument that shows nothing on
+# power-on feels broken while it boots. It runs on core 0 at Nice=5 and
+# blocks nothing.
+enable mpcpi-boot-animation.service
 enable ssh.service
 enable systemd-networkd.service
 enable systemd-resolved.service
