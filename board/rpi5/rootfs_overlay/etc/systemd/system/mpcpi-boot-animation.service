@@ -1,11 +1,23 @@
 [Unit]
 Description=Supernova power-on animation on the Maschine's screens and lamps
-# basic.target, NOT network-online.target: this board netboots during
-# development, where network-online never activates and anything ordered
-# after it is silently never queued.
-After=basic.target
-# The controller may not be plugged in. A missing device must not hold up
-# an instrument that works perfectly well without its control surface.
+# As EARLY as possible: the kernel finishes at ~1.1s and this used to start
+# at 4.3s, leaving three seconds of dead panel on a machine whose whole job
+# is to look alive when you switch it on.
+#
+# DefaultDependencies=no drops the implicit ordering after basic.target,
+# which is what held it until 3.2s. It genuinely needs almost nothing: the
+# root filesystem (mounted before systemd runs) and udev having enumerated
+# USB. In particular it does NOT need local-fs.target, which waits for
+# /boot/firmware and its fsck - 2.9s of waiting for a partition this never
+# reads.
+DefaultDependencies=no
+Wants=systemd-udevd.service
+After=systemd-udevd.service
+# Do not hold up shutdown for a decoration.
+Conflicts=shutdown.target
+Before=shutdown.target
+# The controller may not be plugged in, and an instrument works perfectly
+# well without its control surface.
 ConditionPathExistsGlob=/sys/bus/usb/devices/*/idVendor
 
 [Service]
@@ -30,4 +42,4 @@ TimeoutStartSec=25
 RemainAfterExit=no
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=sysinit.target

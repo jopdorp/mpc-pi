@@ -518,9 +518,19 @@ class Screens:
         import usb.util
         self.core = usb.core
         self.util = usb.util
-        self.dev = usb.core.find(idVendor=0x17CC, idProduct=0x0808)
+        # Wait briefly for enumeration. This unit deliberately starts as
+        # early as systemd can run it - right after udev - so the device may
+        # not be on the bus yet. Exiting immediately would mean the animation
+        # is skipped on exactly the boots it is meant for.
+        deadline = time.time() + float(os.environ.get("MPC_MK1_WAIT", "6"))
+        self.dev = None
+        while True:
+            self.dev = usb.core.find(idVendor=0x17CC, idProduct=0x0808)
+            if self.dev is not None or time.time() >= deadline:
+                break
+            time.sleep(0.15)
         if self.dev is None:
-            raise SystemExit("no Maschine MK1 (17cc:0808)")
+            raise SystemExit("no Maschine MK1 (17cc:0808) after waiting")
         try:
             if self.dev.is_kernel_driver_active(0):
                 self.dev.detach_kernel_driver(0)

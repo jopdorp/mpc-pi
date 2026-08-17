@@ -87,34 +87,56 @@ KNOB_LABEL = ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8",
               "VOL", "TEMPO", "SWING"]
 
 
-def bars_frame(values, moved):
-    """Eleven vertical bars, one per logical encoder.
+def bars_frame(values, moved, first=0, count=4):
+    """Four big bars for the four knobs physically above this screen.
 
-    Bar 1 is display knob 1, bar 9-11 are VOLUME/TEMPO/SWING. Turning the
-    leftmost knob must move the leftmost bar; anything else is a mapping
-    error you can see at a glance.
+    This is the whole point of the layout: knobs 1-4 sit under the LEFT
+    screen and 5-8 under the RIGHT, so drawing four bars per screen makes
+    the check spatial - turn the knob directly above a bar and that bar
+    should move. An eleven-bar strip crammed onto one screen proves the
+    decoder works but says nothing about which knob is which, which is the
+    only thing still unverified.
+
+    Each bar carries its own number in tick marks along the top, so a bar
+    can be identified even if the order turns out to be wrong.
     """
     lit = {}
     W, H = ANIM.W, ANIM.H
-    n = len(values)
-    slot = W // n
-    for i, v in enumerate(values):
-        x0 = i * slot + 2
-        wide = slot - 4
-        # Absolute angle 0..999, scaled to the panel height.
-        h = int((v / float(E.FULL_TURN)) * (H - 12))
-        level = 0x1F if i in moved else 0x12
+    slot = W // count
+    for i in range(count):
+        idx = first + i
+        v = values[idx] if idx < len(values) else 0
+        x0 = i * slot + 4
+        wide = slot - 10
+        active = idx in moved
+
+        # Tick marks: i+1 blocks along the top edge, so the bar is labelled
+        # on the panel rather than in my terminal.
+        for t in range(i + 1):
+            for x in range(x0 + t * 7, x0 + t * 7 + 5):
+                for y in (1, 2, 3):
+                    ANIM.add(lit, x, y, 0x1F)
+
+        # Frame the bar so an empty one is still visible.
         for x in range(x0, x0 + wide):
-            # baseline so every bar is visible even at zero
-            ANIM.add(lit, x, H - 2, 0x0C)
-            for y in range(H - 3, H - 3 - h, -1):
+            ANIM.add(lit, x, H - 1, 0x14)
+            ANIM.add(lit, x, 7, 0x0A)
+        for y in range(7, H):
+            ANIM.add(lit, x0, y, 0x0A)
+            ANIM.add(lit, x0 + wide - 1, y, 0x0A)
+
+        # Absolute angle 0..999 as height, filled solid.
+        h = int((v / float(E.FULL_TURN)) * (H - 12))
+        level = 0x1F if active else 0x15
+        for x in range(x0 + 1, x0 + wide - 1):
+            for y in range(H - 2, H - 2 - h, -1):
                 ANIM.add(lit, x, y, level)
-        # A tick above a bar that just moved, so the eye finds it.
-        if i in moved:
-            for x in range(x0, x0 + wide):
-                ANIM.add(lit, x, 1, 0x1F)
-                ANIM.add(lit, x, 2, 0x1F)
     return ANIM.pack_sparse(lit)
+
+
+def masters_frame(values, moved):
+    """The three master knobs, drawn the same way on demand."""
+    return bars_frame(values, moved, first=8, count=3)
 
 
 def pads_frame(pressures):
@@ -171,93 +193,134 @@ def main():
     seen_knobs = set()
     seen_pads = set()
 
-    print("Monitoring for %ds. Press buttons, turn knobs, hit pads." % seconds)
-    print("Each press should light THAT control's own lamp; each knob should")
-    print("move ITS OWN bar on the left screen. Report anything mismatched.\n")
+    print("Monitoring for %ds.\n" % seconds)
+    print("LEFT screen  = four bars for the four knobs above it (1,2,3,4)")
+    print("RIGHT screen = four bars for the four knobs above it (5,6,7,8)")
+    print("Tick marks along the top of each bar are its number.\n")
+    print("Turn the knob directly ABOVE a bar. If that bar moves, the map is")
+    print("right. If a different one moves, tell me which bar moved for which")
+    print("knob and I will reorder ERP_BYTES.\n")
+
+    def handle(ep, data):
+        """Decode one report. Returns True if a lamp changed."""
+        nonlocal buttons
+        dirty = False
+        if ep == 0x84:
+            for i in range(0, min(62, len(data) - 1), 2):
+                lo, hi = data[i], data[i + 1]
+                pad = ((hi & 0xF0) >> 4) + 1
+                pressure = ((hi & 0x0F) << 8) | lo
+                if not 1 <= pad <= 16:
+                    continue
+                was = pad_state[pad]
+                pad_state[pad] = pressure
+                if pressure > PAD_THRESHOLD >= was:
+                    print("PAD  %2d   pressure %4d" % (pad, pressure))
+                    seen_pads.add(pad)
+                    bank.set_pad(pad_input_to_led(pad), HOLD_LEVEL)
+                    dirty = True
+                elif pressure <= PAD_THRESHOLD < was:
+                    bank.set_pad(pad_input_to_led(pad), L.OFF)
+                    dirty = True
+            return dirty
+        if not len(data):
+            return False
+        if data[0] == 0x04:
+            if len(data) > 6 and not (data[6] & 0xC0):
+                return False
+            bits = int.from_bytes(bytes(data[1:7]), "little")
+            changed = bits ^ buttons
+            buttons = bits
+            for pos in range(42):
+                if not (changed >> pos) & 1:
+                    continue
+                name = BUTTON_NAMES[pos] if pos < len(BUTTON_NAMES) else None
+                down = bool((bits >> pos) & 1)
+                if name is None:
+                    continue
+                print("BTN  bit %2d  %-16s %s"
+                      % (pos, name, "DOWN" if down else "up"))
+                if down:
+                    seen_buttons.add(name)
+                lamp = BUTTON_LAMP.get(name)
+                if lamp:
+                    bank.set(lamp, HOLD_LEVEL if down else L.OFF)
+                    dirty = True
+        elif data[0] == 0x02:
+            for logical, delta, pos in tracker.update(data):
+                enc_values[logical] = pos
+                moved[logical] = time.time()
+                seen_knobs.add(logical)
+                print("KNOB %-6s %+4d  -> position %3d/999"
+                      % (E.NAMES[logical], delta, pos))
+        return dirty
+
+    def pump(rounds=1):
+        """Read what is pending and DECODE it. Returns True if lamps changed.
+
+        This is the drain, and it keeps what it reads. The device refuses
+        output while input is queued, so frames cannot be sent without
+        draining first - but an earlier version called a discarding drain
+        here and silently ate every button and encoder report, which looked
+        like a dead decoder. Draining and decoding are the same operation.
+        """
+        dirty = False
+        for _ in range(rounds):
+            got = False
+            for ep in (0x81, 0x84):
+                try:
+                    data = s.dev.read(ep, 512, timeout=3)
+                except s.core.USBError:
+                    continue
+                got = True
+                dirty = handle(ep, data) or dirty
+            if not got:
+                break
+        return dirty
+
+    def send_pumped(index, frame):
+        """Send a frame, emptying the input queue before EVERY chunk.
+
+        Draining once per frame is not enough. A frame is 24 writes and the
+        pad stream delivers a report every ~24ms, so the queue refills
+        part-way through and the remaining chunks are accepted and silently
+        discarded - the panel then shows nothing at all, with no error.
+        Only mk1-screen-test.py ever displayed anything, and it is the only
+        thing that drained before every single write.
+        """
+        d = index << 1
+        def w(data):
+            pump(rounds=1)
+            s.w(data)
+        w(bytes([d, 0x00, 0x03, 0x75, 0x00, 0x3F]))
+        w(bytes([d, 0x00, 0x03, 0x15, 0x00, 0x54]))
+        w(bytes([d, 0x01, 0xF7, 0x5C]) + frame[0:502])
+        off = 502
+        while off + 502 <= ANIM.FRAME_BYTES - 338:
+            w(bytes([d + 1, 0x01, 0xF6]) + frame[off:off + 502])
+            off += 502
+        w(bytes([d + 1, 0x01, 0x52]) + frame[off:ANIM.FRAME_BYTES])
 
     end = time.time() + seconds
     last_draw = 0.0
-    led_dirty = False
     while time.time() < end:
-        # Reading is also what keeps output flowing: this device refuses
-        # writes while input is queued.
-        for ep in (0x81, 0x84):
-            try:
-                data = s.dev.read(ep, 512, timeout=4)
-            except s.core.USBError:
-                continue
-
-            if ep == 0x84:
-                for i in range(1, min(63, len(data) - 1), 2):
-                    hi, lo = data[i], data[i + 1]
-                    pad = ((hi & 0xF0) >> 4) + 1
-                    pressure = ((hi & 0x0F) << 8) | lo
-                    if not 1 <= pad <= 16:
-                        continue
-                    was = pad_state[pad]
-                    pad_state[pad] = pressure
-                    if pressure > PAD_THRESHOLD >= was:
-                        print("PAD  %2d   pressure %4d" % (pad, pressure))
-                        seen_pads.add(pad)
-                        bank.set_pad(pad_input_to_led(pad), HOLD_LEVEL); led_dirty = True
-                    elif pressure <= PAD_THRESHOLD < was:
-                        bank.set_pad(pad_input_to_led(pad), L.OFF); led_dirty = True
-                continue
-
-            if not len(data):
-                continue
-            if data[0] == 0x04:
-                # 0xC0, not 0x40: this unit sets the status bit at 0x80.
-                if len(data) > 6 and not (data[6] & 0xC0):
-                    continue
-                bits = int.from_bytes(bytes(data[1:7]), "little")
-                changed = bits ^ buttons
-                buttons = bits
-                for pos in range(42):
-                    if not (changed >> pos) & 1:
-                        continue
-                    name = BUTTON_NAMES[pos] if pos < len(BUTTON_NAMES) else None
-                    down = bool((bits >> pos) & 1)
-                    if name is None:
-                        print("BIT  %2d   %s  <-- UNMAPPED (bit 8 is unused)"
-                              % (pos, "down" if down else "up"))
-                        continue
-                    print("BTN  bit %2d  %-16s %s" %
-                          (pos, name, "DOWN" if down else "up"))
-                    if down:
-                        seen_buttons.add(name)
-                    lamp = BUTTON_LAMP.get(name)
-                    if lamp:
-                        bank.set(lamp, HOLD_LEVEL if down else L.OFF)
-                        led_dirty = True
-            elif data[0] == 0x02:
-                for logical, delta, pos in tracker.update(data):
-                    enc_values[logical] = pos
-                    moved[logical] = time.time()
-                    seen_knobs.add(logical)
-                    print("KNOB %-6s %+4d  -> position %3d/999"
-                          % (E.NAMES[logical], delta, pos))
-                    led_dirty = True
-
-        # Lamps first, and immediately. Two 33-byte writes cost about a
-        # millisecond; the screens cost ~50ms for 48 transfers. Flushing
-        # LEDs on the screen timer made every button feel 150ms late, which
-        # on an instrument is the difference between responsive and broken.
-        if led_dirty:
+        # Lamps first and immediately: two 33-byte writes, about a
+        # millisecond, against ~50ms for a pair of screens.
+        if pump(rounds=2):
             bank.flush(lambda ep, d: s._led(ep, d))
-            led_dirty = False
 
         now = time.time()
-        if now - last_draw > 0.14:
+        if now - last_draw > 0.16:
             last_draw = now
             recent = {i for i, t in moved.items() if now - t < 0.8}
-            # NO s.drain() here. Draining reads the IN endpoints and throws
-            # the data away - including every button and encoder report,
-            # which is why the first run of this monitor showed pads working
-            # and no buttons or knobs at all. The read loop above is already
-            # the drain; it just keeps what it reads.
-            s.send(0, bars_frame(enc_values, recent))
-            s.send(1, pads_frame(pad_state))
+            # Empty the queue right before writing, decoding as we go. The
+            # pad stream is continuous, so without this the queue is never
+            # empty and every frame is accepted and thrown away by the
+            # device - screens stay dark with no error anywhere.
+            if pump(rounds=8):
+                bank.flush(lambda ep, d: s._led(ep, d))
+            send_pumped(0, bars_frame(enc_values, recent, first=0, count=4))
+            send_pumped(1, bars_frame(enc_values, recent, first=4, count=4))
 
     print("\n--- coverage ---")
     print("buttons seen : %d of 41 mappable" % len(seen_buttons))
