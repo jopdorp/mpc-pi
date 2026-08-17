@@ -4,6 +4,10 @@ Description=MPC2000XL emulator
 # startup and exits if it cannot.
 After=basic.target sound.target user@1001.service
 Wants=user@1001.service
+# [Unit], not [Service]: this sat in [Service] for several boots, where
+# systemd logged "Unknown key 'BindsTo' in section [Service], ignoring" and
+# the binding simply did not exist.
+BindsTo=user@1001.service
 # ROMs are not redistributable and may simply be absent on a fresh card. An
 # instrument that cannot find them should not spin in a restart loop.
 ConditionPathExists=/opt/mpc-roms
@@ -86,6 +90,83 @@ Environment=MPCPI_PROJECT=/opt/mpc-media/mpc-tutor-logic-mpc2000xl.img
 #
 # NOTE: these are enabled by PRESENCE, per docs/mame-patch-stack.md - setting
 # one to 0 still enables it. To disable, remove the line.
+# MIDI_EVENT_DRIVEN and MIDI_POLL_HZ are REMOVED.
+#
+# The wav render that produced audio from pads (peak 30918) had neither. The
+# live emulator had both, received 165 note-ons, and played nothing. They are
+# the only difference in the MIDI path between the two, and this same path was
+# already seen dropping bytes: "MPC fast-pad input queue overflow".
+#
+# Notes arriving at the port is not the same as the firmware consuming them.
+# BOTH variables, together. run-mpc.sh's MPC_MIDI_INPUT_MODE=internal-pads
+# sets MAME_MPC_MIDI_FAST_INPUT=1 *and* MAME_MPC_MIDI_INTERNAL_PADS=1; this
+# unit hand-copied only the second one. INTERNAL_PADS says where a note goes,
+# FAST_INPUT is the path that delivers the bytes, so on its own INTERNAL_PADS
+# is inert: notes arrived at VirMIDI (165 of them, counted with aseqdump) and
+# produced silence, while the same project on the development host - which goes
+# through run-mpc.sh and therefore got both - played the pads audibly.
+#
+# The lesson is about the copy, not the flag: an env var transcribed out of a
+# launcher into a unit file loses whatever else that launcher set alongside it.
+# --- the fast paths, in the names the BINARY reads ---------------------
+#
+# Every one of these is compiled into /usr/local/bin/mpc (checked with
+# `strings`), and every one of them was OFF on the appliance while the unit
+# set launcher-side names - MPC_V53_DATA_MODE=window, MPC_DSP_READ_MODE=window,
+# MPC_PANEL_TIMER_COUNTDOWN=countdown - that only run-mpc.sh understands. The
+# emulator therefore ran the reference interpreter at ~1.1x realtime, pinned to
+# 92% of one core with no headroom, and the USB codec underran continuously no
+# matter how the audio buffers were tuned. The optimisation work was all in the
+# binary and none of it was in effect.
+#
+# This is the third instance of the same mistake in this one unit (see
+# MAME_MPC_MIDI_FAST_INPUT and the audio-path block above): copying an env var
+# out of a launcher into a unit file silently drops whatever else the launcher
+# derived. tests/test_emulator_unit_env.py now compares this list against
+# run-mpc.sh's own mapping so the drift cannot come back quietly.
+Environment=MAME_MPC_V53_DIRECT_DISPATCH=1
+Environment=MAME_MPC_V53_FETCH_WINDOW=1
+Environment=MAME_MPC_V53_DATA_WINDOW=1
+Environment=MAME_MPC_V53_IDLE_SKIP=1
+Environment=MAME_MPC_V53_DIVIDE_SUPERBLOCK=1
+Environment=MAME_MPC_V53_BRK77_HLE=1
+Environment=MAME_MPC_V53_BRK88_HLE=1
+Environment=MAME_MPC_V53_BRK92_HLE=1
+Environment=MAME_MPC_V53_BRKFD_HLE=1
+Environment=MAME_MPC_DSP_WINDOW=1
+Environment=MAME_MPC_PANEL_EVENT_DRIVEN=1
+Environment=MAME_MPC_PANEL_TIMER_COALESCED=1
+Environment=MAME_MPC_PANEL_TIMER_FAST=1
+Environment=MAME_MPC_MIDI_EVENT_DRIVEN=1
+Environment=MAME_MPC_MIDI_POLL_HZ=8000
+Environment=MAME_MPC_LCD_SKIP_UNCHANGED=1
+Environment=MAME_MPC_STEREO_ONLY=1
+
+# The audio path, in the variables the BINARY reads.
+#
+# This unit was setting MPC_SOUND_UPDATES_PER_QUANTUM, MPC_DSP_READ_MODE and
+# friends - which are run-mpc.sh's OWN variables. The launcher translates them
+# into MAME_* before exec'ing the emulator; a systemd unit that launches the
+# binary directly and copies the MPC_* names sets nothing the binary will ever
+# read. The whole "turbo" configuration here was inert, the sound cadence
+# included, and the emulator ran with a video timing master while -video none
+# meant there was no video to pace it.
+Environment=MAME_TIMING_MASTER=audio
+Environment=MAME_PIPEWIRE_AUDIO_CLOCK=1
+# 16 = two pushes per 32-frame quantum, not four.
+#
+# run-mpc2000xl-turbo.sh uses four and says in as many words that a slower
+# target should revert to two at the first sign of playback underruns. The Pi
+# is the slower target: at four the USB codec dropped 233 samples per 16s and
+# crackled audibly. Measured here rather than inherited from the desktop.
+# 32 = two pushes per 64-frame quantum. This value is NOT independent of
+# pipewire.conf.d/95-mpcpi.conf's default.clock.quantum - it is quantum/2, and
+# the pair has to move together. It was left at 16 (sized for q32) while the
+# graph ran at 256, i.e. sixteen tiny pushes per graph cycle, and the clicks in
+# the captured audio roughly doubled.
+Environment=MAME_SOUND_UPDATE_FRAMES=16
+Environment=MAME_SOUND_UPDATE_RATE=44100
+Environment=MAME_MPC_MIDI_FAST_INPUT=1
 Environment=MAME_MPC_MIDI_INTERNAL_PADS=1
 # PANEL_HLE, restored: it routes MIDI notes 52-97 to panel keys, which is how
 # the Maschine's buttons reach the firmware, and it was not the cause of the
@@ -104,7 +185,6 @@ Environment=MAME_MPC_MIDI_INTERNAL_PADS=1
 Environment=MAME_MPC_PANEL_HLE=1
 # Event-driven MIDI input rather than polled: this is the latency path from a
 # pad strike to a voice.
-Environment=MAME_MPC_MIDI_EVENT_DRIVEN=1
 # The turbo preset, restored. It was removed briefly while bisecting the
 # silence, and the silence turned out to have nothing to do with it: the
 # minimal hold.sh-shaped invocation was equally quiet, and the codec monitor
@@ -115,12 +195,23 @@ Environment=MPC_DSP_READ_MODE=window
 Environment=MPC_PANEL_TIMER_COUNTDOWN=countdown
 Environment=MPC_SOUND_UPDATES_PER_QUANTUM=4
 Environment=MAME_MPC_DSP_DMA_TURBO=8
-Environment=MAME_MPC_MIDI_POLL_HZ=1000
 Environment=MAME_MPC_LCD_EXPORT=/dev/shm/mpc-lcd
 Environment=SDL_VIDEODRIVER=dummy
 Environment=XDG_RUNTIME_DIR=/run/user/1001
 Restart=on-failure
 RestartSec=2
+# MAME does not exit on SIGTERM here: the unit sat in "deactivating"
+# indefinitely and systemctl restart never produced a new instance, so every
+# "restart and test" cycle was testing a service that had already stopped
+# serving. Give it a moment to be polite, then kill it.
+KillSignal=SIGTERM
+TimeoutStopSec=8
+KillMode=mixed
+FinalKillSignal=SIGKILL
+# MAME's PipeWire client does NOT reconnect if the sound server restarts - its
+# ports vanish permanently and the emulator plays to nothing while still
+# looking healthy. Bind to the user session so a PipeWire restart takes the
+# emulator with it and systemd brings it back.
 # Writable state, created on first start rather than assumed.
 StateDirectory=mpcpi
 StateDirectoryMode=0755

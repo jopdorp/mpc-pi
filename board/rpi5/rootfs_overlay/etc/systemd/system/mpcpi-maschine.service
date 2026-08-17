@@ -13,6 +13,10 @@ Wants=mpcpi-daw-ui.service
 ConditionPathExistsGlob=/sys/bus/usb/devices/*/idVendor
 
 [Service]
+# Log every dispatched control event to the journal. On by default: this is a
+# prototype instrument, the events are low-rate, and its absence cost four
+# rounds of diagnosing "the buttons do nothing" by reading code.
+Environment=MPCPI_HUB_TRACE=1
 Type=simple
 # Core 0. It drives screens and lamps over USB and must never compete with
 # the graph on the isolated cores: a display frame is 24 USB transfers and

@@ -55,18 +55,36 @@ case "${1:-link}" in
 link)
 	# ONLY the main stereo pair.
 	#
-	# The emulator exposes several sources - :outputs (main L/R), :speaker (the
-	# MPC's internal monitor speaker) and :fdc (the floppy drive). Linking more
-	# than one SUMS them into the same two channels, which is not monitoring,
-	# it is a mix nobody asked for: the internal speaker duplicates the main
-	# output and the floppy adds mechanical noise on top.
+	# The emulator exposes several sources - :speaker, :outputs, and :fdc (the
+	# floppy drive). Linking more than one SUMS them into the same two
+	# channels, which is not monitoring, it is a mix nobody asked for.
 	#
 	# This project has been burnt by exactly that before - 44 emulator links
 	# summed onto a measurement tone's channels and produced thousands of
 	# apparent defects that were entirely the routing.
 	#
-	# Set MPCPI_MONITOR_SOURCES to override, e.g. ":outputs :speaker".
-	for src in ${MPCPI_MONITOR_SOURCES:-":outputs"}; do
+	# :speaker, NOT :outputs. This defaulted to :outputs on the strength of a
+	# comment right here claiming :outputs was the main L/R pair and that the
+	# two nodes were "the SAME audio twice". Both halves were wrong, and it cost
+	# a long hunt for silent audio: the appliance was correctly linked, at the
+	# right quantum, to a node that carries nothing.
+	#
+	# Measured, with a capture node that had autoconnect disabled and was
+	# explicitly linked (scripts/diagnostics/probe-mpc-audio.sh), while pad
+	# notes 36..51 were injected into VirMIDI:
+	#
+	#     :outputs   ch0 peak=0     ch1 peak=0        SILENT
+	#     :speaker   ch0 peak=9678  ch1 peak=9799     AUDIO
+	#
+	# A -wavwrite render of the same machine writes ELEVEN channels, with the
+	# music on channels 1 and 2 and the rest silent - the mpc2000xl has several
+	# speaker devices and MAME publishes one PipeWire node per device, so
+	# "outputs" is a plausible-sounding name for a device that is not the one
+	# the program plays through. The development host, which has always been
+	# audible, uses :speaker too.
+	#
+	# Set MPCPI_MONITOR_SOURCES to override, e.g. ":speaker :outputs".
+	for src in ${MPCPI_MONITOR_SOURCES:-":speaker"}; do
 		$R pw-link -o 2>/dev/null | grep -q "^$src:" && link_pair "$src"
 	done
 	# Ardour's master, alongside the MPC. Both instruments into the one stereo
@@ -74,8 +92,9 @@ link)
 	# the two things being played, and hearing both is the point.
 	#
 	# That is a different thing from what the source filter above prevents.
-	# There, :outputs and :speaker are the SAME audio twice plus floppy noise,
-	# which is duplication. Here they are two separate instruments.
+	# There, the alternative sources are other speaker devices of the same
+	# machine plus floppy noise. Here :speaker and Ardour's master are two
+	# separate instruments.
 	#
 	# Set MPCPI_MONITOR_ARDOUR=0 to hear only the MPC.
 	if [ "${MPCPI_MONITOR_ARDOUR:-1}" != "0" ]; then

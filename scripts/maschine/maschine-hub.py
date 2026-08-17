@@ -71,6 +71,56 @@ LCD_L = "/dev/shm/mpc-lcd"
 LCD_R = "/dev/shm/daw-ui"
 FIFO = "/run/daw-ctl.fifo"
 
+# Set MPCPI_HUB_TRACE=1 to log every dispatched event to stderr, which under
+# systemd means the journal. Added because "the buttons do nothing" was
+# diagnosed four times by reasoning about the code instead of looking: with no
+# trace there is no way to tell a button that was never decoded from one that
+# was decoded and delivered somewhere nothing was listening.
+TRACE = bool(os.environ.get("MPCPI_HUB_TRACE"))
+
+
+def _trace(kind, payload, sink):
+    if TRACE:
+        print("hub: %-4s %-24s -> %s" % (kind, payload, sink),
+              file=sys.stderr, flush=True)
+
+
+def _deliver_cmd(sinks, path, payload):
+    """Write a DAW command, opening or reopening the FIFO as needed.
+
+    Both failure directions cost us a working instrument:
+
+      * The FIFO exists but the DAW is not reading it yet. Opening
+        O_WRONLY|O_NONBLOCK then fails with ENXIO, and that was unhandled at
+        startup, so the hub died before touching the controller - no screens,
+        no pads, no knobs - because Ardour happened to be slower to start.
+      * The DAW exits while the hub holds the write end. The next write raises
+        BrokenPipeError, which also killed the hub. Every Ardour crash took the
+        control surface down with it, which is exactly the "it worked and then
+        everything disappeared again" that kept coming back.
+
+    The instrument has to outlive the DAW. A command with nowhere to go is
+    dropped, the fd is dropped with it, and the next command retries the open.
+    """
+    if sinks["fifo"] is None:
+        try:
+            sinks["fifo"] = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            _trace("cmd", payload, "dropped (no DAW reading %s)" % path)
+            return False
+    try:
+        os.write(sinks["fifo"], (payload + "\n").encode())
+        _trace("cmd", payload, path)
+        return True
+    except OSError as exc:
+        try:
+            os.close(sinks["fifo"])
+        except OSError:
+            pass
+        sinks["fifo"] = None
+        _trace("cmd", payload, "dropped (%s); will reopen" % exc.__class__.__name__)
+        return False
+
 # Which mode each hold-button enters, from the control map.
 HOLD_MODES = {v["button"]: k for k, v in control_map.MODES.items()
               if v.get("button")}
@@ -746,9 +796,10 @@ def main():
                 # counted by the caller.
                 raise _FrameFailed("chunk rejected after 20 attempts")
 
+    # No os.path.exists guard: it is a race, not a check. The FIFO can appear
+    # between the test and the open, and can exist with nobody reading it,
+    # which the test cannot see. _deliver_cmd owns opening and reopening.
     fifo = None
-    if os.path.exists(args.fifo):
-        fifo = os.open(args.fifo, os.O_WRONLY | os.O_NONBLOCK)
 
     midi = None
     try:
@@ -773,21 +824,35 @@ def main():
     # restart that works and a restart that cannot open the device.
     import atexit
     atexit.register(mk1.release)
-    while True:
-        for events in (mk1.poll(router),):
-            for kind, payload in events:
-                if kind == "cmd" and fifo is not None:
-                    os.write(fifo, (payload + "\n").encode())
-                elif kind == "midi" and midi is not None:
-                    midi.write(encode_midi(payload))
-                if pc is not None and kind == "midi":
-                    # Same bytes the rig hears: pads with real velocity,
-                    # panel keys as notes. A DAW maps them like any pad
-                    # controller.
+    # One delivery path for both dispatch sites. They were copies, and the
+    # copies had already drifted: the main loop mirrored every midi event to
+    # the PC port, while the during-frame path mirrored only when the local
+    # MIDI port had opened. Same events, two behaviours, depending on whether
+    # a screen happened to be updating.
+    sinks = {"fifo": fifo, "midi": midi, "pc": pc}
+
+    def deliver(events):
+        for kind, payload in events:
+            if kind == "cmd":
+                _deliver_cmd(sinks, args.fifo, payload)
+            elif kind == "midi":
+                if sinks["midi"] is not None:
+                    sinks["midi"].write(encode_midi(payload))
+                    _trace("midi", payload, args.midi)
+                else:
+                    _trace("midi", payload, "dropped (no MIDI port)")
+                # Same bytes the rig hears: pads with real velocity, panel
+                # keys as notes. A DAW maps them like any pad controller.
+                if sinks["pc"] is not None:
                     try:
-                        pc.write(encode_midi(payload))
+                        sinks["pc"].write(encode_midi(payload))
                     except OSError:
-                        pc = None
+                        sinks["pc"] = None
+            else:
+                _trace(kind, payload, "unrouted")
+
+    while True:
+        deliver(mk1.poll(router))
         # Screens at a BUDGET, not as fast as the loop spins.
         #
         # This pushed both screens every 2ms - up to 500 frames a second,
@@ -818,16 +883,7 @@ def main():
         # this the events are collected and dropped, which is no better than
         # discarding the reports.
         if out:
-            for kind, payload in out:
-                if kind == "cmd" and fifo is not None:
-                    os.write(fifo, (payload + "\n").encode())
-                elif kind == "midi" and midi is not None:
-                    midi.write(encode_midi(payload))
-                    if pc is not None:
-                        try:
-                            pc.write(encode_midi(payload))
-                        except OSError:
-                            pc = None
+            deliver(out)
             del out[:]
         time.sleep(0.002)
 
