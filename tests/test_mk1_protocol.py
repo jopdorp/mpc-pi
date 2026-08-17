@@ -32,6 +32,7 @@ def _load(name, filename):
 L = _load("mk1_leds", "mk1_leds.py")
 HUB = _load("hub", "maschine-hub.py")
 ENC = _load("mk1_encoders", "mk1_encoders.py")
+DISP = _load("mk1_display", "mk1_display.py")
 
 
 class FakeRouter:
@@ -277,6 +278,64 @@ class TestPads(unittest.TestCase):
         r = FakeRouter()
         dev._pads(pad_report({}), r)
         self.assertEqual(r.hits, [("pad", 5, 0)])
+
+
+class TestDisplayProtocol(unittest.TestCase):
+    """The init sequence and its framing, in one place for all consumers.
+
+    It was written out three times and diverged. The animation's copy
+    inserted a length byte on top of the one it was passed, so every command
+    was malformed - including 0xAF display-on - and the panel never
+    initialised. It showed uninitialised RAM, which reads as all-white, with
+    no error possible because the device accepts whatever it is handed.
+    """
+
+    def test_first_command_framing(self):
+        """{d, 0x00, length, payload}. The length must appear ONCE."""
+        cmds = [p for p in DISP.packets(0, 0x10) if p is not None]
+        self.assertEqual(bytes(cmds[0]), bytes([0x00, 0x00, 0x01, 0x30]))
+
+    def test_every_command_declares_its_own_length(self):
+        for pkt in DISP.packets(0, 0x10):
+            if pkt is None:
+                continue
+            declared = pkt[2]
+            payload = len(pkt) - 3
+            self.assertEqual(declared, payload,
+                             "packet %s declares %d but carries %d"
+                             % (" ".join("%02X" % b for b in pkt),
+                                declared, payload))
+
+    def test_display_on_is_present(self):
+        """0xAF. Without it every frame goes into a panel that is off."""
+        cmds = [bytes(p[2:]) for p in DISP.packets(0, 0x10) if p is not None]
+        self.assertIn(bytes([0x01, 0xAF]), cmds)
+
+    def test_all_twentytwo_commands(self):
+        cmds = [p for p in DISP.packets(0, 0x10) if p is not None]
+        self.assertEqual(len(cmds), 22)
+
+    def test_second_display_is_offset_by_two(self):
+        left = [p for p in DISP.packets(0, 0x10) if p is not None]
+        right = [p for p in DISP.packets(1, 0x10) if p is not None]
+        self.assertEqual(left[0][0], 0x00)
+        self.assertEqual(right[0][0], 0x02)
+
+    def test_contrast_is_substituted_not_hardcoded(self):
+        cmds = [p for p in DISP.packets(0, 0x2A) if p is not None]
+        contrast_cmds = [p for p in cmds if len(p) == 6 and p[3] == 0x81]
+        self.assertTrue(contrast_cmds)
+        for c in contrast_cmds:
+            self.assertEqual(c[4], 0x2A)
+
+    def test_frame_is_exactly_10880_bytes_in_22_chunks(self):
+        """21 x 502 + 338. An earlier doc said 5,358, which is 31 rows."""
+        frame = bytes(10880)
+        pkts = list(DISP.frame_packets(0, frame, 10880))
+        self.assertEqual(len(pkts), 24)          # 2 window + 22 chunks
+        payload = sum(len(p) - 4 if i == 2 else len(p) - 3
+                      for i, p in enumerate(pkts) if i >= 2)
+        self.assertEqual(payload, 10880)
 
 
 class TestLeds(unittest.TestCase):

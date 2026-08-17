@@ -34,6 +34,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mk1_display                                          # noqa: E402
 import mk1_leds as L                                        # noqa: E402
 
 EP_DISPLAY = 0x08
@@ -630,36 +631,18 @@ class Screens:
         raise RuntimeError("display write failed after %d attempts" % tries)
 
     def init_display(self, index):
-        d = index << 1
-        C = lambda *b: self.w_sync(bytes((d, 0x00, len(b)) + b))
-        C(0x01, 0x30)
-        C(0x04, 0xCA, 0x04, 0x0F, 0x00)
-        time.sleep(0.02)
-        C(0x02, 0xBB, 0x00)
-        C(0x01, 0xD1)
-        C(0x01, 0x94)
-        C(0x03, 0x81, CONTRAST, 0x02)
-        time.sleep(0.02)
-        C(0x02, 0x20, 0x08)
-        time.sleep(0.02)
-        C(0x02, 0x20, 0x0B)
-        time.sleep(0.02)
-        C(0x01, 0xA6)
-        C(0x01, 0x31)
-        C(0x04, 0x32, 0x00, 0x00, 0x05)
-        C(0x01, 0x34)
-        C(0x01, 0x30)
-        C(0x04, 0xBC, 0x00, 0x01, 0x02)
-        C(0x03, 0x75, 0x00, 0x3F)
-        C(0x03, 0x15, 0x00, 0x54)
-        C(0x01, 0x5C)
-        C(0x01, 0x25)
-        time.sleep(0.02)
-        C(0x01, 0xAF)                       # display on
-        time.sleep(0.02)
-        C(0x04, 0xBC, 0x02, 0x01, 0x01)
-        C(0x01, 0xA6)
-        C(0x03, 0x81, CONTRAST, 0x02)
+        """The shared 22-command sequence from mk1_display.
+
+        Framing lives there, not here. This method used to build its own
+        packets and inserted a length byte on top of the one it was passed,
+        so every command - including 0xAF display-on - was malformed and the
+        panel never initialised.
+        """
+        for pkt in mk1_display.packets(index, CONTRAST):
+            if pkt is None:
+                time.sleep(mk1_display.SLEEP_SECONDS)
+            else:
+                self.w_sync(pkt)
 
     def _sip(self):
         """One cheap read per endpoint. Called before every chunk.
@@ -676,18 +659,9 @@ class Screens:
                 pass
 
     def send(self, index, frame):
-        d = index << 1
-        self._sip()
-        self.w(bytes([d, 0x00, 0x03, 0x75, 0x00, 0x3F]))
-        self.w(bytes([d, 0x00, 0x03, 0x15, 0x00, 0x54]))
-        self.w(bytes([d, 0x01, 0xF7, 0x5C]) + frame[0:502])
-        off = 502
-        while off + 502 <= FRAME_BYTES - 338:
+        for pkt in mk1_display.frame_packets(index, frame, FRAME_BYTES):
             self._sip()
-            self.w(bytes([d + 1, 0x01, 0xF6]) + frame[off:off + 502])
-            off += 502
-        self._sip()
-        self.w(bytes([d + 1, 0x01, 0x52]) + frame[off:FRAME_BYTES])
+            self.w(pkt)
 
     def backlight(self, value=0x7F):
         bank = L.LedBank()
