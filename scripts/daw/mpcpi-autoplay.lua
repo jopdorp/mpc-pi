@@ -29,6 +29,40 @@ local function press(button, duration)
     return true
 end
 
+-- Report every analog control and its value, and raise anything that looks
+-- like a volume to maximum.
+--
+-- Why: the emulator renders SILENCE with a loaded project visibly playing -
+-- :outputs captured 232,004 frames at peak 0. The sequencer runs, voices
+-- trigger, nothing comes out. An MPC2000XL's MAIN VOLUME is a physical pot,
+-- and a MAME analog port that nobody has touched sits at its default, which is
+-- commonly zero. That produces exactly this: a working instrument at zero
+-- volume, with nothing to see in any log.
+--
+-- Printing the inventory matters as much as setting it: if there is no volume
+-- field at all, the silence is somewhere else and this rules it out.
+local function raise_volumes()
+    local found = 0
+    for pname, port in pairs(manager.machine.ioport.ports) do
+        for fname, f in pairs(port.fields) do
+            local is_analog = false
+            local ok = pcall(function() is_analog = f.is_analog end)
+            if ok and is_analog then
+                print(string.format("ANALOG %s / %s = %s (min %s max %s)",
+                    pname, fname, tostring(f.user_value),
+                    tostring(f.minvalue), tostring(f.maxvalue)))
+                if fname:lower():find("vol") then
+                    f.user_value = f.maxvalue
+                    print(string.format("  -> raised %s to %s", fname,
+                        tostring(f.maxvalue)))
+                    found = found + 1
+                end
+            end
+        end
+    end
+    print("MPCPI_VOLUMES_RAISED " .. found)
+end
+
 local autoplay = os.getenv("MPCPI_AUTOPLAY")
 local warp = tonumber(os.getenv("MPCPI_AUTOPLAY_WARP") or "4000")
 
@@ -43,6 +77,7 @@ manager.machine.video.speed_factor = 1000
 emu.wait(0.5)
 manager.machine.sound.ui_mute = false
 print("MPCPI_BOOT_READY")
+pcall(raise_volumes)
 
 if not autoplay then
     return

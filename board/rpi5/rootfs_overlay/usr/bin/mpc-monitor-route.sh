@@ -28,8 +28,22 @@ if [ -z "$sink" ]; then
 	exit 1
 fi
 
+# Take the source OFF anything else first.
+#
+# The emulator drifted onto mpcpi-clock - the null-sink graph clock - so its
+# audio was being delivered nowhere audible while Ardour's click was the only
+# thing reaching the codec. WirePlumber's default-node logic and Ardour's
+# "connect the emulator" stage both re-link it, so this has to be asserted
+# rather than assumed: a link to the clock is a link to silence.
+unlink_from_clock() {
+	for ch in FL FR; do
+		$R pw-link -d "$1:output_$ch" "mpcpi-clock:playback_$ch" 2>/dev/null || true
+	done
+}
+
 link_pair() {
 	src="$1"
+	unlink_from_clock "$src"
 	for ch in FL FR; do
 		# -o is idempotent in effect: a duplicate link is refused, and that
 		# refusal is not an error worth stopping for.

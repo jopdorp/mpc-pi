@@ -69,7 +69,12 @@ LimitNICE=-19
 # but a rig being tested should.
 #
 # Overridable so a different project can be loaded without editing the unit.
-Environment=MPCPI_PROJECT=/opt/mpc-media/mpc-tutor-chopping-beat1-mpc2000xl.img
+# The logic tutorial, because it is the image the documented working run used
+# and it AUTO-LOADS: the MPC reads the project from the floppy during its own
+# boot, which is what makes PLAY do something afterwards. An image without an
+# autoloading project leaves the MPC booted and empty, where PLAY is a no-op -
+# a disk in the drive is not a loaded project.
+Environment=MPCPI_PROJECT=/opt/mpc-media/mpc-tutor-logic-mpc2000xl.img
 # The two opt-ins that make an external controller work at all. Both were
 # unset, so the emulator ran perfectly and every pad and button did nothing:
 #
@@ -82,23 +87,34 @@ Environment=MPCPI_PROJECT=/opt/mpc-media/mpc-tutor-chopping-beat1-mpc2000xl.img
 # NOTE: these are enabled by PRESENCE, per docs/mame-patch-stack.md - setting
 # one to 0 still enables it. To disable, remove the line.
 Environment=MAME_MPC_MIDI_INTERNAL_PADS=1
+# PANEL_HLE, restored: it routes MIDI notes 52-97 to panel keys, which is how
+# the Maschine's buttons reach the firmware, and it was not the cause of the
+# silence either.
+#
+# run-mpc.sh's default panel mode for mpc2000xl is "event", not "hle" - hle is
+# the turbo preset, and patch 0042 documents it as "latency-changing (opt-in)"
+# and "not accuracy-preserving by construction": it suspends the front-panel
+# CPU and synthesizes its serial stream. I enabled it for its side effect of
+# routing MIDI notes 52-97 to panel keys, without ever testing it against
+# audio, and the instrument has been silent since the emulator gained its full
+# environment.
+#
+# Re-enable only after sound is confirmed working without it, so the two
+# questions stay separate.
 Environment=MAME_MPC_PANEL_HLE=1
 # Event-driven MIDI input rather than polled: this is the latency path from a
 # pad strike to a voice.
 Environment=MAME_MPC_MIDI_EVENT_DRIVEN=1
-# The remaining turbo-preset optimizations from run-mpc2000xl-turbo.sh, which
-# this unit had NOT been carrying - it only had the LCD export. Real
-# performance headroom, separate from the pads/panel opt-ins above.
+# The turbo preset, restored. It was removed briefly while bisecting the
+# silence, and the silence turned out to have nothing to do with it: the
+# minimal hold.sh-shaped invocation was equally quiet, and the codec monitor
+# was carrying ~21,000 peak the whole time. The software path was delivering
+# audio; what was missing was on the analog side of the interface.
 Environment=MPC_V53_DATA_MODE=window
 Environment=MPC_DSP_READ_MODE=window
 Environment=MPC_PANEL_TIMER_COUNTDOWN=countdown
 Environment=MPC_SOUND_UPDATES_PER_QUANTUM=4
 Environment=MAME_MPC_DSP_DMA_TURBO=8
-# 8000Hz overran the firmware's own input queue - the emulator logged
-# "MPC fast-pad input queue overflow; dropping byte" continuously once the hub
-# started sending. The turbo preset picked 8000 for a measurement harness that
-# feeds MIDI in bursts, not for a live controller streaming encoder detents.
-# 1000Hz is still far above the panel link's real rate.
 Environment=MAME_MPC_MIDI_POLL_HZ=1000
 Environment=MAME_MPC_LCD_EXPORT=/dev/shm/mpc-lcd
 Environment=SDL_VIDEODRIVER=dummy
