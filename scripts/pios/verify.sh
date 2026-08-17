@@ -17,16 +17,39 @@ hdr()  { printf '\n== %s\n' "$*"; }
 
 hdr "boot time"
 if command -v systemd-analyze >/dev/null 2>&1; then
-	t=$(systemd-analyze time 2>/dev/null | head -1)
+	t=$(systemd-analyze time 2>&1 | head -1)
 	echo "  $t"
-	secs=$(systemd-analyze time 2>/dev/null | grep -oE '=[0-9.]+s' | tail -1 | tr -d '=s')
-	if [ -n "$secs" ]; then
-		# 20s is the bar for "powers on and plays". Not arbitrary: it is
-		# roughly the point at which a player stops waiting and starts
-		# wondering if it is broken.
-		awk -v s="$secs" 'BEGIN{exit !(s<20)}' && ok "boot under 20s ($secs s)" \
-			|| bad "boot $secs s - run: systemd-analyze blame | head"
-	fi
+	# "Bootup is not yet finished" is a PASS-looking non-answer: it means
+	# a job is still queued, which is how userconfig.service hid for
+	# weeks while multi-user.target waited on a console nobody would ever
+	# answer. Treat it as the failure it is, and name the culprit.
+	case "$t" in
+	*"not yet finished"*)
+		bad "boot never completes - jobs still queued:"
+		systemctl list-jobs 2>/dev/null | head -4 | sed 's/^/    /'
+		;;
+	*)
+		secs=$(systemd-analyze time 2>/dev/null | grep -oE '=[0-9.]+s' |
+			tail -1 | tr -d '=s')
+		# Two budgets, because this board netboots and the shipped one
+		# will not. Roughly 3s of the kernel phase is a single line -
+		# "macb eth0: Link is Up" - waiting for ethernet negotiation so
+		# the NFS root can mount. That cost does not exist on SD.
+		if [ -n "$secs" ]; then
+			awk -v s="$secs" 'BEGIN{exit !(s<15)}' &&
+				ok "boot $secs s (netboot budget 15s)" ||
+				bad "boot $secs s - run: systemd-analyze critical-chain"
+		fi
+		k=$(systemd-analyze time 2>/dev/null |
+			grep -oE '[0-9.]+s \(kernel\)' | tr -d 's (kernel)')
+		link=$(dmesg 2>/dev/null | grep -oE '^\[ *[0-9.]+\] macb.*Link is Up' |
+			head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+		if [ -n "$k" ] && [ -n "$link" ]; then
+			awk -v k="$k" -v l="$link" 'BEGIN{
+				printf "  kernel %.2fs, of which %.2fs is the netboot link wait -> ~%.2fs on SD\n", k, l, k - l }'
+		fi
+		;;
+	esac
 	echo "  slowest units:"
 	systemd-analyze blame 2>/dev/null | head -5 | sed 's/^/    /'
 else

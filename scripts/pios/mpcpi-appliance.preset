@@ -1,0 +1,88 @@
+# What an instrument runs, declared rather than accumulated.
+#
+# Installed as /etc/systemd/system-preset/10-mpcpi.preset. A preset is
+# the right shape for this: it states policy for units that may not be
+# installed yet, survives package updates that re-enable their own
+# services, and can be re-applied wholesale with
+# `systemctl preset-all`. The alternative - a list of `systemctl mask`
+# commands in a provisioning script - only affects units that happen to
+# exist at the moment it runs, and says nothing about what a later
+# apt-get install may switch on.
+#
+# Order matters: first match wins, so the enables come first.
+
+# --- the instrument ---------------------------------------------------
+enable mpcpi-latency-hold.service
+enable mpcpi-irq-affinity.service
+enable mpcpi-netconsole.service
+enable ssh.service
+enable systemd-networkd.service
+enable systemd-resolved.service
+enable systemd-timesyncd.service
+
+# --- boot blockers ----------------------------------------------------
+# userconfig waits on a console an appliance never answers; with it
+# enabled, boot never completes at all - multi-user.target queues behind
+# it forever.
+disable userconfig.service
+# The board's network is up before userspace (kernel ip=dhcp for the NFS
+# root, or a static config on SD). Waiting for it costs 2min 388ms of
+# timeout and leaves network-online.target permanently inactive, which
+# silently swallows any unit ordered after it.
+disable systemd-networkd-wait-online.service
+disable NetworkManager-wait-online.service
+
+# --- networking the appliance does not use ----------------------------
+# systemd-networkd owns eth0; NetworkManager reported it as "connected
+# (externally)" while costing 4.7-5.5s. It is pulled back in by
+# rpi-usb-gadget-ics, Pi OS's USB internet-sharing service, which is
+# redundant on a board that presents its own UAC2 gadget.
+disable NetworkManager.service
+disable rpi-usb-gadget-ics.service
+disable wpa_supplicant.service
+disable ModemManager.service
+disable avahi-daemon.service
+
+# --- radios that are not fitted ---------------------------------------
+# Also removed at the firmware level by disable-wifi/disable-bt overlays
+# in config.txt, which is what actually saves the 1.59s regulatory
+# database load and 0.81s of Bluetooth core init.
+disable bluetooth.service
+disable hciuart.service
+disable systemd-rfkill.service
+
+# --- desktop and provisioning machinery -------------------------------
+disable cloud-init.service
+disable cloud-init-local.service
+disable cloud-init-main.service
+disable cloud-config.service
+disable cloud-final.service
+disable udisks2.service
+disable packagekit.service
+disable polkit.service
+disable console-setup.service
+disable keyboard-setup.service
+disable triggerhappy.service
+disable rpi-eeprom-update.service
+disable rpi-display-backlight.service
+# sshswitch only flips ssh on or off from a /boot flag file; ssh is
+# enabled above and permanently.
+disable sshswitch.service
+
+# --- periodic work that has no place on an instrument -----------------
+disable apt-daily.timer
+disable apt-daily-upgrade.timer
+disable man-db.timer
+disable e2scrub_all.timer
+disable e2scrub_reap.service
+disable fstrim.timer
+
+# --- deliberately LEFT ENABLED, with reasons --------------------------
+# systemd-hostnamed: looks like a free 1.7s and is not. Masking it moved
+#   ssh.service from 1.1s to 4.1s and sshswitch to 5.8s - a net loss of
+#   two and a half seconds. Name resolution sits on more paths than the
+#   blame list suggests.
+# systemd-logind: user@1001 (the audio session, where PipeWire lives)
+#   depends on it.
+# systemd-udevd, systemd-tmpfiles-*: on the critical chain ahead of
+#   networkd; removing them does not shorten the chain, it breaks it.

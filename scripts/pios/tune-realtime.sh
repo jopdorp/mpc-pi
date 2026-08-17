@@ -128,25 +128,25 @@ log "units that never finish"
 #
 # cloud-init has no role on a fixed-function instrument and costs
 # 4.5 seconds.
-# Masked, not merely disabled: several of these get pulled back in by
-# something else's Wants=. NetworkManager kept starting after a disable
-# because rpi-usb-gadget-ics.service wants it - a Pi OS internet-sharing
-# service this appliance does not use, since it presents its own gadget.
+# The unit policy is a systemd PRESET, not a list of mask commands.
+# A preset states policy for units that may not exist yet, survives an
+# apt-get that re-enables its own service, and can be re-applied whole
+# with `systemctl preset-all`. Accumulated mask commands only affect
+# what happened to be installed the moment they ran.
+install -D -m 0644 "$(dirname "$0")/mpcpi-appliance.preset" \
+	/etc/systemd/system-preset/10-mpcpi.preset
+systemctl preset-all >/dev/null 2>&1 || true
+
+# preset governs enable/disable; masking additionally stops a unit being
+# pulled in by another unit's Wants=. NetworkManager needed this: it kept
+# starting after a disable because rpi-usb-gadget-ics wants it.
 for u in userconfig systemd-networkd-wait-online NetworkManager \
-         NetworkManager-wait-online rpi-usb-gadget-ics sshswitch \
-         bluetooth hciuart wpa_supplicant systemd-rfkill \
-         cloud-init cloud-init-main cloud-init-local cloud-config cloud-final \
-         udisks2 console-setup keyboard-setup e2scrub_reap ModemManager \
-         avahi-daemon triggerhappy packagekit rpi-eeprom-update; do
-	systemctl disable --now "$u.service" >/dev/null 2>&1 || true
+         NetworkManager-wait-online rpi-usb-gadget-ics sshswitch; do
 	systemctl mask "$u.service" >/dev/null 2>&1 || true
-done
-for t in apt-daily apt-daily-upgrade man-db e2scrub_all fstrim; do
-	systemctl disable --now "$t.timer" >/dev/null 2>&1 || true
 done
 # An instrument has no display manager to reach.
 systemctl set-default multi-user.target >/dev/null 2>&1 || true
-echo "  boot-blocking and unused units masked"
+echo "  appliance preset applied; boot-blocking units masked"
 
 # NOT masked, learned by measuring: systemd-hostnamed looks like an easy
 # 1.7s but removing it made ssh.service go from 1.1s to 4.1s and
