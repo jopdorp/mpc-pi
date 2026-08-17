@@ -31,6 +31,7 @@ echo "== unit"
 run "panel rendering, layout, control map" python3 tests/test_panel.py
 run "engine, transport, clock, osc, routing" python3 tests/test_engine.py
 run "interaction: input -> state -> screen" python3 tests/test_interaction.py
+run "MK1 wire protocol: buttons, encoders, pads, LEDs" python3 tests/test_mk1_protocol.py
 
 echo
 echo "== module self-tests"

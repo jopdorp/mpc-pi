@@ -21,8 +21,17 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control_map                                        # noqa: E402
 
+import mk1_leds                                          # noqa: E402
+
 EP_PADS = 0x84
 EP_CTRL = 0x81
+
+# Wire slot -> logical encoder, from cabl's processEncoders switch. The
+# eleven encoders are reported in a scrambled order; index this by the
+# wire slot to get the knob a human actually turned. Logical 0-7 are the
+# display knobs (0-3 left screen, 4-7 right), 8-10 the master knobs.
+ENCODER_WIRE_TO_LOGICAL = (8, 4, 10, 7, 3, 9, 6, 2, 0, 5, 1)
+MASTER_KNOBS = ("volume", "tempo", "swing")
 MK1_VENDOR = 0x17CC
 
 LCD_L = "/dev/shm/mpc-lcd"
@@ -219,13 +228,52 @@ class Mk1:
         self.dev = usb.core.find(idVendor=self.VENDOR, idProduct=self.PRODUCT)
         if self.dev is None:
             raise RuntimeError("no Maschine MK1 (17cc:0808) found")
-        if self.dev.is_kernel_driver_active(0):
-            self.dev.detach_kernel_driver(0)
+        # Detach EVERY interface, not just 0. snd-usb-caiaq claims this
+        # device (17cc:0808 is in its alias list) and binds per
+        # interface, so detaching interface 0 alone leaves another held
+        # and the first write fails as EBUSY - which reads like a
+        # permissions problem. That is cabl issue #10, never solved
+        # there. modprobe.d/blacklist-caiaq.conf should mean there is
+        # nothing to detach; this is the belt to its braces.
+        for n in self._interfaces():
+            try:
+                if self.dev.is_kernel_driver_active(n):
+                    self.dev.detach_kernel_driver(n)
+            except (usb.core.USBError, NotImplementedError):
+                pass
         self.dev.set_configuration()
         self.pad_state = [0] * 16
         self.buttons = 0
         self.encoders = [None] * 11
         self.frames = {}
+        self.leds = mk1_leds.LedBank()
+
+    def _interfaces(self):
+        try:
+            return [i.bInterfaceNumber
+                    for i in self.dev.get_active_configuration()]
+        except Exception:
+            return [0]
+
+    def init_device(self):
+        """cabl's init order, minus the display frames the caller owns.
+
+        The handshake and the LED block are not optional extras: no
+        source shows input reports arriving before the handshake, and
+        the display backlight IS an LED byte, so both screens stay dark
+        until the LED block has been written at least once.
+        """
+        self.dev.write(mk1_leds.EP_OUT, bytes(mk1_leds.INIT_HANDSHAKE),
+                       timeout=1000)
+        self.leds.all(mk1_leds.OFF)
+        self.leds.backlight(mk1_leds.BACKLIGHT_DEFAULT)
+        return self.flush_leds(force=True)
+
+    def flush_leds(self, force=False):
+        """Push dirty LED groups. Cheap when nothing changed."""
+        return self.leds.flush(
+            lambda ep, data: self.dev.write(ep, data, timeout=1000),
+            force=force)
 
     # --- output ---
 
@@ -291,7 +339,15 @@ class Mk1:
             # Button bitfield. Byte 6 bit 6 gates validity, per cabl.
             if len(data) > 6 and not (data[6] & 0x40):
                 return []
-            bits = int.from_bytes(bytes(data[1:6]), "little")
+            # SIX bytes, 1..6 inclusive. This read five, covering bit
+            # positions 0..39 - and MK1 has 42 buttons, with NoteRepeat
+            # at 40 and Play at 41 living in byte 6. Play, the single
+            # most used control on the panel, could not be pressed.
+            #
+            # Byte 6 also carries the validity flag at bit 6, which is
+            # bit position 46 overall - past the 42 names in the table,
+            # so it is never mistaken for a button.
+            bits = int.from_bytes(bytes(data[1:7]), "little")
             changed = bits ^ self.buttons
             self.buttons = bits
             for pos, name in enumerate(control_map_buttons()):
@@ -301,13 +357,13 @@ class Mk1:
             # Eleven absolute encoders, 16-bit each. They are endless
             # pots rather than quadrature, so a delta is a wrapped
             # difference and we never need a pickup mode.
-            for i in range(11):
-                off = 1 + i * 2
+            for wire in range(11):
+                off = 1 + wire * 2
                 if off + 1 >= len(data):
                     break
                 val = (data[off] << 8) | data[off + 1]
-                prev = self.encoders[i]
-                self.encoders[i] = val
+                prev = self.encoders[wire]
+                self.encoders[wire] = val
                 if prev is None or val == prev:
                     continue
                 delta = val - prev
@@ -315,7 +371,23 @@ class Mk1:
                     delta -= 65536
                 elif delta < -32768:
                     delta += 65536
-                out += router.knob(i, delta)
+                # The encoders do NOT arrive in panel order. cabl's
+                # processEncoders switch maps each wire slot to a
+                # different logical knob, and this code passed the wire
+                # index straight through - so every knob drove the wrong
+                # parameter, in a way no amount of staring at the report
+                # would reveal.
+                logical = ENCODER_WIRE_TO_LOGICAL[wire]
+                if logical < 8:
+                    out += router.knob(logical, delta)
+                else:
+                    # VOLUME / TEMPO / SWING are separate hardware, not
+                    # display knobs. Routed by name rather than falling
+                    # into router.knob(), where 8..10 would have been
+                    # read as display columns 4..6 and quietly moved a
+                    # mixer strip.
+                    out.append(("cmd", "master %s %+d"
+                                % (MASTER_KNOBS[logical - 8], delta)))
         return out
 
 
@@ -328,9 +400,18 @@ def control_map_buttons():
                                   "mpc-mk1-input.py"))
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
-        return m.MK1_BUTTONS
-    except Exception:
-        return []
+        names = m.MK1_BUTTONS
+        if len(names) < 42:
+            raise RuntimeError(
+                "MK1_BUTTONS has %d entries, expected 42" % len(names))
+        return names
+    except Exception as e:
+        # Returning [] here meant every button silently stopped working,
+        # with the hub running and the device responding. An input map
+        # that cannot be loaded is not a degraded mode, it is a broken
+        # one - say so.
+        raise RuntimeError(
+            "cannot load the MK1 button map from mpc-mk1-input.py: %s" % e)
 
 
 def main():
