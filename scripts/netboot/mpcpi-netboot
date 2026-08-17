@@ -171,7 +171,13 @@ status() {
 			echo "address   : $addr - WRONG, expected $SERVER_IP/24"
 		fi
 	fi
-	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+	# /proc/PID, not `kill -0`. dnsmasq drops to `nobody`, so kill -0
+	# fails with EPERM for any non-root caller and status reported a
+	# perfectly healthy server as "not running" - while this whole file
+	# is deliberately readable without root so that diagnosis does not
+	# need it. A diagnostic that lies when unprivileged is worse than
+	# one that refuses to run.
+	if [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE" 2>/dev/null)" ]; then
 		echo "dnsmasq   : running (pid $(cat "$PIDFILE"))"
 		tr ' ' '\n' < "/proc/$(cat "$PIDFILE")/cmdline" 2>/dev/null |
 			grep -E "^--interface|^--tftp-root" | sed 's/^/            /'
