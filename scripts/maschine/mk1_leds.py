@@ -108,7 +108,10 @@ GROUP1 = slice(31, 62)
 GROUP0_HEADER = (0x0C, 0x00)
 GROUP1_HEADER = (0x0C, 0x1E)
 
-BACKLIGHT_DEFAULT = 0x5C          # cabl's kMASMK1_defaultDisplaysBacklight
+# cabl uses 0x5C; maximum is 0x7F and the panels want it. "Too dark" on
+# this device is usually the backlight, not the contrast - they are
+# separate axes and each is useless against the other's problem.
+BACKLIGHT_DEFAULT = 0x7F
 BRIGHT = 0x7F
 DIM = 0x20
 OFF = 0x00

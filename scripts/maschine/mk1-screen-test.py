@@ -29,11 +29,22 @@ import mk1_leds as L                                       # noqa: E402
 
 EP_DISPLAY = 0x08
 
-# Contrast register value. 0x25 is what cabl's init ends with, and it is
-# also what the hardware wants: a four-step staircase is clearly graded at
-# 0x25 and barely distinguishable at 0x3F, because high values crush the
-# range toward dark. Higher is NOT more contrast on this panel.
-CONTRAST_DEFAULT = 0x25
+# Contrast register value, chosen by looking at the panel: 0x10.
+#
+# cabl's init ends with 0x25 and that is too dark on this unit. Values
+# above roughly 0x20 crush the ramp toward black; 0x2A and 0x32 were both
+# rejected outright.
+#
+# Do not try to refine this with side-by-side A/B tests. Fourteen rounds
+# were run and the method does not work here: the two screens sit at
+# different angles to the player, these STN panels shift enormously with
+# angle, and the same value read better or worse purely by which side it
+# was on. Swapping sides was supposed to control for that, and the results
+# still came back ambiguous.
+#
+# It is a matter of taste and seating position, so it is configurable
+# rather than derived. Override with MPC_MK1_CONTRAST.
+CONTRAST_DEFAULT = int(os.environ.get("MPC_MK1_CONTRAST", "0x10"), 0) & 0x3F
 DISPLAY_W, DISPLAY_H = 255, 64
 ROW_BYTES = 170                      # 85 triples x 2 bytes
 FRAME_BYTES = 21 * 502 + 338         # 10880 = DISPLAY_H * ROW_BYTES

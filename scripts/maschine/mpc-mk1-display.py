@@ -65,6 +65,19 @@ FRAME_BYTES = 21 * 502 + 338  # 10880 = DISPLAY_H * ROW_BYTES
 # Use contrast 0x25, which is what cabl's own init ends with.
 INVERT = os.environ.get("MPC_MK1_INVERT", "0") not in ("0", "", "no")
 
+# Contrast (LCD bias) and backlight (an LED byte) are SEPARATE axes, and
+# conflating them wasted a stretch of bring-up: raising the backlight does
+# nothing for pixels that are too dark, and raising contrast does nothing
+# for a dim panel.
+#
+# 0x10 was chosen by looking at the hardware. cabl's 0x25 is too dark
+# here, and anything above ~0x20 crushes the greys toward black. Both are
+# overridable because the right value depends on viewing angle, and this
+# panel shifts far enough with angle to defeat side-by-side comparison
+# entirely - see docs/maschine-mk1-display-protocol.md.
+CONTRAST = int(os.environ.get("MPC_MK1_CONTRAST", "0x10"), 0) & 0x3F
+BACKLIGHT = int(os.environ.get("MPC_MK1_BACKLIGHT", "0x7F"), 0) & 0x7F
+
 HEADER_FMT = "<4sIHHI"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
@@ -163,7 +176,7 @@ class Mk1Usb:
         W(0x00, 0x02, 0xBB, 0x00)
         W(0x00, 0x01, 0xD1)
         W(0x00, 0x01, 0x94)
-        W(0x00, 0x03, 0x81, 0x1E, 0x02)
+        W(0x00, 0x03, 0x81, CONTRAST, 0x02)
         time.sleep(0.02)
         W(0x00, 0x02, 0x20, 0x08)
         time.sleep(0.02)
@@ -184,7 +197,7 @@ class Mk1Usb:
         time.sleep(0.02)
         W(0x00, 0x04, 0xBC, 0x02, 0x01, 0x01)
         W(0x00, 0x01, 0xA6)
-        W(0x00, 0x03, 0x81, 0x25, 0x02)
+        W(0x00, 0x03, 0x81, CONTRAST, 0x02)
 
     def send_frame(self, frame):
         d = self.d
