@@ -232,7 +232,7 @@ class TestKnobsMoveOneStrip(unittest.TestCase):
 
     def test_knob_changes_its_strip_only(self):
         before = [m["db"] for m in self.rig.daw.ui_state()["mixer"]]
-        self.rig.turn(4, +3)                 # knob 5 -> first DAW column
+        self.rig.turn(0, +3)                 # knob 1 -> strip 1
         after = [m["db"] for m in self.rig.daw.ui_state()["mixer"]]
         differing = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
         self.assertEqual(len(differing), 1,
@@ -248,7 +248,11 @@ class TestKnobsMoveOneStrip(unittest.TestCase):
         move when you did not touch it.
         """
         before = self.rig.frame()
-        self.rig.turn(4, +5)                 # knob 5 -> strip 0
+        # Knob 1 is strip 1. One knob per strip: eight knobs under the
+        # screens, eight strips. This used to read turn(4) because indices
+        # 4-7 were remapped onto strips 0-3, which left strips 5-8 with no
+        # knob at all.
+        self.rig.turn(0, +5)
         after = self.rig.frame()
         self.assertNotEqual(bytes(before.px), bytes(after.px),
                             "turning a knob changed nothing on screen")
@@ -269,8 +273,8 @@ class TestKnobsMoveOneStrip(unittest.TestCase):
 
     def test_opposite_turns_cancel(self):
         start = self.rig.daw.ui_state()["mixer"][0]["db"]
-        self.rig.turn(4, +4)
-        self.rig.turn(4, -4)
+        self.rig.turn(0, +4)
+        self.rig.turn(0, -4)
         self.assertEqual(self.rig.daw.ui_state()["mixer"][0]["db"], start,
                          "a knob is not symmetric")
 

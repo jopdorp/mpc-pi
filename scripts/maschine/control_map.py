@@ -163,9 +163,23 @@ SHIFT_PADS = {
 
 # --- encoders --------------------------------------------------------
 #
-# Knobs 1-4 sit under the MPC screen and drive MPC-side continuous
-# controls; the MPC's DATA wheel is the obvious home for Knob 1. Knobs
-# 5-8 sit under the DAW screen and follow the page.
+# The MK1 has exactly eleven, in two physically distinct groups, and they
+# map onto this instrument almost too neatly:
+#
+#   8 knobs under the screens (4 left, 4 right)  ->  the 8 mixer strips
+#   3 master knobs (VOLUME / TEMPO / SWING)      ->  separate hardware
+#
+# Eight knobs, eight strips, and eight channels of the 22-channel USB
+# interface. So a knob is a channel - no paging, no bank switching, no
+# "which four am I on".
+#
+# This replaced a split where knobs 1-4 drove MPC-side controls and only
+# 5-8 reached the mixer. That left LOOP, VERB, DLY and AUX with no knob,
+# while four knobs duplicated controls the MPC's own front panel already
+# has.
+#
+# The MPC-side controls move to SHIFT + knob, which is the right home for a
+# second layer on a surface with no spare knobs.
 
 KNOBS_LEFT = ("mpc:data_wheel", "mpc:note_variation", "mpc:rec_gain",
               "mpc:main_volume")

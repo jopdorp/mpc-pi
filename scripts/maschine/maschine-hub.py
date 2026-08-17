@@ -52,6 +52,14 @@ class Router:
         self.lanes = lanes or ["GTR1", "GTR2", "MIC", "AUX"]
         self.strips = strips or ["MPC", "GTR1", "GTR2", "MIC",
                                  "LOOP", "VERB", "DLY", "AUX"]
+        # One knob per strip is the whole point of the layout: 8 display
+        # knobs, 8 strips, 8 channels on the interface. If these ever
+        # diverge, some strip silently loses its knob - which is exactly
+        # what happened when only knobs 5-8 were mapped.
+        if len(self.strips) != 8:
+            raise ValueError(
+                "expected 8 mixer strips to match the 8 display knobs, got %d"
+                % len(self.strips))
         self.shift = False
         self.held = None          # a mode button currently held
         self.pinned = None        # a latched mode
@@ -155,15 +163,29 @@ class Router:
     # --- encoders ---
 
     def knob(self, index, delta):
-        """Knob 0..7 across both screens; 0-3 are the MPC's, 4-7 the DAW's."""
-        if index < 4:
+        """Eight knobs under the screens: ONE PER MIXER STRIP.
+
+        The hardware and the mixer line up exactly - four knobs under each
+        screen, eight strips, and eight channels of the 22-channel interface
+        - so the mapping is 1:1 and needs no paging to reach a channel.
+
+        It used to spend knobs 1-4 on MPC-side controls and map only 5-8
+        onto strips, which reached strips 1-4 and left LOOP, VERB, DLY and
+        AUX with no knob at all: half the desk was unreachable while four
+        knobs duplicated things the MPC's own panel already does.
+
+        Those MPC controls are not lost - they move to SHIFT, which is where
+        a second layer belongs on a surface with no spare knobs. The three
+        master knobs (VOLUME/TEMPO/SWING) are separate hardware and are
+        routed by name, never through here.
+        """
+        if self.shift and index < len(control_map.KNOBS_LEFT):
             return [("midi", control_map.KNOBS_LEFT[index])]
-        col = index - 4
         if self.page in ("MIX", "LOOP"):
-            strip = self.strips[col] if col < len(self.strips) else None
+            strip = self.strips[index] if index < len(self.strips) else None
             if strip:
                 return [("cmd", "knob %s %s %+d" % (self.page, strip, delta))]
-        return [("cmd", "knob %s %d %+d" % (self.page, col, delta))]
+        return [("cmd", "knob %s %d %+d" % (self.page, index, delta))]
 
 
 def self_test():
@@ -198,9 +220,20 @@ def self_test():
     assert r.mode == "LOOP", "PIN should have latched the mode"
 
     # Knobs 1-4 drive the MPC, 5-8 the DAW page's strips.
-    assert r.knob(0, 1) == [("midi", "mpc:data_wheel")]
+    # One knob per strip, all eight reachable. The old assertion here was
+    # that knob 1 sent the MPC's data wheel, which is exactly the mapping
+    # that left half the desk without a knob.
     r.page = "MIX"
-    assert r.knob(4, -2) == [("cmd", "knob MIX MPC -2")]
+    for i, strip in enumerate(r.strips):
+        assert r.knob(i, 1) == [("cmd", "knob MIX %s +1" % strip)], i
+    # The MPC layer moved to shift rather than being dropped.
+    r.shift = True
+    assert r.knob(0, 1) == [("midi", "mpc:data_wheel")]
+    r.shift = False
+    r.page = "MIX"
+    # Knob 5 is the FIFTH strip now, not the first. Under the old split it
+    # was strip index 0 because indices 4-7 were remapped to 0-3.
+    assert r.knob(4, -2) == [("cmd", "knob MIX LOOP -2")]
 
     # The MPC's printed shift-pad functions stay true.
     r.button("shift", True)
