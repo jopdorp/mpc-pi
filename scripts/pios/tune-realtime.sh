@@ -135,7 +135,23 @@ log "units that never finish"
 # what happened to be installed the moment they ran.
 install -D -m 0644 "$(dirname "$0")/mpcpi-appliance.preset" \
 	/etc/systemd/system-preset/10-mpcpi.preset
-systemctl preset-all >/dev/null 2>&1 || true
+
+# Apply the file's own directives, unit by unit - NOT `preset-all`.
+# preset-all also decides units that no preset file mentions, and for
+# those systemd falls back to its compiled-in default, which is
+# `enable`. On a box being deliberately stripped, a command whose
+# fallback is "switch it on" is the wrong instrument: it would quietly
+# re-enable whatever this file does not happen to name.
+#
+# Installing the file still matters even though we do not preset-all
+# from it: dpkg runs `systemctl preset <unit>` when a package installs a
+# service, and that consults 10-mpcpi.preset. That is what makes the
+# policy durable rather than a one-shot.
+while read -r verb unit; do
+	case "$verb" in
+	enable|disable) systemctl "$verb" "$unit" >/dev/null 2>&1 || true ;;
+	esac
+done < /etc/systemd/system-preset/10-mpcpi.preset
 
 # preset governs enable/disable; masking additionally stops a unit being
 # pulled in by another unit's Wants=. NetworkManager needed this: it kept

@@ -76,8 +76,24 @@ disable man-db.timer
 disable e2scrub_all.timer
 disable e2scrub_reap.service
 disable fstrim.timer
+# cron on an instrument runs nothing: there are no jobs installed, and
+# anything periodic this appliance needs is a systemd unit with its own
+# ordering.
+disable cron.service
+
+# --- left enabled because THIS board netboots --------------------------
+# rpcbind and nfs-blkmap exist only to mount the NFS root. They are pure
+# overhead on the shipped SD image and should be disabled there - but
+# disabling them here breaks the development rig's root filesystem, so
+# they stay until the image is built from a card rather than the wire.
+#   enable rpcbind.service      <- netboot only
+#   enable nfs-blkmap.service   <- netboot only
 
 # --- deliberately LEFT ENABLED, with reasons --------------------------
+# polkit: static, so it cannot be disabled - only masked. It is
+#   dbus-activated rather than boot-ordered, so it is not on the
+#   critical chain and masking it buys no boot time while risking every
+#   privileged operation that goes through D-Bus.
 # systemd-hostnamed: looks like a free 1.7s and is not. Masking it moved
 #   ssh.service from 1.1s to 4.1s and sshswitch to 5.8s - a net loss of
 #   two and a half seconds. Name resolution sits on more paths than the
