@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Hold the CPU out of deep idle, and the governor at performance.
+
+This ran for weeks reporting success while doing nothing. The original
+wrote "performance" to each scaling_governor inside a try/except that
+ended in `pass`, then slept forever. The service showed active, its
+description said it pinned the governor, and the governor was
+`ondemand` at 1.7GHz with 2.4GHz available - which quietly widened every
+latency measurement taken on this board.
+
+Two causes, both fixed here:
+
+  * It starts After=basic.target, which on a Pi 5 can be before the
+    cpufreq driver has published scaling_governor at all. The write then
+    raises OSError on a missing path and the bare `pass` discards it.
+    So: wait for the interface to exist before writing to it.
+
+  * Setting a value once is not holding it. Anything that touches
+    cpufreq afterwards - a udev rule, a power profile, a thermal event -
+    silently wins forever, because nothing ever looked again. So: check
+    periodically and re-assert, and say so when it had to.
+
+Failures are now reported to the journal rather than swallowed. A
+service that cannot do its job must not look like one that did.
+"""
+import os
+import sys
+import time
+
+GOVERNOR = "performance"
+SETTLE_TIMEOUT = 30.0     # seconds to wait for cpufreq to appear
+RECHECK_SECONDS = 30.0
+
+
+def log(msg):
+    # systemd captures stdout; flush so the journal has it immediately
+    # rather than whenever a buffer happens to fill.
+    print("mpcpi-latency-hold: %s" % msg, flush=True)
+
+
+def gov_path(cpu):
+    return "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor" % cpu
+
+
+def cpus():
+    return range(os.cpu_count() or 4)
+
+
+def wait_for_cpufreq():
+    """Return True once cpu0 has a governor interface, else False."""
+    deadline = time.monotonic() + SETTLE_TIMEOUT
+    while time.monotonic() < deadline:
+        if os.path.exists(gov_path(0)):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def read_gov(cpu):
+    try:
+        with open(gov_path(cpu)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def set_gov(cpu):
+    """Write the governor and VERIFY it took. Returns True on success."""
+    try:
+        with open(gov_path(cpu), "w") as f:
+            f.write(GOVERNOR)
+    except OSError as e:
+        return "write failed: %s" % e
+    # cpufreq accepts a write and can still refuse the value - reading it
+    # back is the only proof.
+    got = read_gov(cpu)
+    if got != GOVERNOR:
+        return "wrote %s, reads back %r" % (GOVERNOR, got)
+    return True
+
+
+def apply_all(quiet=False):
+    problems = []
+    for cpu in cpus():
+        if read_gov(cpu) == GOVERNOR:
+            continue
+        r = set_gov(cpu)
+        if r is not True:
+            problems.append("cpu%d: %s" % (cpu, r))
+        elif not quiet:
+            log("cpu%d governor -> %s" % (cpu, GOVERNOR))
+    return problems
+
+
+def main():
+    if not wait_for_cpufreq():
+        log("ERROR: no cpufreq interface after %.0fs - governor NOT pinned."
+            % SETTLE_TIMEOUT)
+        log("       Every latency number taken on this boot is suspect.")
+        # Carry on to hold cpu_dma_latency, which is independent and
+        # still worth having, but the exit status records the failure.
+        failed_governor = True
+    else:
+        problems = apply_all()
+        failed_governor = bool(problems)
+        for p in problems:
+            log("ERROR: %s" % p)
+        if not problems:
+            log("governor pinned to %s on %d cpus" % (GOVERNOR, len(list(cpus()))))
+
+    # Holding /dev/cpu_dma_latency open with a 0 keeps the cores out of
+    # deep C-states. The FD must stay open for the lifetime of the
+    # process - closing it releases the constraint - which is the entire
+    # reason this is a long-running service rather than a oneshot.
+    fd = None
+    try:
+        fd = os.open("/dev/cpu_dma_latency", os.O_WRONLY)
+        os.write(fd, b"\x00\x00\x00\x00")
+        log("cpu_dma_latency held at 0")
+    except OSError as e:
+        log("ERROR: could not hold cpu_dma_latency: %s" % e)
+
+    if failed_governor and fd is None:
+        # Nothing this service exists for is in effect. Fail, so
+        # Restart=always retries rather than sitting active and useless.
+        sys.exit(1)
+
+    while True:
+        time.sleep(RECHECK_SECONDS)
+        drifted = [c for c in cpus() if read_gov(c) not in (GOVERNOR, None)]
+        if drifted:
+            log("governor drifted on cpu%s - re-asserting"
+                % ",".join(str(c) for c in drifted))
+            for p in apply_all(quiet=True):
+                log("ERROR: %s" % p)
+
+
+if __name__ == "__main__":
+    main()
