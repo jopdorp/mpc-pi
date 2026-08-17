@@ -87,37 +87,39 @@ KNOB_LABEL = ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8",
               "VOL", "TEMPO", "SWING"]
 
 
-def bars_frame(values, moved, first=0, count=4):
-    """Four big bars for the four knobs physically above this screen.
+LEVEL_MAX = 1000        # what an accumulated parameter runs to
 
-    This is the whole point of the layout: knobs 1-4 sit under the LEFT
-    screen and 5-8 under the RIGHT, so drawing four bars per screen makes
-    the check spatial - turn the knob directly above a bar and that bar
-    should move. An eleven-bar strip crammed onto one screen proves the
-    decoder works but says nothing about which knob is which, which is the
-    only thing still unverified.
 
-    Each bar carries its own number in tick marks along the top, so a bar
-    can be identified even if the order turns out to be wrong.
+def bars_frame(levels, moved, entries):
+    """Bars for `entries` = [(index, tick_label)], laid out left to right.
+
+    Levels are ACCUMULATED and CLAMPED, not raw encoder position.
+
+    That distinction is the whole point for DAW use. The encoders are endless
+    pots whose absolute position wraps 999 -> 0, so a bar driven by position
+    falls back to zero part-way through a turn upward. A fader must pin at
+    maximum and stay there. So movement is accumulated from the deltas and
+    clamped at both ends, which is also exactly how a mixer send or a gain
+    has to consume it.
+
+    Tick marks along the top of each bar are its label, so a bar can be
+    identified on the panel without reading a terminal.
     """
     lit = {}
     W, H = ANIM.W, ANIM.H
-    slot = W // count
-    for i in range(count):
-        idx = first + i
-        v = values[idx] if idx < len(values) else 0
-        x0 = i * slot + 4
-        wide = slot - 10
+    n = len(entries)
+    slot = W // n
+    for i, (idx, ticks) in enumerate(entries):
+        v = levels[idx] if idx < len(levels) else 0
+        x0 = i * slot + 3
+        wide = slot - 8
         active = idx in moved
 
-        # Tick marks: i+1 blocks along the top edge, so the bar is labelled
-        # on the panel rather than in my terminal.
-        for t in range(i + 1):
-            for x in range(x0 + t * 7, x0 + t * 7 + 5):
+        for t in range(ticks):
+            for x in range(x0 + t * 6, x0 + t * 6 + 4):
                 for y in (1, 2, 3):
                     ANIM.add(lit, x, y, 0x1F)
 
-        # Frame the bar so an empty one is still visible.
         for x in range(x0, x0 + wide):
             ANIM.add(lit, x, H - 1, 0x14)
             ANIM.add(lit, x, 7, 0x0A)
@@ -125,18 +127,24 @@ def bars_frame(values, moved, first=0, count=4):
             ANIM.add(lit, x0, y, 0x0A)
             ANIM.add(lit, x0 + wide - 1, y, 0x0A)
 
-        # Absolute angle 0..999 as height, filled solid.
-        h = int((v / float(E.FULL_TURN)) * (H - 12))
+        h = int((v / float(LEVEL_MAX)) * (H - 12))
         level = 0x1F if active else 0x15
         for x in range(x0 + 1, x0 + wide - 1):
             for y in range(H - 2, H - 2 - h, -1):
                 ANIM.add(lit, x, y, level)
+        # A full bar gets a solid cap, so "pinned at maximum" is visible
+        # rather than merely tall.
+        if v >= LEVEL_MAX - 2:
+            for x in range(x0, x0 + wide):
+                for y in (8, 9):
+                    ANIM.add(lit, x, y, 0x1F)
     return ANIM.pack_sparse(lit)
 
 
-def masters_frame(values, moved):
-    """The three master knobs, drawn the same way on demand."""
-    return bars_frame(values, moved, first=8, count=3)
+# LEFT screen: the four knobs above it. RIGHT screen: its four, then a gap
+# and the three master knobs (VOLUME/TEMPO/SWING) as bars 5, 6 and 7.
+LEFT_ENTRIES = [(0, 1), (1, 2), (2, 3), (3, 4)]
+RIGHT_ENTRIES = [(4, 1), (5, 2), (6, 3), (7, 4), (8, 5), (9, 6), (10, 7)]
 
 
 def pads_frame(pressures):
@@ -186,7 +194,8 @@ def main():
 
     buttons = 0
     tracker = E.EncoderTracker()
-    enc_values = [0] * E.N_ENCODERS
+    # Start mid-travel so movement in either direction is visible.
+    enc_values = [LEVEL_MAX // 2] * E.N_ENCODERS
     pad_state = {p: 0 for p in range(1, 17)}
     moved = {}
     seen_buttons = set()
@@ -194,8 +203,11 @@ def main():
     seen_pads = set()
 
     print("Monitoring for %ds.\n" % seconds)
-    print("LEFT screen  = four bars for the four knobs above it (1,2,3,4)")
-    print("RIGHT screen = four bars for the four knobs above it (5,6,7,8)")
+    print("LEFT screen  = bars 1-4, the four knobs above it")
+    print("RIGHT screen = bars 1-4 for its four knobs, then after the gap")
+    print("               bars 5,6,7 = VOLUME, TEMPO, SWING")
+    print("Bars ACCUMULATE and CLAMP: turn up and it pins at the top and")
+    print("stays there. They do not wrap, even though the encoders do.")
     print("Tick marks along the top of each bar are its number.\n")
     print("Turn the knob directly ABOVE a bar. If that bar moves, the map is")
     print("right. If a different one moves, tell me which bar moved for which")
@@ -319,8 +331,8 @@ def main():
             # device - screens stay dark with no error anywhere.
             if pump(rounds=8):
                 bank.flush(lambda ep, d: s._led(ep, d))
-            send_pumped(0, bars_frame(enc_values, recent, first=0, count=4))
-            send_pumped(1, bars_frame(enc_values, recent, first=4, count=4))
+            send_pumped(0, bars_frame(enc_values, recent, LEFT_ENTRIES))
+            send_pumped(1, bars_frame(enc_values, recent, RIGHT_ENTRIES))
 
     print("\n--- coverage ---")
     print("buttons seen : %d of 41 mappable" % len(seen_buttons))
