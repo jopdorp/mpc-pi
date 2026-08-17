@@ -143,6 +143,24 @@ done
 	rsync -a "$SRC/board/rpi5/rootfs_overlay/" "$MNT/"
 echo "  src, roms, emulator, overlay"
 
+log "ssh access"
+# Without this the card boots and locks us out. The overlay ships no
+# keys, Pi OS Lite ships ssh disabled with no user, and the last
+# unprovisioned card came up on a stray DHCP lease refusing connections
+# with no way in. An appliance that cannot be reached cannot be measured
+# or fixed.
+if [ -s /root/.ssh/authorized_keys ]; then
+	install -d -m 0700 "$MNT/root/.ssh"
+	install -m 0600 /root/.ssh/authorized_keys "$MNT/root/.ssh/authorized_keys"
+	echo "  root authorized_keys: $(wc -l < /root/.ssh/authorized_keys) key(s)"
+else
+	echo "  WARNING: no /root/.ssh/authorized_keys to copy." >&2
+	echo "  The card will boot UNREACHABLE over ssh." >&2
+fi
+# Pi OS defaults to PermitRootLogin prohibit-password, which allows keys
+# and refuses passwords - exactly what is wanted, so it is left alone.
+# ssh.service itself is enabled by the preset below.
+
 log "chroot"
 for d in dev dev/pts proc sys; do
 	mkdir -p "$MNT/$d"
@@ -165,8 +183,17 @@ fi
 log "users and units"
 chroot "$MNT" /bin/bash -s <<'CHROOT'
 set -e
-id mpc >/dev/null 2>&1 || useradd -m -u 1001 -s /bin/bash \
-	-G audio,video,plugdev,input,render mpc
+# Add only groups that exist. A missing one (render and input vary
+# between Pi OS releases) makes useradd fail outright, and with set -e
+# that would abort provisioning after the packages are already in.
+if ! id mpc >/dev/null 2>&1; then
+	groups=""
+	for g in audio video plugdev input render; do
+		getent group "$g" >/dev/null 2>&1 && groups="${groups:+$groups,}$g"
+	done
+	useradd -m -u 1001 -s /bin/bash ${groups:+-G "$groups"} mpc
+	echo "  mpc user in: ${groups:-<none>}"
+fi
 # The appliance has no display manager to reach.
 systemctl set-default multi-user.target >/dev/null 2>&1 || true
 # Unit policy from the committed preset, applied per directive - never
