@@ -141,3 +141,94 @@ Two consequences for the control map:
   `scripts/maschine/mpc-mk1-input.py` closed that gap, which shifted every
   button from Rec onwards by one position — Shift would have pressed Grid.
   Corrected against the enum above.
+
+## LED output (62 bytes, and the screens depend on it)
+
+Implemented in `scripts/maschine/mk1_leds.py`. Layout from cabl's
+`enum class MaschineMK1::Led` and `sendLeds()`.
+
+**The display backlight is an LED byte.** Index 58, `DisplayBacklight`,
+which cabl sets to `0x5C` at the end of `init()`. Until the LED block is
+written, both screens stay dark however correct the frame data is - so a
+first bring-up with no LED code shows two dead displays and looks
+exactly like a broken display protocol. This project had no LED code at
+all until now, so that is the failure we were set up to hit.
+
+Two blocks on endpoint `0x01` (the generic OUT endpoint - **not** the
+display endpoint `0x08`):
+
+```
+{0x0C, 0x00} + leds[0..30]    ; 31 bytes, group 0
+{0x0C, 0x1E} + leds[31..61]   ; 31 bytes, group 1
+```
+
+Group 1's header offset is `0x1E` (30) while its data starts at index
+31. That asymmetry looks like an off-by-one and is not - it is what the
+working implementation sends. Do not "fix" it without hardware.
+
+Wire order (index = byte offset). Two traps, both of which look like
+typos:
+
+| Index | LEDs |
+|---|---|
+| 0-15 | Pad4,3,2,1 / Pad8,7,6,5 / Pad12,11,10,9 / Pad16,15,14,13 |
+| 16-30 | Mute, Solo, Select, Duplicate, Navigate, Keyboard, Pattern, Scene, Shift, Erase, Grid, TransportRight, Rec, Play, *Unused1* |
+| 31-48 | TransportLeft, Loop, GroupH, GroupG, GroupD, GroupC, GroupF, GroupE, GroupB, GroupA, AutoWrite, Snap, BrowseRight, BrowseLeft, Sampling, Browse, Step, Control |
+| 49-56 | DisplayButton8, 7, 6, 5, 4, 3, 2, 1 |
+| 57-61 | NoteRepeat, **DisplayBacklight**, *Unused2, Unused3, Unused4* |
+
+- **Pads are reversed within each row of four.** Writing them in natural
+  order mirrors every row horizontally - which on a 4x4 grid looks like
+  a plausible mapping difference rather than a bug.
+- **DisplayButton runs 8..1**, descending, unlike everything else.
+- Group boundary falls at `Unused1` (30), not on any meaningful control.
+
+Brightness only, `0x00`-`0x7F`, single colour. RGB pads are MK2. State
+must therefore be expressed as brightness and time - dim/bright/blink -
+never hue.
+
+## Init handshake
+
+Undocumented in every other write-up found. cabl's `init()` order:
+
+1. `initDisplay(0)`, `initDisplay(1)` - the command sequences above
+2. black both, `sendFrame(0)`, `sendFrame(1)`
+3. **`{0x0B, 0xFF, 0x02, 0x05}` to endpoint `0x01`**
+4. zero all 62 LEDs, send both groups
+5. start reading endpoint `0x81`
+6. set `DisplayBacklight = 0x5C`, resend group 1
+
+Step 3 is issued unconditionally before any input is read. Treat it as
+required: no source shows input reports arriving without it.
+
+## The kernel will take this device first
+
+`snd-usb-caiaq` claims `17cc:0808` - it is in the module's alias list,
+and our RT kernel builds it (`CONFIG_SND_USB_CAIAQ=m`,
+`CONFIG_SND_USB_CAIAQ_INPUT=y`). It exposes pads and buttons as a Linux
+input device and drives **neither the displays nor the LED block**, so
+it is useless here and must be kept off the device.
+
+This is not theoretical. cabl issue #10 is someone running a Maschine
+MK1 on a Raspberry Pi in January 2018, reporting:
+
+```
+libusb: error [submit_bulk_transfer] submiturb failed error -1 errno=16
+[DeviceHandleLibUSB] write: error=-1 - transfer size: 33 written: 0
+[MaschineMK1] sendLeds: error writing first block of leds
+```
+
+`errno 16` is `EBUSY`, and transfer size 33 is exactly a LED block
+(2 header + 31 data). That is the kernel driver holding the interface.
+The issue was closed with no solution and no follow-up.
+
+Handled by `board/rpi5/rootfs_overlay/etc/modprobe.d/blacklist-caiaq.conf`
+(`blacklist` *and* `install ... /bin/false`, since blacklist alone only
+stops autoloading by alias) plus
+`etc/udev/rules.d/71-maschine-mk1.rules`, which also grants the `mpc`
+user access so the hub does not need root.
+
+Note that `detach_kernel_driver(0)` in the Python code only covers
+interface 0. caiaq binds per interface, so on a multi-interface device
+that call can succeed while another interface stays held - failing later
+as EBUSY, which reads like a permissions problem.

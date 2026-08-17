@@ -1,0 +1,37 @@
+# Maschine MK1 (17cc:0808) belongs to userspace, not to snd-usb-caiaq.
+#
+# The kernel ships its own driver for this device. `modinfo snd-usb-caiaq`
+# lists usb:v17CCp0808 among its aliases, and CONFIG_SND_USB_CAIAQ=m with
+# CONFIG_SND_USB_CAIAQ_INPUT=y in our RT kernel - so on plug-in the kernel
+# binds it first and exposes pads and buttons as a Linux input device.
+#
+# That is not usable here. caiaq does not drive the MK1's two displays at
+# all, and it does not expose the 62-byte LED block. Both are the whole
+# point of this integration, and both require raw access to endpoints the
+# kernel driver is holding.
+#
+# So the device is claimed by our hub via libusb instead. Two things have
+# to be true for that to work, and neither was set up before:
+#
+#   1. caiaq must not hold the interfaces. detach_kernel_driver() in the
+#      Python code only detaches interface 0; anything the driver holds
+#      on another interface stays held, and the claim fails with EBUSY in
+#      a way that reads like a permissions problem.
+#   2. The `mpc` user must be able to open the device node. Otherwise the
+#      hub needs root, and the audio session deliberately does not run as
+#      root.
+#
+# Rule 1: keep the kernel driver off it entirely.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="17cc", ATTR{idProduct}=="0808", \
+	ATTR{authorized}="1", ENV{MPCPI_MASCHINE}="1"
+
+# Unbind any driver that already grabbed an interface. Written against the
+# interface, not the device: caiaq binds per-interface, so unbinding the
+# device node is not enough.
+ACTION=="add", SUBSYSTEM=="usb", DRIVERS=="snd-usb-caiaq", \
+	ATTRS{idVendor}=="17cc", ATTRS{idProduct}=="0808", \
+	RUN+="/bin/sh -c 'echo -n %k > /sys/bus/usb/drivers/snd-usb-caiaq/unbind || true'"
+
+# Rule 2: let the audio user open it without root.
+SUBSYSTEM=="usb", ATTR{idVendor}=="17cc", ATTR{idProduct}=="0808", \
+	MODE="0660", GROUP="audio", TAG+="uaccess"
