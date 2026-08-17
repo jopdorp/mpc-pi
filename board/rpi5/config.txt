@@ -81,7 +81,20 @@ dtoverlay=vc4-kms-v3d,noaudio
 # ports stay hosts on separate dwc3 controllers, so an external interface
 # still works at the same time. Verified with fdtoverlay against the real
 # bcm2712-rpi-5-b.dtb.
-dtoverlay=dwc2,dr_mode=peripheral
+# dtoverlay=dwc2,dr_mode=peripheral
+#
+# The USB gadget is REMOVED for now. It is commented rather than deleted
+# because the appliance's whole reason for existing is to present itself to a
+# computer as an audio interface, and this line is how the UDC comes into being.
+#
+# It is off because the monitoring path still crackles and the gadget is one of
+# the things that could be responsible: its ALSA nodes sit in the same graph,
+# and u_audio's MIN_PERIODS is a constraint nothing else in this project has.
+# Removing Ardour and the gadget together took the emulator stream's xruns from
+# 1242 to 384 per 8s, so at least one of the two was contributing.
+#
+# Uncomment to bring the gadget back, and re-add mpcpi-usb-gadget.service plus
+# the mpc-usb-*.sh helpers from git history (removed in this same commit).
 
 # ===== BOOT TIME =====
 # Radios the instrument never uses, and which cost real boot time:

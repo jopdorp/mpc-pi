@@ -20,6 +20,23 @@ Group=mpc
 # Core 3 with SCHED_RR. Cores 1-3 are isolated for audio: PipeWire's data
 # loop owns core 1, the graph's workers 2-3. The emulator measured 11.8% of
 # one core at 100% speed, so it shares 3 rather than needing its own.
+# NOT -nothrottle, even though the development host runs with it.
+#
+# The host has -nothrottle because run-mpc.sh puts it there, and on the host the
+# audio callback paces MAME. Here it does not: unthrottled, MAME produces
+# samples as fast as core 3 will go and floods its own stream. Measured
+# :speaker error growth, steady state, three consecutive rounds of 6s:
+#
+#     throttled (this unit):   259 per 8s
+#     -nothrottle:            9606, 9600, 9607 per 6s
+#
+# A false positive is why this was briefly added: an ad-hoc `pw-top | grep
+# :speaker | awk` pipeline was run while the emulator was dead from a missing
+# library, so grep matched nothing, $((b-a)) on two empty strings evaluated to
+# 0, and "0 errors" was read as a fix. That is the exact failure that
+# scripts/diagnostics/probe-mpc-audio.sh refuses by design - it declines to
+# print a number when nothing is linked - and the lesson is to use it rather
+# than re-inventing a weaker version inline.
 ExecStart=/usr/bin/taskset --cpu-list 3 /usr/bin/chrt --rr 20 \
     /usr/local/bin/mpc mpc2000xl \
     -rompath /opt/mpc-roms \

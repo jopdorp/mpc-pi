@@ -14,21 +14,18 @@ pipewire-jack
 wireplumber
 alsa-utils
 
-# --- the DAW -----------------------------------------------------------
-ardour
-lua5.1
-luajit
-lilv-utils
-
-# --- plugins the shipped session instantiates --------------------------
-# Pinned by name because the session template fails to load without
-# them, and a missing plugin in Ardour is a silently bypassed insert
-# rather than an error.
-guitarix
-dragonfly-reverb
-lsp-plugins-lv2
-x42-plugins
-zam-plugins
+# --- the DAW: REMOVED ---------------------------------------------------
+# ardour, lua5.1, luajit, lilv-utils, and the plugins its session
+# instantiated (guitarix, dragonfly-reverb, lsp-plugins-lv2, x42-plugins,
+# zam-plugins) are all gone for now.
+#
+# Not because the DAW work was wrong - the session builds and runs - but
+# because the monitoring path crackles and Ardour was measurably part of it:
+# it burned 57% of every 32-frame quantum (pw-top B/Q 0.57), and stopping it
+# cut the codec's xruns from 233 to 88 per 16s. An appliance cannot be
+# debugged with its heaviest consumer in the graph.
+#
+# Restore from git history when the audio path is clean.
 
 # --- emulator runtime --------------------------------------------------
 # /usr/local/bin/mpc is a hand-built binary, NOT a package. Nothing in
@@ -61,6 +58,13 @@ libwayland-client0
 libwayland-cursor0
 libxkbcommon0
 libdecor-0-0
+# libfontconfig1, and the reason is the whole point of this section: purging
+# Ardour and running `apt-get autoremove` took it out, because nothing in apt
+# depended on it any more - and /usr/local/bin/mpc is not a package, so its
+# dependency on it is invisible to apt. The emulator then died on every start
+# with "libfontconfig.so.1: cannot open shared object file", 40 restarts deep,
+# minutes after the audio path had finally been made clean.
+libfontconfig1
 
 # --- the control surface -----------------------------------------------
 # pyusb, for the Maschine MK1 hub. Note the kernel's own snd-usb-caiaq
