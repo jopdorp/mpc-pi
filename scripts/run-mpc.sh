@@ -525,6 +525,35 @@ case "$timing_master" in
         ;;
 esac
 
+# MPC_THROTTLE_MODE overrides what the timing master implies.
+#
+# timing_master=audio pairs MAME_PIPEWIRE_AUDIO_CLOCK=1 with -nothrottle,
+# because the audio backend is then supposed to pace the emulator: it blocks
+# when the buffer is full and MAME needs no throttle of its own. That holds on
+# the development host.
+#
+# It does not hold on the Raspberry Pi appliance. There, unthrottled MAME
+# free-runs at 100% of its core and floods its own stream - three consecutive
+# 6-second samples of PipeWire's error counter on the emulator's node:
+#
+#     -nothrottle:  9556, 9550, 9617
+#     -throttle:     259 per 8s
+#
+# So the pairing is a default and not a law, and the appliance needs to say so
+# rather than either giving up the audio clock or accepting the flood. Why the
+# backpressure does not arrive there is still open.
+throttle_mode=${MPC_THROTTLE_MODE:-auto}
+case "$throttle_mode" in
+    auto)       ;;
+    throttle)   throttle_option=-throttle ;;
+    nothrottle) throttle_option=-nothrottle ;;
+    *)
+        printf 'error: MPC_THROTTLE_MODE must be auto, throttle, or nothrottle, got %s\n' \
+            "$throttle_mode" >&2
+        exit 2
+        ;;
+esac
+
 if [[ ! -x "$mame_bin" ]]; then
     printf 'error: release MAME binary not found at %s; run scripts/build-mame.sh first\n' "$mame_bin" >&2
     exit 1
@@ -574,7 +603,7 @@ printf 'Starting %s BIOS %s with native PipeWire; quantum=%s, latency=%s (~%s ms
     "$system_name" "$bios_name" "$pipewire_quantum" "$pipewire_latency" "$latency_ms"
 printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s (PipeWire runs above it at RR 90)\n' \
     "$mame_cpuset" "$mame_nice" "$mame_rt_priority"
-printf 'Timing master: %s\n' "$timing_master"
+printf 'Timing master: %s (%s)\n' "$timing_master" "${throttle_option#-}"
 if [[ -n "$sound_updates_per_quantum" ]]; then
     printf 'Sound update cadence: %s frames (%s per %s-frame quantum at %s Hz)\n' \
         "$sound_update_frames" "$sound_updates_per_quantum" "$pipewire_frames" "$pipewire_rate"
@@ -600,6 +629,32 @@ if [[ "$system_name" == mpc2000xl ]]; then
         printf 'LCD frame updates: every-frame\n'
     fi
 fi
+# Renderer flags only when there IS a renderer.
+#
+# -window, -view, -filter, -maximize, -resolution, -artwork_resolution and
+# -gl_vbo were passed unconditionally, including with -video none. On a desktop
+# build MAME accepts and ignores them; the appliance's binary is built headless
+# and has no OpenGL at all, so it exited with
+#
+#     Error: unknown option: -gl_vbo
+#
+# status 6/NOTCONFIGURED, 64 restarts deep. The flags were harmless only because
+# every machine that had run this script so far happened to have a renderer
+# compiled in - which is exactly the kind of assumption that breaks the moment
+# the script is used somewhere new, and the appliance is somewhere new.
+window_options=()
+if [[ "$video_mode" != none ]]; then
+    window_options=(
+        -window
+        -view "$view_name"
+        "$filter_option"
+        "$maximize_option"
+        -resolution "$window_resolution"
+        -artwork_resolution "$artwork_resolution"
+        "$gl_vbo_option"
+    )
+fi
+
 printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, window-resolution=%s, artwork-resolution=%s, screen-filter=%s, ogl-vbo=%s\n' \
     "$video_mode" "$async_present" "$external_event_loop" "$view_name" \
     "$window_resolution" "$artwork_resolution" "$filter_mode" "$gl_vbo"
@@ -632,13 +687,7 @@ exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_
     -nvram_directory "$runtime_dir/nvram" \
     -snapshot_directory "$runtime_dir/snap" \
     -state_directory "$runtime_dir/sta" \
-    -window \
-	-video "$video_mode" \
-	-view "$view_name" \
-	"$filter_option" \
-	"$maximize_option" \
-	-resolution "$window_resolution" \
-	-artwork_resolution "$artwork_resolution" \
-	"$gl_vbo_option" \
+    -video "$video_mode" \
+    "${window_options[@]}" \
     "$throttle_option" \
     "$@"
