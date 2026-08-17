@@ -18,7 +18,7 @@ previous stage already proved:
             complement of the level, Macchina does not.
 
 Usage:
-    mk1-screen-test.py [fill|split|gradient|all] [display]
+    mk1-screen-test.py [fill|split|gradient|bias|all] [display]
 """
 import os
 import sys
@@ -246,6 +246,47 @@ def pack(level_at):
     return bytes(out)
 
 
+def bias_sweep(s, screen=0, hold=6):
+    """Sweep the LCD bias / internal-resistor-ratio register.
+
+    Vertical crosstalk - a column of lit pixels bleeding into the rest of
+    that column - is inherent to passive-matrix STN, but bias mismatch is the
+    single biggest contributor to it, and this project has been sending
+    cabl's values (0x08 then 0x0B to register 0x20) without ever trying
+    another.
+    //
+    The pattern is chosen to PROVOKE the artefact: alternating fully-lit and
+    fully-dark columns is the worst case for column crosstalk, so whichever
+    bias value makes it least visible is the one to keep.
+    //
+    Ticks along the top count the step, so the panel labels itself.
+    """
+    def pattern(ticks):
+        def f(x, y):
+            if y < 8:
+                i = x // 12
+                return 0x1F if (i < ticks and x % 12 < 8) else 0x00
+            if y < 11:
+                return 0x00
+            # Worst case for column bleed: hard alternating stripes.
+            return 0x1F if (x // 6) % 2 == 0 else 0x00
+        return pack(f)
+
+    values = (0x04, 0x06, 0x08, 0x0A, 0x0B, 0x0D, 0x0F)
+    print("Bias sweep on screen %d. Ticks at the top = step number." % screen)
+    print("Watch the vertical bleeding between the stripes.\n")
+    for i, v in enumerate(values, start=1):
+        s.init_display(screen)
+        # Re-issue the bias register with the value under test, after init so
+        # it is not overwritten by init's own pair.
+        s.w(bytes([screen << 1, 0x00, 0x02, 0x20, v]))
+        s.send_frame(screen, pattern(i))
+        print("  %d tick(s) = bias 0x%02X" % (i, v), flush=True)
+        time.sleep(hold)
+    print("\nWhich step had the least vertical bleeding? That value goes in")
+    print("mk1_display.init_commands as the 0x20 parameter.")
+
+
 def main():
     what = sys.argv[1] if len(sys.argv) > 1 else "all"
     which = int(sys.argv[2]) if len(sys.argv) > 2 else 0
@@ -269,6 +310,9 @@ def main():
     # usb_max_current_enable=1 is set in config.txt. Driving 62 LEDs and
     # two backlights at 0x7F is a plausible way to brown out the very
     # device under test - which happened once, and cost a replug.
+    if what == "bias":
+        bias_sweep(s, which)
+        return 0
     if what in ("all", "fill"):
         # Uniform frames are uniform under ANY packing: this isolates
         # init and chunking from the pixel format entirely.
