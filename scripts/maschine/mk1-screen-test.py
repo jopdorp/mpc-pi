@@ -149,23 +149,46 @@ class Mk1Screens:
         bank.flush(lambda ep, data: self.w(ep, data), force=True)
 
     def init_display(self, index):
+        """The COMPLETE sequence from cabl's initDisplay - all 22 commands.
+
+        The protocol doc listed only the first 12, stopping at {d,00,01,31}.
+        The omitted tail contains {d,00,01,0xAF}, which on this class of
+        LCD controller is DISPLAY ON (0xAE being off). So every frame this
+        project ever sent was correctly formatted and pushed into a panel
+        that had never been switched on - writes succeeded, contrast swept
+        the whole range, and nothing could possibly appear.
+        """
         d = index << 1
-        for cmd in ([d, 0x00, 0x01, 0x30],
-                    [d, 0x00, 0x04, 0xCA, 0x04, 0x0F, 0x00]):
-            self.w(EP_DISPLAY, bytes(cmd))
+        W = lambda *b: self.w(EP_DISPLAY, bytes((d,) + b))
+        W(0x00, 0x01, 0x30)
+        W(0x00, 0x04, 0xCA, 0x04, 0x0F, 0x00)
         time.sleep(0.02)
-        for cmd in ([d, 0x00, 0x02, 0xBB, 0x00],
-                    [d, 0x00, 0x01, 0xD1],
-                    [d, 0x00, 0x01, 0x94],
-                    [d, 0x00, 0x03, 0x81, 0x1E, 0x02]):
-            self.w(EP_DISPLAY, bytes(cmd))
+        W(0x00, 0x02, 0xBB, 0x00)
+        W(0x00, 0x01, 0xD1)
+        W(0x00, 0x01, 0x94)
+        W(0x00, 0x03, 0x81, 0x1E, 0x02)
         time.sleep(0.02)
-        self.w(EP_DISPLAY, bytes([d, 0x00, 0x02, 0x20, 0x08]))
+        W(0x00, 0x02, 0x20, 0x08)
         time.sleep(0.02)
-        self.w(EP_DISPLAY, bytes([d, 0x00, 0x02, 0x20, 0x0B]))
+        W(0x00, 0x02, 0x20, 0x0B)
         time.sleep(0.02)
-        for cmd in ([d, 0x00, 0x01, 0xA6], [d, 0x00, 0x01, 0x31]):
-            self.w(EP_DISPLAY, bytes(cmd))
+        W(0x00, 0x01, 0xA6)              # normal (non-inverted) display
+        W(0x00, 0x01, 0x31)
+        # --- everything below was missing from the doc ---
+        W(0x00, 0x04, 0x32, 0x00, 0x00, 0x05)
+        W(0x00, 0x01, 0x34)
+        W(0x00, 0x01, 0x30)
+        W(0x00, 0x04, 0xBC, 0x00, 0x01, 0x02)
+        W(0x00, 0x03, 0x75, 0x00, 0x3F)  # row window 0..63
+        W(0x00, 0x03, 0x15, 0x00, 0x54)  # column window 0..84
+        W(0x00, 0x01, 0x5C)
+        W(0x00, 0x01, 0x25)
+        time.sleep(0.02)
+        W(0x00, 0x01, 0xAF)              # DISPLAY ON - the missing command
+        time.sleep(0.02)
+        W(0x00, 0x04, 0xBC, 0x02, 0x01, 0x01)
+        W(0x00, 0x01, 0xA6)
+        W(0x00, 0x03, 0x81, 0x25, 0x02)  # contrast 0x25
 
     def send_frame(self, index, frame):
         assert len(frame) == FRAME_BYTES, len(frame)

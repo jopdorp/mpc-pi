@@ -43,7 +43,22 @@ FRAME_BYTES = 21 * 502 + 338  # 10880 = DISPLAY_H * ROW_BYTES
 # while Macchina maps lit pixels straight to 0x1F. If cabl is right, our
 # whole brightness hierarchy renders upside down. One frame on hardware
 # settles it; until then this is a single flag rather than a rewrite.
-INVERT = os.environ.get("MPC_MK1_INVERT", "0") not in ("0", "", "no")
+# Polarity: SETTLED ON HARDWARE 2026-08-17, and the default is now 1.
+#
+# A split frame with level 0x00 on the left half and 0x1F on the right was
+# viewed head-on: the RIGHT half - level 0x1F - is the DARKER one. So a
+# high wire value is DARK and 0x00 is light. The panel is inverse video,
+# which matches reviews describing the MK1 that way next to the MK2, and
+# matches cabl's setPixel storing the complement.
+#
+# This code takes `lit` as brightness INTENT (0 = background, 31 = full
+# brightness), so intent must be complemented before it goes on the wire
+# for bright things to look bright. Hence INVERT defaults to on.
+#
+# Read the panel HEAD-ON when checking this. These LCDs shift so much
+# with viewing angle that the first observation of this very test read the
+# opposite way round, and the wrong conclusion was briefly committed.
+INVERT = os.environ.get("MPC_MK1_INVERT", "1") not in ("0", "", "no")
 
 HEADER_FMT = "<4sIHHI"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -112,28 +127,59 @@ class Mk1Usb:
             raise RuntimeError("no Maschine MK1 found (vendor 0x17cc)")
         if self.dev.is_kernel_driver_active(0):
             self.dev.detach_kernel_driver(0)
-        self.dev.set_configuration()
+        try:
+            self.dev.set_configuration()
+        except Exception:
+            pass                      # already configured
+        # MANDATORY: in the default altsetting 0 the display endpoint 0x08
+        # is not present at all and every write fails EIO.
+        usb.util.claim_interface(self.dev, 0)
+        self.dev.set_interface_altsetting(interface=0, alternate_setting=1)
         self.d = display_index << 1
 
     def _w(self, header, payload=b""):
         self.dev.write(EP_DISPLAY, bytes(header) + payload, timeout=1000)
 
     def init_display(self):
+        """The COMPLETE sequence - all 22 commands, verified on hardware.
+
+        This used to stop at {d,00,01,31}, which is where the protocol doc
+        stopped. The omitted tail contains {d,00,01,0xAF} - DISPLAY ON.
+        Without it every frame was correctly formatted, accepted by the
+        device, and pushed into a panel that had never been switched on:
+        writes succeeded, a full contrast sweep changed nothing, and the
+        screens showed only their backlight.
+        """
         d = self.d
-        self._w([d, 0x00, 0x01, 0x30])
-        self._w([d, 0x00, 0x04, 0xCA, 0x04, 0x0F, 0x00])
+        W = lambda *b: self._w((d,) + b)
+        W(0x00, 0x01, 0x30)
+        W(0x00, 0x04, 0xCA, 0x04, 0x0F, 0x00)
         time.sleep(0.02)
-        self._w([d, 0x00, 0x02, 0xBB, 0x00])
-        self._w([d, 0x00, 0x01, 0xD1])
-        self._w([d, 0x00, 0x01, 0x94])
-        self._w([d, 0x00, 0x03, 0x81, 0x1E, 0x02])
+        W(0x00, 0x02, 0xBB, 0x00)
+        W(0x00, 0x01, 0xD1)
+        W(0x00, 0x01, 0x94)
+        W(0x00, 0x03, 0x81, 0x1E, 0x02)
         time.sleep(0.02)
-        self._w([d, 0x00, 0x02, 0x20, 0x08])
+        W(0x00, 0x02, 0x20, 0x08)
         time.sleep(0.02)
-        self._w([d, 0x00, 0x02, 0x20, 0x0B])
+        W(0x00, 0x02, 0x20, 0x0B)
         time.sleep(0.02)
-        self._w([d, 0x00, 0x01, 0xA6])
-        self._w([d, 0x00, 0x01, 0x31])
+        W(0x00, 0x01, 0xA6)
+        W(0x00, 0x01, 0x31)
+        W(0x00, 0x04, 0x32, 0x00, 0x00, 0x05)
+        W(0x00, 0x01, 0x34)
+        W(0x00, 0x01, 0x30)
+        W(0x00, 0x04, 0xBC, 0x00, 0x01, 0x02)
+        W(0x00, 0x03, 0x75, 0x00, 0x3F)
+        W(0x00, 0x03, 0x15, 0x00, 0x54)
+        W(0x00, 0x01, 0x5C)
+        W(0x00, 0x01, 0x25)
+        time.sleep(0.02)
+        W(0x00, 0x01, 0xAF)              # DISPLAY ON
+        time.sleep(0.02)
+        W(0x00, 0x04, 0xBC, 0x02, 0x01, 0x01)
+        W(0x00, 0x01, 0xA6)
+        W(0x00, 0x03, 0x81, 0x25, 0x02)
 
     def send_frame(self, frame):
         d = self.d

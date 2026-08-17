@@ -32,9 +32,9 @@ breaks out once it runs past the end of the buffer. Corrected here and in
 `scripts/maschine/mpc-mk1-display.py`; still unverified against hardware,
 so confirm the chunk count during MK1 bring-up.
 
-## Init sequence (per display, after claiming the interface)
+## Init sequence (per display) - ALL 22 COMMANDS
 
-Command packets are `{d, 0x00, length, bytes...}`:
+Command packets are `{d, 0x00, length, bytes...}` with `d = index << 1`.
 
 ```
 {d, 00, 01, 30}
@@ -49,9 +49,32 @@ Command packets are `{d, 0x00, length, bytes...}`:
   sleep 20 ms
 {d, 00, 02, 20 0B}
   sleep 20 ms
-{d, 00, 01, A6}
+{d, 00, 01, A6}           ; normal (non-inverted) scan
 {d, 00, 01, 31}
+{d, 00, 04, 32 00 00 05}
+{d, 00, 01, 34}
+{d, 00, 01, 30}
+{d, 00, 04, BC 00 01 02}
+{d, 00, 03, 75 00 3F}     ; row window 0..63
+{d, 00, 03, 15 00 54}     ; column window 0..84
+{d, 00, 01, 5C}
+{d, 00, 01, 25}
+  sleep 20 ms
+{d, 00, 01, AF}           ; *** DISPLAY ON ***
+  sleep 20 ms
+{d, 00, 04, BC 02 01 01}
+{d, 00, 01, A6}
+{d, 00, 03, 81 25 02}     ; contrast 0x25
 ```
+
+**An earlier version of this document stopped at `{d,00,01,31}` - twelve
+commands - and the code followed it.** The omitted tail contains
+`{d,00,01,0xAF}`, which is DISPLAY ON for this class of controller
+(`0xAE` being off). The consequence was maximally confusing: every frame
+was correctly packed, every USB write succeeded, a full contrast sweep
+from `0x00` to `0x3F` changed nothing, and both screens showed only their
+backlight. There was no error anywhere to follow. Adding the missing tail
+made patterns appear immediately.
 
 ## Frame transmission (per display)
 
@@ -86,23 +109,30 @@ launcher's `internal-pads` mode (patch 0020) through a virtual MIDI port.
 ## References
 
 - https://github.com/shaduzlabs/cabl (MK1 device + display classes)
-- https://github.com/biappi/Macchina (independent MK1 RE, display upload PoC)
+- https://github.com/biappi/Macchina - **not a USB-level reference.** It
+  is a macOS project that talks to Native Instruments' own driver agent
+  (`NIAgent`, `NIControllerRequestClient`), so it cannot corroborate
+  endpoints, init sequences or transfer structure. It *is* a valid
+  reference for pixel packing: `NIImageConversions.m` produces
+  `dstColor << 3`, then `|= dstColor >> 2` with `<< 6` into the next byte
+  - identical to ours, bit for bit.
 - https://github.com/fzero/maschine-mk1 (Linux-focused MK1 notes)
 
 
-## Unresolved: display polarity
+## Display polarity - SETTLED (2026-08-17)
 
-Two reverse-engineering sources disagree, and it matters because the DAW
-pages use 32 grey levels as a hierarchy. cabl's `setPixel` stores the
-**complement** of the 5-bit level, which would make `0x1F` the *darkest*
-value and the panel dark-on-light — consistent with reviews describing
-the MK1 as "inverse video" next to the MK2's white-on-black. Macchina
-maps lit pixels straight to `0x1F` with no inversion.
+**A high wire value is DARK.** A split frame with level `0x00` on the left
+half and `0x1F` on the right, viewed head-on, shows the right half darker.
+The panel is inverse video, which matches reviews describing the MK1 that
+way next to the MK2, and matches cabl's `setPixel` storing the complement.
 
-If cabl is right, every page renders with its brightness upside down.
-`scripts/maschine/mpc-mk1-display.py` therefore takes `MPC_MK1_INVERT=1`,
-so bring-up flips one flag instead of editing the renderer. Send one
-frame with a known gradient and record the answer here.
+`mpc-mk1-display.py` takes `lit` as brightness *intent* (0 = background,
+31 = full), so intent is complemented before it goes on the wire.
+`MPC_MK1_INVERT` therefore now defaults to **1**.
+
+**Read the panel head-on.** These LCDs shift so far with viewing angle
+that the first observation of this very test read the opposite way round,
+and the wrong default was briefly committed on the strength of it.
 
 ## Verified control inventory
 
@@ -263,11 +293,14 @@ reads as "the device is not listening", when it means "the host has
 stopped listening". This is why cabl runs an async read loop and sends
 output on a tick.
 
-**Still unsolved:** even with draining before every write, roughly half
-of all LED writes time out (77 ok / 75 failed over 24s). Retrying gets
-them through and the panel responds correctly, but the I/O model needs to
-be async before display frames - 22 chunks of 502 bytes per frame, per
-screen - can be pushed reliably.
+**Retired.** This section previously recorded that "roughly half of all
+LED writes time out" (77 ok / 75 failed over 24s) and called for an async
+I/O model. That was not a property of the protocol - it was a symptom of
+a device already degrading, the same degradation that ended with it
+falling off the bus. After a replug, a healthy device takes **1194
+consecutive writes with zero retries**, including full display frames at
+22 chunks in 0.3s. Draining before writing is still required; retrying is
+not.
 
 ### LEDs are on 0x01, and 0x08 lies
 
