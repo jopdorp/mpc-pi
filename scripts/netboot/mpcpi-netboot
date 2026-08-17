@@ -291,15 +291,22 @@ start() {
 	exportfs -ra 2>/dev/null || echo "warning: exportfs failed" >&2
 
 	stop_quiet
+	# --port=0 used to disable dnsmasq's resolver, so the board received a
+	# default route to this host and no way to turn a name into an
+	# address. It now answers DNS on $SERVER_IP only - --bind-interfaces
+	# keeps it off 0.0.0.0:53, so systemd-resolved on 127.0.0.53 is
+	# untouched - and hands itself out as the resolver via option 6.
 	dnsmasq --interface="$IFACE" --bind-interfaces \
 		--dhcp-range="$DHCP_RANGE" --dhcp-option=66,"$SERVER_IP" \
 		--pxe-service=0,"Raspberry Pi Boot" \
 		--enable-tftp --tftp-root="$TFTP_ROOT" \
 		--log-dhcp --log-facility="$LOGFILE" \
-		--pid-file="$PIDFILE" --port=0 ||
+		--pid-file="$PIDFILE" \
+		--listen-address="$SERVER_IP" --dhcp-option=6,"$SERVER_IP" ||
 		die "dnsmasq failed to start"
 
 	open_firewall
+	enable_nat
 
 	echo "netboot ready on $IFACE ($SERVER_IP), serving $TFTP_ROOT"
 	echo "watch: sudo tail -f $LOGFILE"
@@ -316,6 +323,58 @@ start() {
 # enumerating them is both fragile and longer. This interface is a direct
 # cable to our own board, so allowing it wholesale opens nothing the Pi
 # cannot already reach, and leaves wifi and every other link untouched.
+# The DHCP server has been handing the board "router 192.168.7.1" since
+# the beginning, which is this host - but nothing here ever routed, so
+# the board had a default route to a machine that dropped its packets.
+# apt, DNS and the clock all failed in ways that looked like the board's
+# fault.
+#
+# Uplink is whichever interface owns the default route, resolved at call
+# time rather than pinned: this host moves between wifi and ethernet.
+uplink_iface() {
+	ip route show default 2>/dev/null | awk '/^default/ {print $5; exit}'
+}
+
+enable_nat() {
+	local up; up=$(uplink_iface)
+	[ -n "$up" ] && [ "$up" != "$IFACE" ] || { echo "  no uplink to NAT through"; return 0; }
+	command -v iptables >/dev/null 2>&1 || { echo "  no iptables; skipping NAT"; return 0; }
+
+	# Leave the global setting alone if it is already on - this host runs
+	# docker and libvirt, which set it for their own reasons, and turning
+	# it off in stop() would break them.
+	if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" != "1" ]; then
+		echo 1 > /proc/sys/net/ipv4/ip_forward
+		touch /run/mpcpi-netboot.forward-was-off
+	fi
+
+	# -C before -A on every rule: this runs on each start, and docker
+	# already owns a busy FORWARD chain that must not collect duplicates.
+	iptables -t nat -C POSTROUTING -s "$SUBNET" -o "$up" -j MASQUERADE 2>/dev/null ||
+		iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$up" -j MASQUERADE
+	iptables -C FORWARD -i "$IFACE" -o "$up" -j ACCEPT 2>/dev/null ||
+		iptables -I FORWARD 1 -i "$IFACE" -o "$up" -j ACCEPT
+	iptables -C FORWARD -i "$up" -o "$IFACE" -m state \
+		--state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null ||
+		iptables -I FORWARD 1 -i "$up" -o "$IFACE" -m state \
+			--state RELATED,ESTABLISHED -j ACCEPT
+	echo "  NAT: $SUBNET -> $up (the board can reach the internet)"
+}
+
+disable_nat() {
+	local up; up=$(uplink_iface)
+	[ -n "$up" ] || return 0
+	iptables -t nat -D POSTROUTING -s "$SUBNET" -o "$up" -j MASQUERADE 2>/dev/null
+	iptables -D FORWARD -i "$IFACE" -o "$up" -j ACCEPT 2>/dev/null
+	iptables -D FORWARD -i "$up" -o "$IFACE" -m state \
+		--state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+	if [ -f /run/mpcpi-netboot.forward-was-off ]; then
+		echo 0 > /proc/sys/net/ipv4/ip_forward
+		rm -f /run/mpcpi-netboot.forward-was-off
+	fi
+	return 0
+}
+
 open_firewall() {
 	command -v ufw >/dev/null || return 0
 	ufw status 2>/dev/null | head -1 | grep -q "active" || return 0
@@ -346,6 +405,7 @@ stop() {
 	[ "$(id -u)" -eq 0 ] || die "must run as root"
 	stop_quiet
 	close_firewall
+	disable_nat
 	[ -n "$IFACE" ] && ip addr del "$SERVER_IP/24" dev "$IFACE" 2>/dev/null
 	# Also clear the address wherever else it may have been left, which
 	# is how the older script stranded it on an unplugged dongle.
