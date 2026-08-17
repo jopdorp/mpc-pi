@@ -181,8 +181,18 @@ start() {
 		echo "  NetworkManager told to leave $IFACE alone ($NM_DROPIN)"
 	fi
 
-	ip addr flush dev "$IFACE" 2>/dev/null
-	ip addr add "$SERVER_IP/24" dev "$IFACE" || die "could not set $SERVER_IP"
+	# Only disturb the address if it is actually wrong. A running board
+	# has its NFS ROOT on the far end of this interface, so flushing is
+	# not a free no-op - it is pulling the filesystem out from under a
+	# live machine. `start` is also the documented recovery command, so
+	# it gets run on a healthy rig by someone fixing something else.
+	if [ "$(ip -4 -br addr show "$IFACE" 2>/dev/null | awk '{print $3}')" \
+		= "$SERVER_IP/24" ]; then
+		echo "  address already $SERVER_IP/24, left alone"
+	else
+		ip addr flush dev "$IFACE" 2>/dev/null
+		ip addr add "$SERVER_IP/24" dev "$IFACE" || die "could not set $SERVER_IP"
+	fi
 	ip link set "$IFACE" up
 
 	mkdir -p "$TFTP_ROOT"
