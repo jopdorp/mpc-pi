@@ -60,15 +60,53 @@ hdr "kernel"
 # uname -v, not /sys/kernel/realtime: that file does not exist on 6.12
 # even on a PREEMPT_RT build, so testing for it reports a stock kernel
 # on an RT one. The version string carries the preemption model.
+# This is a FAILURE, not a note. Running the stock kernel is not a
+# lesser configuration of this appliance - it is a different machine,
+# and every latency number taken on it is void. It was a note once, and
+# that is exactly how the board ran 6.18.34+rpt stock for an unknown
+# stretch: apt installed linux-image-6.18.34+rpt-rpi-2712, which writes
+# kernel_2712.img - the filename build-rt-kernel.sh used - and nothing
+# ever said so out loud.
 if uname -v | grep -q PREEMPT_RT; then
 	ok "PREEMPT_RT kernel ($(uname -r))"
 else
-	note "not PREEMPT_RT ($(uname -r)) - run scripts/build-rt-kernel.sh"
+	bad "NOT PREEMPT_RT - running $(uname -r), $(uname -v)"
+	echo "    Every latency measurement on this kernel is void."
+	echo "    Serve the RT kernel:  sudo mpcpi-netboot kernel rt"
+	echo "    Or build one:         scripts/build-rt-kernel.sh"
 fi
-if [ "$(cat /sys/devices/system/cpu/nohz_full 2>/dev/null)" = "2-3" ]; then
-	ok "nohz_full=2-3 honoured"
+
+# Requested on the cmdline is not the same as in effect. The stock
+# kernel accepted nohz_full=1-3 and silently ignored it - no
+# CONFIG_NO_HZ_FULL - leaving this file empty while /proc/cmdline looked
+# perfectly correct. Compare against what the tuning file asks for
+# rather than a number pasted here, which is how the old "2-3" survived
+# the widening to 1-3.
+want_nohz=$(grep -oE 'nohz_full=[^ ]+' \
+	"$(dirname "$0")/../../board/rpi5/cmdline-tuning" 2>/dev/null |
+	cut -d= -f2)
+[ -n "$want_nohz" ] || want_nohz=$(grep -oE 'nohz_full=[^ ]+' /proc/cmdline |
+	cut -d= -f2)
+have_nohz=$(cat /sys/devices/system/cpu/nohz_full 2>/dev/null)
+if [ -n "$want_nohz" ] && [ "$have_nohz" = "$want_nohz" ]; then
+	ok "nohz_full=$have_nohz in effect"
+elif [ -z "$have_nohz" ]; then
+	bad "nohz_full requested ($want_nohz) but EMPTY - kernel lacks CONFIG_NO_HZ_FULL"
 else
-	bad "nohz_full not in effect (needs CONFIG_NO_HZ_FULL)"
+	bad "nohz_full is '$have_nohz', tuning asks for '$want_nohz'"
+fi
+
+# isolcpus the same way: what the scheduler actually honoured.
+want_iso=$(grep -oE 'isolcpus=[^ ]+' \
+	"$(dirname "$0")/../../board/rpi5/cmdline-tuning" 2>/dev/null | cut -d= -f2)
+have_iso=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)
+if [ -n "$want_iso" ] && [ "$have_iso" = "$want_iso" ]; then
+	ok "isolcpus=$have_iso in effect"
+else
+	bad "isolated cores are '$have_iso', tuning asks for '$want_iso'"
+	echo "    A netbooting Pi reads cmdline.txt over TFTP, not from its"
+	echo "    root - so tune-realtime.sh cannot fix this. Re-run:"
+	echo "      sudo mpcpi-netboot start"
 fi
 
 hdr "cpu"

@@ -32,7 +32,12 @@ $SSH "root@$HOST" "install -d $DEST" || {
 # Only what the board actually executes. tests/ comes along because the
 # suite is meant to run ON the board - that is the whole point of having
 # it - and it is small.
-for d in scripts tests; do
+# board/ carries cmdline-tuning, which verify.sh compares the running
+# isolation against. Without it here, that check silently degrades to
+# comparing against nothing - the same shape of failure it exists to
+# catch. It is a handful of small text files, not the 16GB results/
+# tree this allowlist was written to avoid.
+for d in scripts tests board; do
 	rsync -rlpt --delete \
 		--exclude '__pycache__' --exclude '*.pyc' \
 		-e "$SSH" \
@@ -40,4 +45,4 @@ for d in scripts tests; do
 done
 
 $SSH "root@$HOST" "chmod +x $DEST/scripts/*/*.sh $DEST/scripts/*.sh 2>/dev/null; true"
-echo "synced scripts/ and tests/ to $HOST:$DEST"
+echo "synced scripts/, tests/ and board/ to $HOST:$DEST"
