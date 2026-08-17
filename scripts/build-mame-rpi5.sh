@@ -182,6 +182,33 @@ export SDL_INSTALL_ROOT="$staging_dir/usr"
 # kernel. The cost is under 64KB of padding in a 54MB executable.
 max_page=65536
 
+# REGENIE only when the project actually needs regenerating.
+#
+# This passed REGENIE=1 on every invocation, which regenerates the GENie project
+# files, which makes every object look out of date - so a one-line change to one
+# .cpp recompiled the entire emulator. A full cross build is ~15 minutes; the
+# incremental one it should have been is well under one.
+#
+# The project depends on the build parameters, not on the source, so regenerate
+# when those change (or when the project is missing) and not otherwise. The
+# stamp below is the same idea build-mame.sh already uses for its object tree.
+regenie_stamp="$mame_source_dir/build/.mpcpi-rpi5-genie-stamp"
+regenie_key=$(printf '%s|%s|%s|%s' \
+    "$cross_prefix" "$MPC_SYSROOT" "$archopts" \
+    'SUBTARGET=mpc OSD=sdl NO_X11=1 NO_USE_PULSEAUDIO=1 NO_OPENGL=1 NO_USE_XINPUT=1' |
+    sha256sum | cut -d' ' -f1)
+regenie_argument=()
+if [[ ! -d "$mame_source_dir/build/projects" ]] ||
+        [[ ! -f "$regenie_stamp" ]] ||
+        [[ "$(cat "$regenie_stamp" 2>/dev/null)" != "$regenie_key" ]]; then
+    printf 'build parameters changed (or first build); regenerating the project\n'
+    regenie_argument=(REGENIE=1)
+    mkdir -p "$(dirname "$regenie_stamp")"
+    printf '%s' "$regenie_key" > "$regenie_stamp"
+else
+    printf 'project unchanged; incremental build\n'
+fi
+
 make -C "$mame_source_dir" \
     SUBTARGET=mpc \
     SOURCES=src/mame/akai/mpc60.cpp,src/mame/akai/mpc2000.cpp,src/mame/akai/mpc3000.cpp \
@@ -196,7 +223,7 @@ make -C "$mame_source_dir" \
     SYMBOLS=0 \
     NOWERROR=1 \
     ARCHITECTURE= \
-    REGENIE=1 \
+    "${regenie_argument[@]}" \
     CROSS_BUILD=1 \
     OVERRIDE_CC="${cross_prefix}gcc" \
     OVERRIDE_CXX="${cross_prefix}g++" \

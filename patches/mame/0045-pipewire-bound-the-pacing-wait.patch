@@ -1,0 +1,297 @@
+From: mpc-pi
+Subject: [PATCH] pipewire: size the output cushion in quanta, and stop one late callback blanking the stream
+
+Measured from the codec's monitor ports on the Raspberry Pi appliance - the
+samples the DAC actually receives, rather than a counter:
+
+    7.81s of audio, 69 dropouts, EVERY ONE exactly 64 samples
+
+One graph quantum each, ~8.8 per second. The device was clean throughout (ALSA
+xruns zero) and the emulator was running well above realtime, so neither end was
+at fault: single cycles where the producer had nothing ready and the callback
+handed the graph a buffer of silence.
+
+Two causes, both here.
+
+The cushion was "one quantum plus one producer update" - 96 frames at a 64-frame
+quantum, 2.2ms - which absorbs no jitter at all. It is now a configurable number
+of quanta (MAME_PIPEWIRE_PREBUFFER_QUANTA, default 4). At q64 that is 5.8ms of
+output cushion, still an instrument latency, unlike the 23ms that a 1024-frame
+quantum costs to paper over the same jitter.
+
+And a single short callback re-armed prebuffering, which replaces the following
+callbacks with memset(0) until the cushion refills. abuffer::get() already
+handles a shortfall gently - it repeats the last sample, explicitly "to prevent
+audible pop" - so re-arming on top of that turned one frame of lateness into
+whole buffers of digital silence, which is why every gap measured was an exact
+multiple of the buffer size. The cushion is now rebuilt only after
+MAME_PIPEWIRE_REARM_AFTER consecutive short callbacks (default 8).
+
+Also in this patch, both found while chasing the above:
+
+  * The pacing loop was unbounded, exiting only when the ring had drained to the
+    cushion, so emulation progress was conditional on PipeWire continuing to
+    consume. When consumption stalled the emulator stalled: at a 256-frame
+    quantum the machine froze outright, LCD export stale, CPU at a few percent,
+    systemd still reporting the service active, and the MPC stuck on its boot
+    screen with nothing logging an error. MAME_PIPEWIRE_PACE_BUDGET_US bounds it.
+
+  * m_prebuffer_frames and m_producer_frames are running maxima that only grow,
+    and restarting pacing cleared the buffers but not those, so one oversized
+    write inflated the cushion for the rest of the session.
+
+  * MAME_PIPEWIRE_LATE_US makes the late-update threshold settable; hardcoded at
+    5500us it showed only the worst outliers.
+
+Note for whoever reads pw-top next: its client ERR column is not a dropout
+counter. docs/system-placement.md already records that the emulator's nodes
+accrued 1,600/s of it while the audio was provably clean, and this patch's
+author spent an evening re-learning it.
+---
+ src/osd/modules/sound/pipewire_sound.cpp | 
+
+diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pipewire_sound.cpp
+--- a/src/osd/modules/sound/pipewire_sound.cpp
++++ b/src/osd/modules/sound/pipewire_sound.cpp
+@@ -28,6 +28,7 @@
+ 
+ #include <chrono>
+ #include <cstdlib>
++#include <ctime>
+ #include <cstring>
+ #include <fstream>
+ #include <map>
+@@ -114,6 +115,7 @@
+ 		uint32_t m_updates_since_report;
+ 		uint32_t m_prebuffer_frames;
+ 		uint32_t m_producer_frames;
++		uint32_t m_consecutive_underruns;
+ 		uint32_t m_last_underrun_requested;
+ 		uint32_t m_last_underrun_available;
+ 		int64_t m_last_underrun_callback_gap_us;
+@@ -122,7 +124,7 @@
+ 		std::chrono::steady_clock::time_point m_last_callback;
+ 		std::vector<int16_t> m_capture;
+ 
+-		stream_info(sound_pipewire *wire, bool is_output, uint32_t osdid, uint32_t channels, uint32_t rate, std::string name = {}) : m_wire(wire), m_is_output(is_output), m_wait_stream(true), m_osdid(osdid), m_channels(channels), m_rate(rate), m_name(std::move(name)), m_stream(nullptr), m_buffer(channels, rate), m_last_underruns(0), m_last_overruns(0), m_observed_underruns(0), m_observed_overruns(0), m_updates_since_report(0), m_prebuffer_frames(0), m_producer_frames(0), m_last_underrun_requested(0), m_last_underrun_available(0), m_last_underrun_callback_gap_us(0), m_prebuffering(true), m_buffer_stats_ready(false) {}
++		stream_info(sound_pipewire *wire, bool is_output, uint32_t osdid, uint32_t channels, uint32_t rate, std::string name = {}) : m_wire(wire), m_is_output(is_output), m_wait_stream(true), m_osdid(osdid), m_channels(channels), m_rate(rate), m_name(std::move(name)), m_stream(nullptr), m_buffer(channels, rate), m_last_underruns(0), m_last_overruns(0), m_observed_underruns(0), m_observed_overruns(0), m_updates_since_report(0), m_prebuffer_frames(0), m_producer_frames(0), m_consecutive_underruns(0), m_last_underrun_requested(0), m_last_underrun_available(0), m_last_underrun_callback_gap_us(0), m_prebuffering(true), m_buffer_stats_ready(false) {}
+ 	};
+ 
+ 	static const pw_core_events     core_events;
+@@ -138,6 +140,17 @@
+ 	std::map<uint32_t, stream_info> m_streams;
+ 	osd_common_t *m_osd = nullptr;
+ 	bool m_realtime_pacing = false;
++	// How long one main_update may spend waiting for the graph to drain.
++	// MAME_PIPEWIRE_PACE_BUDGET_US overrides it. The default is deliberately
++	// generous - it is a safety bound against a stalled consumer, not a tuning
++	// knob - and 33ms is two frames at 60 Hz.
++	uint32_t m_pace_budget_us = 33000;
++	// Report main-update gaps longer than this. MAME_PIPEWIRE_LATE_US overrides.
++	uint32_t m_late_report_us = 5500;
++	// Consecutive short callbacks before the cushion is rebuilt from silence.
++	uint32_t m_rearm_after = 8;
++	// Output cushion depth, in graph quanta. MAME_PIPEWIRE_PREBUFFER_QUANTA.
++	uint32_t m_prebuffer_quanta = 4;
+ 	bool m_audio_clock = false;
+ 	bool m_report_stats = false;
+ 	std::string m_capture_path;
+@@ -516,6 +529,30 @@
+ 	m_osd = &downcast<osd_common_t &>(osd);
+ 	m_audio_clock = std::getenv("MAME_PIPEWIRE_AUDIO_CLOCK") != nullptr;
+ 	m_report_stats = std::getenv("MAME_PIPEWIRE_STATS") != nullptr;
++	if (const char *const budget = std::getenv("MAME_PIPEWIRE_PACE_BUDGET_US"))
++	{
++		const long parsed = std::strtol(budget, nullptr, 10);
++		if (parsed > 0)
++			m_pace_budget_us = uint32_t(parsed);
++	}
++	if (const char *const quanta = std::getenv("MAME_PIPEWIRE_PREBUFFER_QUANTA"))
++	{
++		const long parsed = std::strtol(quanta, nullptr, 10);
++		if (parsed > 0)
++			m_prebuffer_quanta = uint32_t(parsed);
++	}
++	if (const char *const rearm = std::getenv("MAME_PIPEWIRE_REARM_AFTER"))
++	{
++		const long parsed = std::strtol(rearm, nullptr, 10);
++		if (parsed > 0)
++			m_rearm_after = uint32_t(parsed);
++	}
++	if (const char *const late = std::getenv("MAME_PIPEWIRE_LATE_US"))
++	{
++		const long parsed = std::strtol(late, nullptr, 10);
++		if (parsed > 0)
++			m_late_report_us = uint32_t(parsed);
++	}
+ 	if (const char *const capture_path = std::getenv("MAME_PIPEWIRE_CAPTURE_WAV"))
+ 		m_capture_path = capture_path;
+ 	spa_zero(m_core_listener);
+@@ -682,11 +719,25 @@
+ 
+ 	spa_buffer *sbuf = buffer->buffer;
+ 	int16_t *const output = (int16_t *)(sbuf->datas[0].data);
+-	// Keep one graph quantum plus one producer update ready.  The extra update
+-	// prevents a single late producer tick from immediately starving PipeWire.
++	// Keep a few graph quanta ready, not one quantum plus one producer update.
++	//
++	// "One quantum plus one update" is 96 frames at a 64-frame quantum - 2.2ms -
++	// which absorbs no jitter at all. Captured from the codec's monitor ports on
++	// the Raspberry Pi appliance, which is what the DAC actually receives:
++	//
++	//     7.81s of audio, 69 dropouts, EVERY ONE exactly 64 samples
++	//
++	// One quantum each, ~8.8 per second: single cycles where the producer had
++	// nothing ready and the callback handed over a buffer of silence. The device
++	// itself was clean throughout (ALSA xruns zero), so this is the whole defect.
++	//
++	// MAME_PIPEWIRE_PREBUFFER_QUANTA sets the depth. Four quanta at 64 frames is
++	// 5.8ms of output cushion - still an instrument latency, unlike the 23ms a
++	// 1024-frame quantum costs to paper over the same jitter.
+ 	stream->m_prebuffer_frames = std::max(
+ 			stream->m_prebuffer_frames,
+-			uint32_t(buffer->requested) + stream->m_producer_frames);
++			std::max(uint32_t(buffer->requested) * m_prebuffer_quanta,
++					uint32_t(buffer->requested) + stream->m_producer_frames));
+ 	const auto callback_now = std::chrono::steady_clock::now();
+ 	const auto callback_gap_us = stream->m_last_callback.time_since_epoch().count()
+ 		? std::chrono::duration_cast<std::chrono::microseconds>(callback_now - stream->m_last_callback).count()
+@@ -707,7 +758,29 @@
+ 			stream->m_last_underrun_requested = buffer->requested;
+ 			stream->m_last_underrun_available = available;
+ 			stream->m_last_underrun_callback_gap_us = callback_gap_us;
+-			stream->m_prebuffering = true;
++			// Do NOT re-arm prebuffering for a single short callback.
++			//
++			// abuffer::get() already handles a shortfall the gentle way: it
++			// repeats the last sample, explicitly "to prevent audible pop".
++			// Re-arming prebuffering on top of that replaces the next several
++			// callbacks with memset(0) - whole buffers of digital silence -
++			// until the cushion refills. So one frame of lateness became
++			// milliseconds of nothing, and every measured gap on the appliance
++			// was an exact multiple of the buffer size for that reason.
++			//
++			// Rebuild the cushion only when the stream is genuinely starved,
++			// not when it is merely a little late. MAME_PIPEWIRE_REARM_AFTER
++			// sets how many consecutive short callbacks that takes.
++			stream->m_consecutive_underruns++;
++			if (stream->m_consecutive_underruns >= m_rearm_after)
++			{
++				stream->m_prebuffering = true;
++				stream->m_consecutive_underruns = 0;
++			}
++		}
++		else
++		{
++			stream->m_consecutive_underruns = 0;
+ 		}
+ 	}
+ 	if (!stream->m_wire->m_capture_path.empty() && (stream->m_name == ":speaker"))
+@@ -1017,6 +1090,14 @@
+ 				if (!stream.m_is_output)
+ 					continue;
+ 				stream.m_buffer.clear();
++				// Reset the cushion maxima too. m_prebuffer_frames and
++				// m_producer_frames only ever grow, so a single oversized write
++				// - a warp boot, a stall, a resize - inflates the cushion for
++				// the rest of the session and the latency never comes back
++				// down. Clearing the buffer while keeping its high-water marks
++				// meant a restart of pacing did not actually restart anything.
++				stream.m_prebuffer_frames = 0;
++				stream.m_producer_frames = 0;
+ 				stream.m_prebuffering = true;
+ 				stream.m_buffer_stats_ready = false;
+ 				stream.m_observed_underruns = 0;
+@@ -1028,7 +1109,11 @@
+ 	else if (m_realtime_pacing)
+ 	{
+ 		const auto gap_us = std::chrono::duration_cast<std::chrono::microseconds>(update_now - m_last_main_update).count();
+-		if (m_report_stats && (gap_us > 5500))
++		// The threshold is settable so the TAIL can be characterised rather than
++		// just noticed. 5500us only ever showed the worst outliers, which is
++		// enough to know something is wrong and not enough to know its shape;
++		// set MAME_PIPEWIRE_LATE_US=1000 to collect a distribution.
++		if (m_report_stats && (gap_us > m_late_report_us))
+ 		{
+ 			uint32_t queued = 0;
+ 			auto primary = m_streams.find(m_primary_output_id);
+@@ -1044,6 +1129,23 @@
+ 		m_main_update_count++;
+ 	}
+ 
++	// Pace against the audio clock, but NEVER let the consumer stall emulation.
++	//
++	// This loop used to exit on one condition only: the ring having drained to
++	// the cushion. That makes the emulation thread's progress conditional on
++	// PipeWire continuing to consume, and when consumption stops the emulator
++	// stops with it - the machine freezes mid-frame, the LCD export goes stale,
++	// CPU falls to a few percent, and systemd still reports the service active.
++	// On the Raspberry Pi appliance that is exactly what happened at a 256-frame
++	// quantum: a frozen MPC sitting on its boot screen with nothing logging an
++	// error. Partially applied, it is also why the emulator was measured
++	// generating audio at 6% of realtime while pacing was engaged.
++	//
++	// The wait is now bounded. Pacing still holds the emulator back while the
++	// graph is healthy; when the graph stops draining, emulation proceeds and
++	// the audio buffer overruns instead - a recoverable, reported condition
++	// rather than a hung instrument.
++	const auto pace_deadline = update_now + std::chrono::microseconds(m_pace_budget_us);
+ 	while (m_realtime_pacing)
+ 	{
+ 		auto const primary = m_streams.find(m_primary_output_id);
+@@ -1051,13 +1153,48 @@
+ 				(primary->second.m_buffer.available() <= primary->second.m_prebuffer_frames))
+ 			break;
+ 
+-		// One PipeWire stream is the audio clock. Waiting for every auxiliary
+-		// MPC output lets a delayed secondary stream stall the audible primary.
+-		// A short timeout also prevents a missed callback signal from stalling
+-		// the emulation thread indefinitely.
+-		timespec deadline;
+-		pw_thread_loop_get_time(m_loop, &deadline, 250'000);
+-		pw_thread_loop_timed_wait_full(m_loop, &deadline);
++		if (std::chrono::steady_clock::now() >= pace_deadline)
++		{
++			if (m_report_stats)
++				osd_printf_warning(
++					"PipeWire: pacing budget exhausted (%u us); proceeding with %u frames queued\n",
++					m_pace_budget_us,
++					primary->second.m_buffer.available());
++			break;
++		}
++
++		// SLEEP for the time the consumer needs to drain the excess, rather
++		// than waiting on the condition variable.
++		//
++		// pw_thread_loop_timed_wait_full() does not sleep on the Raspberry Pi
++		// appliance: the emulation thread spun here at 100% of its core while
++		// producing 5.9% of realtime audio - full speed by the CPU meter,
++		// almost nothing by the audio clock. The same code sleeps correctly on
++		// the development host, so this does not depend on the condvar being
++		// signalled the way one platform happens to signal it.
++		//
++		// The audio clock already tells us exactly how long to wait: frames
++		// queued beyond the cushion, divided by the sample rate, is the time
++		// the consumer needs to catch up. Sleeping that long paces the
++		// emulator to realtime while it runs unthrottled, which is the whole
++		// point of "full speed, sleep by the audio clock".
++		const uint32_t queued = primary->second.m_buffer.available();
++		const uint32_t cushion = primary->second.m_prebuffer_frames;
++		const uint32_t excess = (queued > cushion) ? (queued - cushion) : 1;
++		uint64_t sleep_ns = (uint64_t(excess) * 1'000'000'000ull) / primary->second.m_rate;
++		// Never sleep past the budget, and never busy-spin on a tiny excess.
++		const uint64_t budget_ns = uint64_t(m_pace_budget_us) * 1000ull;
++		if (sleep_ns > budget_ns)
++			sleep_ns = budget_ns;
++		if (sleep_ns < 50'000ull)
++			sleep_ns = 50'000ull;
++
++		pw_thread_loop_unlock(m_loop);
++		timespec req;
++		req.tv_sec = time_t(sleep_ns / 1'000'000'000ull);
++		req.tv_nsec = long(sleep_ns % 1'000'000'000ull);
++		nanosleep(&req, nullptr);
++		pw_thread_loop_lock(m_loop);
+ 	}
+ 	pw_thread_loop_unlock(m_loop);
+ }

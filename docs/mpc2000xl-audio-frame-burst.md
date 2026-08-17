@@ -106,6 +106,47 @@ logging an error.
 `api.alsa.headroom` must stay well under `period-size x period-num`. At 128 x 3
 with headroom 256, PipeWire had 128 usable frames out of 384.
 
+## Correction: pw-top's client ERR column is not a dropout counter
+
+Most of the numbers in the sections above are `pw-top`'s ERR column on the
+emulator's node, and docs/system-placement.md already records - from an earlier
+investigation that cost days - that this column counts something which is not a
+dropout: "the emulator's nodes accrued 1,600/s while its own underrun
+instrumentation stayed silent and the audio was provably clean". That document
+was not read until late in the evening. Treat every ERR figure here as
+suspect and use the capture below instead.
+
+## The measurement that does hold: capture the codec's monitor ports
+
+Record what the DAC actually receives, with an autoconnect-disabled node
+explicitly linked to `alsa_output.<device>:monitor_FL/FR`, and count only
+silence that interrupts SOUNDING audio. On the appliance at q64 that gives
+
+    7.81s captured, 69 dropouts, EVERY ONE exactly 64 samples
+
+One graph quantum each, ~9 per second, while ALSA xruns were zero and the
+emulator ran above realtime at 15% of a core. Neither end is failing: the
+callback is handed a cycle with nothing ready and emits a buffer of silence.
+
+Depth helps but does not cure, which is how we know it is not jitter:
+
+| output cushion        | dropouts |
+|-----------------------|----------|
+| 96 frames (2.2ms)     | 69       |
+| 256 frames (5.8ms)    | 35       |
+| 512 frames (11.6ms)   | 21       |
+
+Each doubling halves them. That is the same latency-for-dropouts trade as
+raising the quantum, not a fix. Aligning the producer cadence to exactly one
+quantum (MPC_SOUND_UPDATES_PER_QUANTUM=1) roughly halves the rate again, per
+second of sounding audio - counts must be normalised that way, because captures
+differ in how much of them is silence between pad hits.
+
+What remains unexplained: why the producer misses a discrete cycle ~9 times a
+second while running above realtime on an idle core. The next measurement is
+inside MAME - instrument stream_sink_update to record the wall-clock interval
+between writes and correlate it with the callback that found the ring empty.
+
 ## Measuring this again
 
     # true dropouts, not musical silence
