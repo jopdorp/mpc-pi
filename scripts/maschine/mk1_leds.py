@@ -14,14 +14,50 @@ Layout taken from shaduzlabs/cabl `src/devices/ni/MaschineMK1.cpp`
 (`enum class MaschineMK1::Led` and `sendLeds()`), which is a working
 implementation rather than a description of one.
 
-Every LED is single-colour with brightness only - 0x00 to 0x7F. RGB pads
-are MK2. So the only state channels available are brightness and time:
-dim/bright/blink, not hue.
+Brightness is the only thing writable - one byte per LED, 0x00 to 0x7F.
+There is no colour channel: RGB per-pad is MK2.
+
+But the panel is NOT one colour. Observed on hardware: pads light green,
+the group buttons A-H light blue, some buttons light red, and the display
+backlight is white. Those colours are fixed in the hardware, one per
+control, and a byte written here only sets how brightly that control's
+own colour shows.
+
+An earlier version of this file and of the protocol doc said "single
+colour amber", which is wrong in a way that misleads design work: a page
+can rely on a given control's colour being constant and meaningful
+(blue always means a group), and must never try to choose one.
 """
 
-# Endpoint. Note this is NOT the display endpoint (0x08) - LEDs, MIDI out
-# and the init handshake all share the generic OUT endpoint.
+# Endpoint. NOT the display endpoint (0x08) - LEDs, MIDI out and the init
+# handshake all share the generic OUT endpoint. Confirmed on hardware:
+# writing the LED block here lights pads, buttons and the screen
+# backlights. Writing the identical block to 0x08 is *accepted* and
+# silently discarded, which is the more dangerous of the two failures.
 EP_OUT = 0x01
+
+# Interface 0 has TWO alternate settings, and this is not in cabl or in
+# any published write-up of the device:
+#
+#   alt 0:  ep 0x01 OUT, 0x81 IN
+#   alt 1:  ep 0x01 OUT, 0x81 IN, 0x84 IN (pads), 0x08 OUT (display)
+#
+# A USB device defaults to alt 0, where the pad and display endpoints DO
+# NOT EXIST - reads from 0x84 fail with EIO and display writes fail the
+# same way. Nothing works properly until the interface is switched.
+ALTSETTING = 1
+
+# The device streams input continuously on 0x81 and 0x84, and it will not
+# accept output while reports are queued: writes to 0x01 return
+# ETIMEDOUT (errno 110), not EBUSY and not EPIPE. Drain the IN endpoints
+# and the same write succeeds.
+#
+# This is why cabl runs an async read loop with output on a tick rather
+# than writing on demand, and it is worth stating plainly because the
+# symptom points nowhere near the cause: a timeout on an OUT endpoint
+# reads as "the device is not listening" when it actually means "the
+# host has stopped listening".
+IN_ENDPOINTS = (0x81, 0x84)
 
 # Declaration order IS the wire order: the index of a name in this list is
 # its byte offset in the 62-byte LED block.

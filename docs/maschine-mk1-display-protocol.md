@@ -113,7 +113,7 @@ conflates MK1 with later models.
 | Control | Count | Notes |
 |---|---|---|
 | Displays | 2 | 255x64, 5 bpp (32 grey levels) |
-| Pads | 16 | 12-bit continuous pressure (velocity is synthesised from the leading edge), cabl's on-threshold is 200. LEDs are **single-colour amber, brightness only** - RGB is MK2, so animation is our only state channel |
+| Pads | 16 | 12-bit continuous pressure (velocity is synthesised from the leading edge), cabl's on-threshold is 200. LED brightness only, no colour channel - RGB per-pad is MK2. But see "LED colours" below: the panel is not one colour |
 | Encoders | 11 | 8 display knobs + VOLUME/TEMPO/SWING. **No master/jog encoder and no encoder push-switch on MK1** - those are MK2. The knobs are endless absolute-position pots (~1000 steps/rev), not quadrature, and are **not touch-sensitive** (that is Studio/MK3) |
 | Buttons | 41 | named below; **bit 8 of the report is unused** |
 
@@ -232,3 +232,73 @@ Note that `detach_kernel_driver(0)` in the Python code only covers
 interface 0. caiaq binds per interface, so on a multi-interface device
 that call can succeed while another interface stays held - failing later
 as EBUSY, which reads like a permissions problem.
+
+## Hardware findings (2026-08-17, first session with the device)
+
+Everything above came from reading other people's source. This section is
+what the hardware actually did, and three of these are in no published
+write-up.
+
+### Interface 0 has two alternate settings
+
+```
+alt 0:  ep 0x01 OUT, 0x81 IN
+alt 1:  ep 0x01 OUT, 0x81 IN, 0x84 IN (pads), 0x08 OUT (display)
+```
+
+A USB device defaults to **alt 0**, where the pad and display endpoints
+do not exist at all - reads from `0x84` fail EIO, and so do writes to
+`0x08`. `set_interface_altsetting(0, 1)` is mandatory and was missing
+from every script here. cabl does not mention it; its libusb layer must
+do it incidentally.
+
+### Output only flows while input is being drained
+
+Writes to `0x01` return **ETIMEDOUT (errno 110)** - not EBUSY, not EPIPE -
+whenever input reports are queued on `0x81`/`0x84`. Drain the IN
+endpoints and the identical write succeeds.
+
+The symptom points nowhere near the cause: a timeout on an OUT endpoint
+reads as "the device is not listening", when it means "the host has
+stopped listening". This is why cabl runs an async read loop and sends
+output on a tick.
+
+**Still unsolved:** even with draining before every write, roughly half
+of all LED writes time out (77 ok / 75 failed over 24s). Retrying gets
+them through and the panel responds correctly, but the I/O model needs to
+be async before display frames - 22 chunks of 502 bytes per frame, per
+screen - can be pushed reliably.
+
+### LEDs are on 0x01, and 0x08 lies
+
+The LED block belongs on `0x01`, as cabl says. Writing the identical
+33-byte block to `0x08` is **accepted and silently discarded** - the
+write returns success and nothing lights. That is the more dangerous of
+the two failures, and it cost an hour: `0x08` looked like the answer
+precisely because it did not complain.
+
+### What lit up
+
+- Pad LEDs: confirmed, **green**
+- Group buttons A-H: confirmed, **blue**
+- Other buttons: some **red**
+- `DisplayBacklight` (index 58, 0x5C): confirmed, both screens backlit,
+  **white**
+
+So the LED index table is right where it has been exercised, and the
+display backlight really is an LED byte.
+
+### LED colours
+
+Brightness is writable; colour is not. Each control has its own fixed
+colour in hardware - green pads, blue groups, red elsewhere, white
+backlight. A page may rely on a control's colour being constant and
+carrying meaning; it can never choose one.
+
+### Still unverified
+
+- **Group button order.** cabl lists indices 33-40 as H,G,D,C,F,E,B,A -
+  a strange order that has not yet been checked one button at a time.
+- **Display frames.** Nothing has been drawn. The backlight is on and the
+  screens flicker when LED data is sent, but no frame has been
+  transmitted, so polarity and the 21x502+338 chunk count remain open.
