@@ -33,11 +33,32 @@ local once = os.getenv("GOVERNOR_ONCE") == "1"
 local function say(t) io.write(t .. "\n") io.flush() end
 
 AudioEngine:set_backend("JACK/Pipewire", "", "")
+-- 44100, not 48000. The whole appliance runs at 44.1k - the graph clock, the
+-- emulator, and the USB gadget - and a 48k session on a 44.1k graph resamples
+-- everything for no reason. This said 48000, which is Ardour's own default and
+-- nobody's decision.
+local rate = tonumber(os.getenv("MPCPI_RATE") or "44100")
+
 local session = load_session(dir, name)
 if not session then
-	session = create_session(dir, name, 48000)
+	-- A half-written session file blocks its own recreation: load_session
+	-- fails with "Cannot get samplerate from session", create_session refuses
+	-- with "Session already exists", and the assert below fires. That loop
+	-- restarted this service twelve times in a row. Move the wreckage aside
+	-- rather than deleting it - it is the only record of whatever went wrong.
+	local broken = dir .. "/" .. name .. ".ardour"
+	local f = io.open(broken, "r")
+	if f then
+		f:close()
+		local stamp = os.date("%Y%m%d-%H%M%S")
+		os.rename(broken, broken .. ".broken-" .. stamp)
+		say("moved an unloadable session aside: " .. broken ..
+		    ".broken-" .. stamp)
+	end
+	session = create_session(dir, name, rate)
 end
-assert(session, "no session at " .. dir .. "/" .. name)
+assert(session, "no session at " .. dir .. "/" .. name ..
+       " (rate " .. rate .. ")")
 say("GOVERNOR_READY " .. dir .. "/" .. name)
 
 local function route_by_name(track)

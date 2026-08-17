@@ -23,7 +23,9 @@ ExecStart=/usr/bin/taskset --cpu-list 3 /usr/bin/chrt --rr 20 \
     -nvram_directory /var/lib/mpcpi/nvram \
     -sound pipewire -samplerate 44100 -video none \
     -midiin1 "VirMIDI 0-0" -midiout1 "VirMIDI 0-1" \
-    -flop ${MPCPI_PROJECT}
+    -flop ${MPCPI_PROJECT} \
+    -autoboot_script /opt/mpc-pi-src/scripts/daw/mpcpi-autoplay.lua \
+    -autoboot_delay 1
 # No -seconds_to_run: that flag belongs to measurement harnesses. An
 # instrument runs until it is switched off.
 #
@@ -60,6 +62,11 @@ LimitNICE=-19
 # then every pad and every MIDI note produces exactly nothing, however
 # correctly they arrive. A real MPC2000XL behaves the same way, which is why
 # this looked like a broken MIDI path rather than an empty sampler.
+#
+# The autoboot script warps through the MPC's twenty-second boot and, when
+# MPCPI_AUTOPLAY is set, holds PLAY START so there is something to hear. It is
+# gated because an instrument should not start playing a demo beat on power-on -
+# but a rig being tested should.
 #
 # Overridable so a different project can be loaded without editing the unit.
 Environment=MPCPI_PROJECT=/opt/mpc-media/mpc-tutor-chopping-beat1-mpc2000xl.img
