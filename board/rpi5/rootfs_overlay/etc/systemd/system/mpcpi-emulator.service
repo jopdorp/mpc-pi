@@ -60,10 +60,24 @@ Environment=SDL_VIDEODRIVER=dummy
 # device: 76 xruns per 16s at 32 against 2 at 64, measured on this board. This
 # must stay equal to default.clock.quantum in
 # pipewire.conf.d/95-mpcpi.conf - run-mpc.sh derives the sound cadence from it.
-Environment=MPC_PIPEWIRE_FRAMES=64
+# 1024 is a RETREAT to the only setting that is free of dropouts today, at an
+# unusable 23ms. The target is 32-64. See 95-mpcpi.conf and
+# docs/mpc2000xl-audio-frame-burst.md - the blocker is that MAME emits a whole
+# frame's audio in one burst every 10.9ms, so any quantum smaller than a frame
+# starves between bursts.
+Environment=MPC_PIPEWIRE_FRAMES=1024
 # Stereo, as the host runs it - the machine has several speaker devices and
 # only :speaker carries the program's audio.
 Environment=MPC_OUTPUT_MODE=stereo
+# MAME_TIMING_MASTER=video, which also selects -throttle.
+#
+# NOT audio, despite that being the turbo default and correct on the host. With
+# the audio clock as timing master, MAME's emulation loop is gated on the audio
+# callback, and at q256 on this board the gate stopped opening: the machine
+# froze outright - LCD export stalled, 6% CPU, stuck on the boot screen - while
+# the service still reported "active".
+Environment=MAME_TIMING_MASTER=video
+
 # The one measured deviation from the turbo preset.
 #
 # MAME_TIMING_MASTER=audio implies -nothrottle in run-mpc.sh, on the premise
