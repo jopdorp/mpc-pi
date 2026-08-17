@@ -21,15 +21,17 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control_map                                        # noqa: E402
 
+import mk1_encoders                                      # noqa: E402
 import mk1_leds                                          # noqa: E402
 
 EP_PADS = 0x84
 EP_CTRL = 0x81
 
-# Wire slot -> logical encoder, from cabl's processEncoders switch. The
-# eleven encoders are reported in a scrambled order; index this by the
-# wire slot to get the knob a human actually turned. Logical 0-7 are the
-# display knobs (0-3 left screen, 4-7 right), 8-10 the master knobs.
+# Superseded by mk1_encoders.ERP_BYTES, which carries the panel order in
+# the byte map itself. Kept only because tests reference it as the record of
+# what cabl's processEncoders switch claimed: a remap of eleven sequential
+# wire slots. That model was wrong - the encoders are not sequential values
+# at all - so the permutation described a layout that does not exist.
 ENCODER_WIRE_TO_LOGICAL = (8, 4, 10, 7, 3, 9, 6, 2, 0, 5, 1)
 MASTER_KNOBS = ("volume", "tempo", "swing")
 MK1_VENDOR = 0x17CC
@@ -244,7 +246,7 @@ class Mk1:
         self.dev.set_configuration()
         self.pad_state = [0] * 16
         self.buttons = 0
-        self.encoders = [None] * 11
+        self.encoders = mk1_encoders.EncoderTracker()
         self.frames = {}
         self.leds = mk1_leds.LedBank()
 
@@ -256,14 +258,15 @@ class Mk1:
             return [0]
 
     def init_device(self):
-        """cabl's init order, minus the display frames the caller owns.
+        """Enable input reporting and light the panel.
 
-        The handshake and the LED block are not optional extras: no
-        source shows input reports arriving before the handshake, and
-        the display backlight IS an LED byte, so both screens stay dark
-        until the LED block has been written at least once.
+        Neither step is optional. AUTO_MSG (0x0B) is what switches
+        unsolicited button and encoder reports on - without it the device
+        streams pads and nothing else, which reads exactly like a broken
+        decoder. And the display backlight is an LED byte, so both screens
+        stay dark until the LED block has been written at least once.
         """
-        self.dev.write(mk1_leds.EP_OUT, bytes(mk1_leds.INIT_HANDSHAKE),
+        self.dev.write(mk1_leds.EP_OUT, bytes(mk1_leds.AUTO_MSG),
                        timeout=1000)
         self.leds.all(mk1_leds.OFF)
         self.leds.backlight(mk1_leds.BACKLIGHT_DEFAULT)
@@ -336,8 +339,16 @@ class Mk1:
         kind = data[0]
         out = []
         if kind == 0x04:
-            # Button bitfield. Byte 6 bit 6 gates validity, per cabl.
-            if len(data) > 6 and not (data[6] & 0x40):
+            # Button bitfield, 8 bytes: [0x04][6 bytes of bits][status].
+            #
+            # cabl gates on data[6] & 0x40. On this hardware the bit is
+            # 0x80 - an idle report reads 04 00 00 00 00 00 80 00 - so that
+            # gate rejected EVERY button report the device ever sent, and
+            # did it silently. Accept either bit.
+            #
+            # Neither bit can be mistaken for a button: they sit at bit
+            # positions 46 and 47, past the 42 names in the table.
+            if len(data) > 6 and not (data[6] & 0xC0):
                 return []
             # SIX bytes, 1..6 inclusive. This read five, covering bit
             # positions 0..39 - and MK1 has 42 buttons, with NoteRepeat
@@ -354,37 +365,19 @@ class Mk1:
                 if name and (changed >> pos) & 1:
                     out += router.button(name, bool((bits >> pos) & 1))
         elif kind == 0x02:
-            # Eleven absolute encoders, 16-bit each. They are endless
-            # pots rather than quadrature, so a delta is a wrapped
-            # difference and we never need a pickup mode.
-            for wire in range(11):
-                off = 1 + wire * 2
-                if off + 1 >= len(data):
-                    break
-                val = (data[off] << 8) | data[off + 1]
-                prev = self.encoders[wire]
-                self.encoders[wire] = val
-                if prev is None or val == prev:
-                    continue
-                delta = val - prev
-                if delta > 32768:
-                    delta -= 65536
-                elif delta < -32768:
-                    delta += 65536
-                # The encoders do NOT arrive in panel order. cabl's
-                # processEncoders switch maps each wire slot to a
-                # different logical knob, and this code passed the wire
-                # index straight through - so every knob drove the wrong
-                # parameter, in a way no amount of staring at the report
-                # would reveal.
-                logical = ENCODER_WIRE_TO_LOGICAL[wire]
+            # Eleven endless pots. NOT counters: each knob is a pair of
+            # analog channels that must be interpolated into an absolute
+            # angle, and the byte pairs are scattered rather than
+            # sequential. See mk1_encoders - the previous version of this
+            # branch read sequential 16-bit values and diffed them, which
+            # produced continuous meaningless movement on every knob.
+            for logical, delta, _pos in self.encoders.update(data):
                 if logical < 8:
                     out += router.knob(logical, delta)
                 else:
                     # VOLUME / TEMPO / SWING are separate hardware, not
-                    # display knobs. Routed by name rather than falling
-                    # into router.knob(), where 8..10 would have been
-                    # read as display columns 4..6 and quietly moved a
+                    # display knobs. Routed by name so they cannot fall
+                    # into router.knob() as columns 4-6 and quietly move a
                     # mixer strip.
                     out.append(("cmd", "master %s %+d"
                                 % (MASTER_KNOBS[logical - 8], delta)))

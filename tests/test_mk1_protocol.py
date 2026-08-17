@@ -31,6 +31,7 @@ def _load(name, filename):
 
 L = _load("mk1_leds", "mk1_leds.py")
 HUB = _load("hub", "maschine-hub.py")
+ENC = _load("mk1_encoders", "mk1_encoders.py")
 
 
 class FakeRouter:
@@ -60,11 +61,18 @@ def bare_mk1():
     return dev
 
 
-def ctrl_buttons(bits):
-    b = bytearray(64)
+def ctrl_buttons(bits, status=0x80):
+    """A button report.
+
+    status defaults to 0x80 because that is what the hardware sends: an
+    idle report reads 04 00 00 00 00 00 80 00. cabl gates on 0x40, which
+    rejected every real report - silently, since a dropped report looks
+    identical to a button nobody pressed.
+    """
+    b = bytearray(8)
     b[0] = 0x04
     b[1:7] = bits.to_bytes(6, "little")
-    b[6] |= 0x40                       # cabl: data[6] & 0x40 gates validity
+    b[6] |= status
     return b
 
 
@@ -107,11 +115,32 @@ class TestButtons(unittest.TestCase):
         dev._ctrl(ctrl_buttons(0), r)
         self.assertEqual(r.hits, [])
 
+    def test_hardware_status_bit_is_accepted(self):
+        """0x80, as the device actually sends it."""
+        dev = bare_mk1()
+        r = FakeRouter()
+        dev._ctrl(ctrl_buttons(1 << 41, status=0x80), r)
+        self.assertIn(("btn", "play", True), r.hits)
+
+    def test_cabl_status_bit_is_also_accepted(self):
+        """0x40, as cabl documents it - accept either rather than guess."""
+        dev = bare_mk1()
+        r = FakeRouter()
+        dev._ctrl(ctrl_buttons(1 << 41, status=0x40), r)
+        self.assertIn(("btn", "play", True), r.hits)
+
+    def test_status_bits_are_not_buttons(self):
+        """They sit at bit positions 46 and 47, past the 42 names."""
+        dev = bare_mk1()
+        r = FakeRouter()
+        dev._ctrl(ctrl_buttons(0, status=0xC0), r)
+        self.assertEqual(r.hits, [])
+
     def test_invalid_report_is_dropped(self):
         dev = bare_mk1()
-        b = bytearray(64)
+        b = bytearray(8)
         b[0] = 0x04
-        b[1] = 0x01                    # a button set, but no validity bit
+        b[1] = 0x01                    # a button set, but no status bit
         r = FakeRouter()
         dev._ctrl(b, r)
         self.assertEqual(r.hits, [])
@@ -136,50 +165,70 @@ class TestButtons(unittest.TestCase):
 
 
 class TestEncoders(unittest.TestCase):
-    def test_wire_order_is_a_permutation(self):
-        self.assertEqual(sorted(HUB.ENCODER_WIRE_TO_LOGICAL), list(range(11)))
+    """The encoders are analog pairs interpolated into an angle, not counters.
 
-    def test_wire_slot_8_is_display_knob_0(self):
-        """The encoders are NOT reported in panel order.
+    The old tests here asserted a permutation of eleven sequential 16-bit
+    wire slots, taken from cabl's processEncoders switch. That model was
+    wrong at the root - there are no sequential 16-bit values - so the
+    permutation described a layout the device does not have, and the tests
+    passed while every knob did nothing.
+    """
 
-        cabl's processEncoders switch remaps every slot. Passing the wire
-        index through meant each knob drove someone else's parameter.
-        """
-        dev = bare_mk1()
-        base = [1000] * 11
-        dev._ctrl(ctrl_encoders(base), FakeRouter())      # prime
-        turned = list(base)
-        turned[8] = 1004
-        r = FakeRouter()
-        dev._ctrl(ctrl_encoders(turned), r)
-        self.assertEqual(r.hits, [("knob", 0, 4)])
+    def test_byte_map_matches_the_kernel(self):
+        """Offsets are from caiaq's own per-knob comments."""
+        self.assertEqual(ENC.ERP_BYTES[0], (21, 20))   # knob 1, left screen
+        self.assertEqual(ENC.ERP_BYTES[3], (3, 2))     # knob 4
+        self.assertEqual(ENC.ERP_BYTES[7], (1, 0))     # knob 8, right screen
+        self.assertEqual(ENC.ERP_BYTES[8], (17, 16))   # VOLUME
+        self.assertEqual(ENC.ERP_BYTES[9], (11, 10))   # TEMPO
+        self.assertEqual(ENC.ERP_BYTES[10], (5, 4))    # SWING
+        self.assertEqual(ENC.N_ENCODERS, 11)
 
-    def test_wire_slot_0_is_the_volume_knob(self):
-        """Logical 8-10 are VOLUME/TEMPO/SWING - separate hardware.
+    def test_byte_pairs_are_not_sequential(self):
+        """The trap: assuming adjacent pairs decodes eleven wrong knobs."""
+        flat = [b for pair in ENC.ERP_BYTES for b in pair]
+        self.assertNotEqual(flat, list(range(22)))
+        self.assertEqual(len(set(flat)), 22, "every byte used exactly once")
 
-        Sent through router.knob() they would read as display columns
-        4-6 and quietly move a mixer strip.
-        """
-        dev = bare_mk1()
-        base = [1000] * 11
-        dev._ctrl(ctrl_encoders(base), FakeRouter())
-        turned = list(base)
-        turned[0] = 1006
-        r = FakeRouter()
-        out = dev._ctrl(ctrl_encoders(turned), r)
-        self.assertEqual(r.hits, [])
-        self.assertEqual(out, [("cmd", "master volume +6")])
+    def test_decode_erp_spans_the_full_turn(self):
+        """Both channels sweeping must reach every part of the circle."""
+        decades = {ENC.decode_erp(a, b) // 100
+                   for a in range(0, 256, 4) for b in range(0, 256, 4)}
+        self.assertEqual(decades, set(range(10)))
 
-    def test_wraparound_is_a_short_delta(self):
-        """Endless pots wrap; a wrap is a small move, not a huge one."""
-        dev = bare_mk1()
-        base = [0] * 11
-        dev._ctrl(ctrl_encoders(base), FakeRouter())
-        turned = list(base)
-        turned[8] = 65534                 # wrapped backwards past zero
-        r = FakeRouter()
-        dev._ctrl(ctrl_encoders(turned), r)
-        self.assertEqual(r.hits, [("knob", 0, -2)])
+    def test_decode_erp_is_in_range(self):
+        for a in range(0, 256, 8):
+            for b in range(0, 256, 8):
+                v = ENC.decode_erp(a, b)
+                self.assertTrue(0 <= v < ENC.FULL_TURN, (a, b, v))
+
+    def test_wrap_is_the_short_way_round(self):
+        """998 -> 2 is +4. Plain subtraction makes it -996, which on a
+        mixer send is a full sweep instead of a nudge."""
+        self.assertEqual(ENC.shortest_delta(998, 2), 4)
+        self.assertEqual(ENC.shortest_delta(2, 998), -4)
+        self.assertEqual(ENC.shortest_delta(500, 520), 20)
+        self.assertEqual(ENC.shortest_delta(520, 500), -20)
+
+    def test_short_report_is_rejected(self):
+        self.assertIsNone(ENC.positions(bytes([0x02]) + bytes(10)))
+        self.assertIsNotNone(ENC.positions(bytes([0x02]) + bytes(22)))
+
+    def test_tracker_primes_without_emitting(self):
+        """The first report establishes position; it is not movement."""
+        t = ENC.EncoderTracker()
+        report = bytes([0x02]) + bytes(range(22))
+        self.assertEqual(t.update(report), [])
+        self.assertEqual(t.update(report), [])
+
+    def test_tracker_deadband_suppresses_idle_jitter(self):
+        """Analog sensors wander. Without a floor, every untouched knob
+        emits a stream of one-step deltas forever."""
+        t = ENC.EncoderTracker(deadband=3)
+        t.pos = [500] * ENC.N_ENCODERS
+        self.assertEqual(t._emit_for_test(0, 501), [])
+        self.assertEqual(t._emit_for_test(0, 502), [])
+        self.assertNotEqual(t._emit_for_test(0, 510), [])
 
 
 def pad_report(pressures):

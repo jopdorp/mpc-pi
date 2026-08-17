@@ -526,28 +526,32 @@ class Screens:
                 self.dev.detach_kernel_driver(0)
         except (usb.core.USBError, NotImplementedError):
             pass
-        # Deliberately tolerant, and retried. This device's open sequence is
-        # not deterministic: set_configuration() succeeds on one run and
-        # returns LIBUSB_ERROR_OTHER on the next, and set_interface_altsetting
-        # fails the same way depending on what the previous process left
-        # behind. Neither error names a cause.
+        # Ordered by what has ACTUALLY worked on this hardware, not by what
+        # the documentation implies.
         #
-        # This matters more here than in a bring-up tool: the animation runs
-        # at power-on, and a raised exception there would be a service
-        # failure on every boot where the last shutdown left the device in
-        # the wrong state. Releasing and re-claiming the interface clears it.
+        # set_configuration() is the problem. Every open that called it has
+        # eventually failed with LIBUSB_ERROR_OTHER, and every probe that
+        # skipped it - going straight to claim_interface then
+        # set_interface_altsetting - has worked. The device is already
+        # configured after enumeration, so setting the configuration again is
+        # not merely redundant: it appears to disturb interface state that
+        # cannot then be recovered without unplugging the cable.
+        #
+        # So claim and select the altsetting first. Only if that fails do we
+        # try the heavier sequence, and only then a release and re-claim.
         last = None
-        for attempt in (0, 1, 2):
-            if attempt:
+        for attempt in range(3):
+            if attempt == 1:
+                try:
+                    self.dev.set_configuration()
+                except usb.core.USBError:
+                    pass
+            elif attempt == 2:
                 try:
                     usb.util.release_interface(self.dev, 0)
                 except usb.core.USBError:
                     pass
                 time.sleep(0.4)
-            try:
-                self.dev.set_configuration()
-            except usb.core.USBError:
-                pass
             try:
                 usb.util.claim_interface(self.dev, 0)
             except usb.core.USBError:

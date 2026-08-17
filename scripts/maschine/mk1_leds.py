@@ -123,11 +123,31 @@ BRIGHT = 0x7F
 DIM = 0x20
 OFF = 0x00
 
-# Sent to EP_OUT during init, before reading input. Undocumented in every
-# write-up of this device found so far; cabl issues it unconditionally
-# between the first frame and the first LED block. Input reports were
-# never observed to start without it, so it is treated as required.
-INIT_HANDSHAKE = (0x0B, 0xFF, 0x02, 0x05)
+# EP1_CMD_AUTO_MSG. This is not a "handshake" - it is the command that
+# switches unsolicited input reporting ON, and without it the device sends
+# no button and no encoder reports at all. Pads are unaffected: the pad
+# stream on 0x84 runs regardless.
+#
+# The name comes from the kernel's own driver, sound/usb/caiaq, which is the
+# authoritative working implementation for this device's input:
+#
+#   EP1_CMD_READ_ERP    0x02   endless rotary encoders
+#   EP1_CMD_READ_ANALOG 0x03
+#   EP1_CMD_READ_IO     0x04   buttons
+#   EP1_CMD_MIDI_READ   0x06
+#   EP1_CMD_AUTO_MSG    0x0b   <- this
+#   EP1_CMD_DIMM_LEDS   0x0c   <- the LED block above
+#
+# The three payload bytes are rates: (digital, analog, erp). caiaq uses
+# 1, 10, 5 for the Maschine specifically; cabl sends 0xFF, 0x02, 0x05.
+# Both were verified to start the stream on hardware, and the kernel's
+# values are used here because they are the ones chosen for this device
+# rather than shared across a family.
+AUTO_MSG = (0x0B, 0x01, 0x0A, 0x05)
+
+# Kept as an alias: this was called INIT_HANDSHAKE while its purpose was
+# unknown.
+INIT_HANDSHAKE = AUTO_MSG
 
 
 def pad_led(n):

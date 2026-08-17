@@ -29,6 +29,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import mk1_encoders as E                                    # noqa: E402
 import mk1_leds as L                                        # noqa: E402
 
 
@@ -100,8 +101,8 @@ def bars_frame(values, moved):
     for i, v in enumerate(values):
         x0 = i * slot + 2
         wide = slot - 4
-        # Absolute position, 16-bit, scaled to the panel height.
-        h = int((v / 65535.0) * (H - 12))
+        # Absolute angle 0..999, scaled to the panel height.
+        h = int((v / float(E.FULL_TURN)) * (H - 12))
         level = 0x1F if i in moved else 0x12
         for x in range(x0, x0 + wide):
             # baseline so every bar is visible even at zero
@@ -144,14 +145,26 @@ def main():
     s.backlight(0x7F)
     for i in (0, 1):
         s.init_display(i)
+    # Switch unsolicited reporting ON. Without this the device sends pads
+    # and nothing else - which is exactly what the first run of this monitor
+    # saw, and it looked like a broken button decoder rather than a missing
+    # command.
+    for _ in range(6):
+        try:
+            s.dev.write(L.EP_OUT, bytes(L.AUTO_MSG), timeout=300)
+            print("AUTO_MSG sent: buttons and encoders enabled")
+            break
+        except s.core.USBError:
+            s.drain()
+
     bank = L.LedBank()
     bank.all(L.OFF)
-    bank.backlight(0x7F)
+    bank.backlight(L.BACKLIGHT_DEFAULT)
     bank.flush(lambda ep, d: s._led(ep, d), force=True)
 
     buttons = 0
-    encoders = [None] * 11
-    enc_values = [0] * 11
+    tracker = E.EncoderTracker()
+    enc_values = [0] * E.N_ENCODERS
     pad_state = {p: 0 for p in range(1, 17)}
     moved = {}
     seen_buttons = set()
@@ -164,6 +177,7 @@ def main():
 
     end = time.time() + seconds
     last_draw = 0.0
+    led_dirty = False
     while time.time() < end:
         # Reading is also what keeps output flowing: this device refuses
         # writes while input is queued.
@@ -185,15 +199,16 @@ def main():
                     if pressure > PAD_THRESHOLD >= was:
                         print("PAD  %2d   pressure %4d" % (pad, pressure))
                         seen_pads.add(pad)
-                        bank.set_pad(pad_input_to_led(pad), HOLD_LEVEL)
+                        bank.set_pad(pad_input_to_led(pad), HOLD_LEVEL); led_dirty = True
                     elif pressure <= PAD_THRESHOLD < was:
-                        bank.set_pad(pad_input_to_led(pad), L.OFF)
+                        bank.set_pad(pad_input_to_led(pad), L.OFF); led_dirty = True
                 continue
 
             if not len(data):
                 continue
             if data[0] == 0x04:
-                if len(data) > 6 and not (data[6] & 0x40):
+                # 0xC0, not 0x40: this unit sets the status bit at 0x80.
+                if len(data) > 6 and not (data[6] & 0xC0):
                     continue
                 bits = int.from_bytes(bytes(data[1:7]), "little")
                 changed = bits ^ buttons
@@ -214,27 +229,23 @@ def main():
                     lamp = BUTTON_LAMP.get(name)
                     if lamp:
                         bank.set(lamp, HOLD_LEVEL if down else L.OFF)
+                        led_dirty = True
             elif data[0] == 0x02:
-                for wire in range(11):
-                    off = 1 + wire * 2
-                    if off + 1 >= len(data):
-                        break
-                    val = (data[off] << 8) | data[off + 1]
-                    prev = encoders[wire]
-                    encoders[wire] = val
-                    if prev is None or val == prev:
-                        continue
-                    delta = val - prev
-                    if delta > 32768:
-                        delta -= 65536
-                    elif delta < -32768:
-                        delta += 65536
-                    logical = WIRE_TO_LOGICAL[wire]
-                    enc_values[logical] = val
+                for logical, delta, pos in tracker.update(data):
+                    enc_values[logical] = pos
                     moved[logical] = time.time()
                     seen_knobs.add(logical)
-                    print("KNOB wire %2d -> logical %2d (%-5s) %+5d  raw %5d"
-                          % (wire, logical, KNOB_LABEL[logical], delta, val))
+                    print("KNOB %-6s %+4d  -> position %3d/999"
+                          % (E.NAMES[logical], delta, pos))
+                    led_dirty = True
+
+        # Lamps first, and immediately. Two 33-byte writes cost about a
+        # millisecond; the screens cost ~50ms for 48 transfers. Flushing
+        # LEDs on the screen timer made every button feel 150ms late, which
+        # on an instrument is the difference between responsive and broken.
+        if led_dirty:
+            bank.flush(lambda ep, d: s._led(ep, d))
+            led_dirty = False
 
         now = time.time()
         if now - last_draw > 0.14:
@@ -247,14 +258,13 @@ def main():
             # the drain; it just keeps what it reads.
             s.send(0, bars_frame(enc_values, recent))
             s.send(1, pads_frame(pad_state))
-            bank.flush(lambda ep, d: s._led(ep, d))
 
     print("\n--- coverage ---")
     print("buttons seen : %d of 41 mappable" % len(seen_buttons))
     unseen = [n for n in BUTTON_NAMES if n and n not in seen_buttons]
     if unseen:
         print("  not pressed: %s" % " ".join(unseen))
-    print("knobs seen   : %s" % (" ".join(KNOB_LABEL[i]
+    print("knobs seen   : %s" % (" ".join(E.NAMES[i]
                                           for i in sorted(seen_knobs)) or "none"))
     print("pads seen    : %s" % (" ".join(str(p) for p in sorted(seen_pads))
                                  or "none"))
