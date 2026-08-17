@@ -108,8 +108,17 @@ link)
 		fi
 	fi
 	printf 'monitoring on %s\n' "$sink"
-	$R pw-link -l 2>/dev/null | grep -c "$SINK_MATCH" |
-		sed 's/^/  links: /'
+	count=$($R pw-link -l 2>/dev/null | grep -c "$SINK_MATCH")
+	printf '  links: %s\n' "$count"
+	# Exit NON-ZERO when nothing got linked.
+	#
+	# This exited 0 unconditionally, which quietly defeated every retry loop
+	# built on it. The emulator's ExecStartPost retries this until it succeeds,
+	# and "success" arrived on the first attempt - before the emulator had
+	# published its node - so the loop stopped, the instrument came up with no
+	# links, and the screens carried on as though everything was fine. A
+	# routing script that cannot route has not succeeded.
+	[ "$count" -gt 0 ] || exit 1
 	;;
 show)
 	printf 'sink : %s\n' "$sink"

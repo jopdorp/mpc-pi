@@ -1,0 +1,71 @@
+#!/bin/sh
+# Read or set the graph quantum, from a root shell, and report what took effect.
+#
+#   mpcpi-quantum          - show the quantum the graph is actually running at
+#   mpcpi-quantum 48       - ask for 48 and report what you got
+#   mpcpi-quantum auto     - drop the override, back to the configured quantum
+#
+# This exists because the obvious command does not work from a root shell:
+#
+#   # pw-metadata -n settings 0 clock.force-quantum 48
+#   can't connect: Host is down
+#
+# "Host is down" is PipeWire's message for "I could not find a socket". The
+# graph belongs to the mpc user, and root has no XDG_RUNTIME_DIR pointing at
+# that session, so there is nothing to connect to. Nothing is down.
+#
+# It also reports the quantum in EFFECT rather than the number requested. Those
+# differ: pipewire.conf.d/95-mpcpi.conf pins min-quantum and max-quantum, and a
+# request outside that range is clamped without complaint. Asking for 48 and
+# being given 64 looks identical to asking for 48 and getting 48 unless you
+# read it back - and this project has already spent hours on a measurement that
+# was of a configuration it was not in.
+set -eu
+
+uid=$(id -u mpc 2>/dev/null || echo 1001)
+as_mpc() { sudo -u mpc env XDG_RUNTIME_DIR="/run/user/$uid" "$@"; }
+
+in_effect() {
+    # The driver row carries the quantum the graph is really running.
+    as_mpc timeout 8 pw-top -b -n 3 2>/dev/null |
+        awk '$1 == "R" && $3 ~ /^[0-9]+$/ && $3 > 0 { q = $3; rate = $4; name = $NF }
+             END { if (q) printf "%s at %s Hz, driven by %s\n", q, rate, name }'
+}
+
+case "${1:-show}" in
+show)
+    printf 'quantum in effect: %s\n' "$(in_effect)"
+    printf 'configured        : %s\n' \
+        "$(grep -hE 'default\.clock\.(quantum|min-quantum|max-quantum)' \
+            /etc/pipewire/pipewire.conf.d/*.conf 2>/dev/null |
+            tr -s ' ' | paste -sd' ' -)"
+    printf 'forced            : %s\n' \
+        "$(as_mpc pw-metadata -n settings 0 2>/dev/null |
+            grep -E "clock.force-(quantum|rate)" |
+            sed "s/.*key:'//;s/' value:'/=/;s/'.*//" | paste -sd' ' -)"
+    ;;
+auto|0|none)
+    as_mpc pw-metadata -n settings 0 clock.force-quantum 0 >/dev/null
+    sleep 2
+    printf 'override dropped; quantum in effect: %s\n' "$(in_effect)"
+    ;;
+*)
+    case "$1" in
+        *[!0-9]*) printf 'usage: mpcpi-quantum [frames|auto]\n' >&2; exit 2 ;;
+    esac
+    as_mpc pw-metadata -n settings 0 clock.force-quantum "$1" >/dev/null
+    sleep 2
+    got=$(in_effect)
+    printf 'requested %s; in effect: %s\n' "$1" "$got"
+    case "$got" in
+        "$1 at"*) ;;
+        *) printf 'NOTE: not what you asked for - min/max-quantum in\n'
+           printf '      /etc/pipewire/pipewire.conf.d/95-mpcpi.conf clamps it.\n' ;;
+    esac
+    # The emulator's PipeWire client does not survive a quantum change: it stays
+    # connected and stops being fed. Anything measured after this without a
+    # restart is measured on a dead stream.
+    printf 'restart the emulator before believing any measurement:\n'
+    printf '  systemctl restart mpcpi-emulator && sleep 30 && mpc-monitor-route.sh link\n'
+    ;;
+esac
