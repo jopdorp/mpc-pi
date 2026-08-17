@@ -134,7 +134,37 @@ if [ -b "$part2" ]; then
 	fi
 fi
 
+# Make the card UNBOOTABLE until it has been provisioned.
+#
+# A Pi 5 boot-prefers SD over network. Writing a bootable Pi OS Lite base
+# to a card and putting it in a netbooting Pi means the card wins: the
+# board comes up as stock "raspberrypi" on a different DHCP lease, with
+# ssh disabled and userconfig.service blocking boot on a console prompt
+# nobody can answer. It is unreachable, and the netboot rig it was
+# supposed to be provisioned FROM has been displaced by it.
+#
+# The firmware needs config.txt to boot. Moving it aside leaves the card
+# fully intact as a data device - which is exactly what provisioning
+# needs - while letting the Pi fall through to netboot. provision-card.sh
+# writes the real config.txt at the end, so the card becomes bootable
+# only once it is actually the appliance.
+#
+# Done with mtools on the raw vfat partition: no mount, so no root.
+part1="${target}p1"
+[ -b "$part1" ] || part1="${target}1"
+if [ -b "$part1" ] && command -v mcopy >/dev/null 2>&1; then
+	if mren -i "$part1" ::config.txt ::config.pnd 2>/dev/null; then
+		echo "  config.txt -> config.pnd: the card will NOT boot yet"
+	else
+		echo "  WARNING: could not move config.txt aside." >&2
+		echo "  The card IS bootable, and a Pi 5 prefers SD over network -" >&2
+		echo "  it will hijack the netboot and come up unreachable." >&2
+	fi
+fi
+
 echo
-echo "done. Next: move the card to the Pi, then provision it there -"
-echo "the Pi is arm64, so packages and provisioning run natively:"
-echo "  scripts/pios/provision-card.sh"
+echo "done. The card is deliberately not bootable yet."
+echo
+echo "Next: put it in the Pi (which will still netboot), then provision"
+echo "it there - the Pi is arm64, so packages run natively:"
+echo "  ssh root@192.168.7.110 'sh /opt/mpc-pi-src/scripts/pios/provision-card.sh'"

@@ -115,6 +115,10 @@ partuuid=$(blkid -s PARTUUID -o value "$P2")
 # 5.9 of the 6.1s kernel phase on the development rig.
 printf 'console=tty1 root=PARTUUID=%s rootfstype=ext4 fsck.repair=yes rootwait %s\n' \
 	"$partuuid" "$tuning" > "$MNT/boot/firmware/cmdline.txt"
+# write-card.sh parks config.txt as config.pnd so a freshly written card
+# cannot hijack a netboot. Writing the real one here is what makes the
+# card bootable, and it happens only now that it is the appliance.
+rm -f "$MNT/boot/firmware/config.pnd"
 cp "$SRC/board/rpi5/config.txt" "$MNT/boot/firmware/config.txt"
 grep -q '^kernel=' "$MNT/boot/firmware/config.txt" ||
 	printf 'kernel=kernel-mpcpi-rt.img\n' >> "$MNT/boot/firmware/config.txt"
