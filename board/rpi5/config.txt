@@ -94,3 +94,18 @@ enable_uart=1
 # re-running the throughput measurements, since the emulator is latency
 # sensitive and thermal throttling shows up as audio dropouts.
 # arm_freq=2800
+
+# The Maschine MK1 is bus-powered, with 62 LEDs and two backlit screens.
+# A Pi 5 caps TOTAL USB current at 600mA across all ports unless this is
+# set, and 600mA is not obviously enough: driving every LED at full
+# brightness once coincided with the controller falling off the bus
+# entirely ("device descriptor read/64, error -110", then USB disconnect,
+# recoverable only by unplugging).
+#
+# This raises the limit to 1.6A and REQUIRES a 5V/5A supply. With a
+# smaller PSU the firmware refuses it, so it is safe to leave set - but
+# an undervoltage event with it enabled means the supply, not the
+# setting. Left commented until the supply is confirmed, because this
+# project has misattributed symptoms to power twice already and should
+# not do so again by guessing here.
+#usb_max_current_enable=1
