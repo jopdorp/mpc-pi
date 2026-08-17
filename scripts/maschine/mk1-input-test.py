@@ -43,9 +43,23 @@ def _load(name, filename):
 ANIM = _load("anim", "mk1-boot-animation.py")
 HUB = _load("hub", "maschine-hub.py")
 
+HOLD_LEVEL = 0x38          # sustained, not the 0x7F peak - see mk1_leds
 BUTTON_NAMES = HUB.control_map_buttons()          # 42 entries, index 8 None
 WIRE_TO_LOGICAL = HUB.ENCODER_WIRE_TO_LOGICAL
-PAD_THRESHOLD = HUB.Mk1.PAD_THRESHOLD
+# cabl's threshold is 200. On this unit the pads report idle and crosstalk
+# values up to 255 - pressing one pad shows its neighbours at 200-250 - so
+# 200 turns resting noise into a stream of phantom hits. Real strikes read
+# 512 upwards.
+PAD_THRESHOLD = int(os.environ.get("MPC_MK1_PAD_THRESHOLD", "420"))
+
+# Pad rows are inverted between the input report and the LED table: pressing
+# the bottom row lit the top row, with left-right correct. Which of the two
+# is "upside down" in absolute terms does not matter - what matters is that
+# a pad lights itself - so the input index is mapped to the LED index by
+# flipping the row and keeping the column.
+def pad_input_to_led(pad):
+    col, row = (pad - 1) % 4, (pad - 1) // 4
+    return (3 - row) * 4 + col + 1
 
 # Our button names are lower_snake; the LED table uses CamelCase. Map the
 # ones that have a lamp so a press can light itself.
@@ -108,7 +122,8 @@ def pads_frame(pressures):
     W, H = ANIM.W, ANIM.H
     cw, ch = W // 4, H // 4
     for pad, p in pressures.items():
-        col, row = (pad - 1) % 4, (pad - 1) // 4
+        led = pad_input_to_led(pad)
+        col, row = (led - 1) % 4, (led - 1) // 4
         x0 = col * cw + 3
         y0 = (3 - row) * ch + 2
         if p <= 0:
@@ -170,9 +185,9 @@ def main():
                     if pressure > PAD_THRESHOLD >= was:
                         print("PAD  %2d   pressure %4d" % (pad, pressure))
                         seen_pads.add(pad)
-                        bank.set_pad(pad, L.BRIGHT)
+                        bank.set_pad(pad_input_to_led(pad), HOLD_LEVEL)
                     elif pressure <= PAD_THRESHOLD < was:
-                        bank.set_pad(pad, L.OFF)
+                        bank.set_pad(pad_input_to_led(pad), L.OFF)
                 continue
 
             if not len(data):
@@ -198,7 +213,7 @@ def main():
                         seen_buttons.add(name)
                     lamp = BUTTON_LAMP.get(name)
                     if lamp:
-                        bank.set(lamp, L.BRIGHT if down else L.OFF)
+                        bank.set(lamp, HOLD_LEVEL if down else L.OFF)
             elif data[0] == 0x02:
                 for wire in range(11):
                     off = 1 + wire * 2
@@ -225,7 +240,11 @@ def main():
         if now - last_draw > 0.14:
             last_draw = now
             recent = {i for i, t in moved.items() if now - t < 0.8}
-            s.drain()
+            # NO s.drain() here. Draining reads the IN endpoints and throws
+            # the data away - including every button and encoder report,
+            # which is why the first run of this monitor showed pads working
+            # and no buttons or knobs at all. The read loop above is already
+            # the drain; it just keeps what it reads.
             s.send(0, bars_frame(enc_values, recent))
             s.send(1, pads_frame(pad_state))
             bank.flush(lambda ep, d: s._led(ep, d))

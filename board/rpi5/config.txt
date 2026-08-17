@@ -1,5 +1,15 @@
 # Raspberry Pi 5 boot configuration for the MPC2000XL appliance.
-kernel=Image
+# The PREEMPT_RT kernel, under its own name.
+#
+# This said kernel=Image, from when the board was served a Buildroot build.
+# On a Pi OS root there is no file called Image in /boot/firmware, so the
+# firmware would look for one and find nothing - and provision-card.sh's
+# check for "a kernel= line" happily accepted it.
+#
+# Deliberately NOT kernel_2712.img: that is the filename apt writes when it
+# installs linux-image-*-rpi-2712, which is exactly how the stock kernel
+# silently replaced our RT one once already.
+kernel=kernel-mpcpi-rt.img
 arm_64bit=1
 disable_overscan=1
 

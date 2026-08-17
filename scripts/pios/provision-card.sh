@@ -21,6 +21,7 @@
 set -euo pipefail
 
 CARD="${MPCPI_CARD:-/dev/mmcblk0}"
+RT_NAME=kernel-mpcpi-rt.img
 MNT=/mnt/mpcpi-card
 SRC="${MPCPI_SRC:-/opt/mpc-pi-src}"
 NO_APT=""
@@ -130,8 +131,15 @@ printf 'console=tty1 root=PARTUUID=%s rootfstype=ext4 fsck.repair=yes rootwait %
 # card bootable, and it happens only now that it is the appliance.
 rm -f "$MNT/boot/firmware/config.pnd"
 cp "$SRC/board/rpi5/config.txt" "$MNT/boot/firmware/config.txt"
-grep -q '^kernel=' "$MNT/boot/firmware/config.txt" ||
-	printf 'kernel=kernel-mpcpi-rt.img\n' >> "$MNT/boot/firmware/config.txt"
+# FORCE the line, do not merely check that one exists. board/rpi5/config.txt
+# still carries kernel=Image from the Buildroot path, and a presence check
+# accepted it - which would have sent the firmware looking for a file that
+# is not in /boot/firmware at all. A card that does not boot, with nothing
+# to read afterwards explaining why.
+sed -i '/^kernel=/d' "$MNT/boot/firmware/config.txt"
+printf 'kernel=%s\n' "$RT_NAME" >> "$MNT/boot/firmware/config.txt"
+grep -q "^kernel=$RT_NAME\$" "$MNT/boot/firmware/config.txt" ||
+	die "could not set kernel=$RT_NAME in the card's config.txt"
 printf 'PARTUUID=%s  /boot/firmware  vfat  defaults  0  2\nPARTUUID=%s  /  ext4  defaults,noatime  0  1\n' \
 	"$(blkid -s PARTUUID -o value "$P1")" "$partuuid" > "$MNT/etc/fstab"
 echo "  root   : PARTUUID=$partuuid"
