@@ -1,0 +1,13 @@
+[Unit]
+Description=MPC-Pi panel renderer (screen R)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mpc-pi/maschine/daw-ui-daemon.py --out /dev/shm/daw-ui --hz 30
+Restart=always
+RestartSec=1
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=UAC2 + MIDI USB gadget
+After=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mpc-usb-gadget.sh start
+ExecStop=/usr/bin/mpc-usb-gadget.sh stop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

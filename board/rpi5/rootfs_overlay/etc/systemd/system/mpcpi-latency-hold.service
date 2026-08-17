@@ -1,0 +1,12 @@
+[Unit]
+Description=Pin the governor and hold the CPU out of deep idle
+After=basic.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/mpcpi-latency-hold
+Restart=always
+CPUAffinity=0
+
+[Install]
+WantedBy=multi-user.target

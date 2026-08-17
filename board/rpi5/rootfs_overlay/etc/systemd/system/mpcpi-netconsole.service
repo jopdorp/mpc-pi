@@ -1,0 +1,11 @@
+[Unit]
+Description=Ship the kernel console to the development host
+After=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mpcpi-netconsole
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Give the audio interrupt its own core and priority
+# NOT After=multi-user.target: this unit is WantedBy that same target, so
+# ordering after it is a deadlock - the job sits queued forever and
+# `is-enabled` cheerfully reports "enabled" while nothing has ever run.
+# basic.target is late enough that the devices exist and early enough
+# that it actually fires.
+After=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mpcpi-irq-affinity
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
