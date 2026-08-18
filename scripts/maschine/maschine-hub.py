@@ -193,6 +193,14 @@ for _b in [b for b in _MK1_BUTTON_NAMES if b]:
 
 # Pads and buttons are lit while HELD, not flashed - a light that goes out
 # while your finger is still down reads as a dropped hit.
+#
+# But a light also has to be SEEN. LED changes used to be flushed only inside
+# the 100ms screen budget, so a hit shorter than that was lit and darkened
+# between two flushes and never reached the hardware at all - fast playing lit
+# nothing. So: flush promptly when something changes, and hold a pad lit for a
+# minimum time even if it was released sooner.
+LED_FLUSH_S = float(os.environ.get("MPCPI_LED_FLUSH_MS", "8")) / 1000.0
+PAD_LIGHT_MIN_S = float(os.environ.get("MPCPI_PAD_LIGHT_MIN_MS", "60")) / 1000.0
 
 # MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
 # else is a light that reports something you press somewhere else, which is
@@ -877,6 +885,8 @@ class Mk1:
         self.pad_crosstalk = 0
         self._watch = None
         self._leds_dirty = False
+        self._pad_lit_at = [0.0] * 16
+        self._led_flushed_at = 0.0
         self._ctrl_tick = 0
         self._pad_read_at = 0.0
         self._pad_gaps = []
@@ -1269,16 +1279,19 @@ class Mk1:
                 self.pad_last_force[pad] = pressure
                 if self.leds.set_pad(pad + 1, mk1_leds.BRIGHT):
                     self._leds_dirty = True
+                self._pad_lit_at[pad] = now
                 # Velocity from the leading edge: the stream is pressure,
                 # not note-on, so the first crossing is the hit.
                 out += router.pad(pad, self.velocity(pressure))
             elif self.pad_on[pad] and pressure <= self.PAD_OFF_THRESHOLD:
                 self.pad_on[pad] = False
-                # Lit while HELD, not flashed. The MIDI is tapped - press and
-                # release go together so the firmware cannot auto-repeat - but
-                # the pad is physically still down, and pad_on tracks that.
-                if self.leds.set_pad(pad + 1, mk1_leds.OFF):
-                    self._leds_dirty = True
+                # Lit while HELD - but never for less than PAD_LIGHT_MIN_S, or
+                # a fast hit is invisible. If the pad was released sooner than
+                # that, leave it lit and let the loop darken it.
+                if (time.monotonic() - self._pad_lit_at[pad]) >= PAD_LIGHT_MIN_S:
+                    self._pad_lit_at[pad] = 0.0
+                    if self.leds.set_pad(pad + 1, mk1_leds.OFF):
+                        self._leds_dirty = True
                 out += router.pad(pad, 0)
         return out
 
@@ -1638,6 +1651,24 @@ def main():
         if out:
             deliver(out)
             del out[:]
+
+        # LEDs, on every pass rather than once per screen frame. A hit shorter
+        # than the 100ms frame budget used to be set and cleared between two
+        # flushes and never appeared at all.
+        _now = time.monotonic()
+        for _p in range(16):
+            if (mk1._pad_lit_at[_p] and not mk1.pad_on[_p]
+                    and (_now - mk1._pad_lit_at[_p]) >= PAD_LIGHT_MIN_S):
+                mk1._pad_lit_at[_p] = 0.0
+                if mk1.leds.set_pad(_p + 1, mk1_leds.OFF):
+                    mk1._leds_dirty = True
+        if mk1._leds_dirty and (_now - mk1._led_flushed_at) >= LED_FLUSH_S:
+            mk1._leds_dirty = False
+            mk1._led_flushed_at = _now
+            try:
+                mk1.flush_leds()
+            except Exception:
+                pass
         if POLL_STATS and len(mk1._pad_gaps) >= 400:
             g = sorted(mk1._pad_gaps)
             mk1._pad_gaps = []
