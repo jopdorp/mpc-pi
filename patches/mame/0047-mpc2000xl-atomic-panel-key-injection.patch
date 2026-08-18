@@ -1,0 +1,69 @@
+From: mpc-pi
+Subject: [PATCH] mpc2000xl: make MIDI panel-key injection atomic
+
+A panel key event is TWO bytes on the V53 SCU - 0x84 or 0x85, then the keycode
+- and the receiver has no way to resynchronise if it is handed one of them.
+Every other panel message goes through panel_hle_emit(), which checks there is
+room for the PAIR and drops the whole message if not. The MIDI key path did
+not: it called enqueue_fast_pad_byte() twice, and that function drops a single
+byte when the queue is full.
+
+So one full queue at the wrong moment puts the command byte in, loses the code,
+and every message after it is read one byte out of step - the command of the
+next event is taken as this event's keycode, and so on. That is not a dropped
+keypress, it is a lasting corruption that turns one key into another, and it
+matches the reported symptom exactly: pressing RESTART sometimes acting as STOP
+or AFTER, intermittently, with no pattern.
+
+Measured on the appliance beforehand, with the hub's own trace merged against
+the machine's lamp export on a common clock: every key PRESS the hub sent was
+correct at the wire, and the wrong key still fired. The controller and its
+mapping were never at fault.
+
+Honest about what is and is not proven: the asymmetry above is certain, and so
+is its consequence. What is NOT confirmed is that the queue actually filled on
+this appliance - no overflow warning was ever logged. The warning fires only on
+a completely full queue and says nothing about the framing damage, which is why
+it also now counts the drops and says plainly that the stream is out of step.
+If the symptom survives this, that counter is the thing to read.
+
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -1091,7 +1091,16 @@
+ 
+ 	if (m_fast_pad_count == m_fast_pad_queue.size())
+ 	{
+-		osd_printf_warning("MPC fast-pad input queue overflow; dropping byte %02x\n", data);
++		// Dropping ONE byte of a two-byte message desynchronises the panel
++		// stream for every message after it, so this is not a lost keypress -
++		// it is a lasting corruption. Callers should use panel_hle_emit(),
++		// which reserves the pair. Counted as well as warned, because a
++		// warning that scrolls past is how this went unnoticed.
++		m_panel_hle_drops++;
++		osd_printf_warning(
++				"MPC fast-pad input queue overflow; dropping byte %02x "
++				"(%u dropped) - THE PANEL STREAM IS NOW OUT OF STEP\n",
++				data, m_panel_hle_drops);
+ 		return;
+ 	}
+ 
+@@ -1181,8 +1190,16 @@
+ 	{
+ 		const uint8_t code = uint8_t(m_midi_note - 52 + 1);
+ 		const bool down = (kind == 0x90) && data;
+-		enqueue_fast_pad_byte(down ? 0x84 : 0x85);
+-		enqueue_fast_pad_byte(code);
++		// panel_hle_emit(), not two bare enqueues.
++		//
++		// A panel key event is TWO bytes and the receiver has no way to
++		// resynchronise if it gets one. enqueue_fast_pad_byte() drops a single
++		// byte when the queue is full, so this path could put the command in
++		// and lose the code - and from then on every following event is read
++		// one byte out of step, turning one key into another. panel_hle_emit()
++		// checks for room for the pair and drops the whole message instead,
++		// which every other panel message already does.
++		panel_hle_emit(down ? 0x84 : 0x85, code);
+ 		return;
+ 	}
+ 
