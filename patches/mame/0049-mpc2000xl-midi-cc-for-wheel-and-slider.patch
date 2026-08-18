@@ -1,0 +1,92 @@
+From: mpc-pi
+Subject: [PATCH] mpc2000xl: reach the DATA wheel and NOTE VARIATION over MIDI
+
+The MPC's panel has exactly two controls that are not keys - the DATA wheel and
+the NOTE VARIATION slider - and midi_input_byte() handled note-on and note-off
+and nothing else. So a controller could press every button on the machine and
+still not turn its most-used control. There was no mapping to get wrong: there
+was no path at all, and the hub had been dutifully encoding "mpc:data_wheel:+3"
+into a keycode lookup that could never match.
+
+The panel bus already speaks both. 0x80/0x81 with a magnitude is a wheel step,
+and 0x86 carries the slider; only the MIDI side was missing. Control change
+now reaches them:
+
+  CC 1  DATA wheel, RELATIVE two's complement - 1..63 clockwise, 65..127
+        counter-clockwise, the way every DAW encodes an endless encoder. An
+        absolute value would require the controller and the machine to agree
+        where the wheel is, and an endless encoder has no such position.
+  CC 2  NOTE VARIATION, absolute, because a slider does have a position.
+
+Large deltas are emitted as repeated steps rather than truncated, so a fast
+spin moves the field by what it actually turned.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -253,6 +253,12 @@
+ 	//
+ 	// The queue drains at a byte every 4us, so 512 bytes is 2ms of backlog at
+ 	// worst and costs half a kilobyte.
++	// The two CCs that reach the continuous controls. 1 is the mod wheel,
++	// which is what a controller's wheel sends by default; 2 is breath, the
++	// next unclaimed one. MAME_MPC_MIDI_CC_WHEEL overrides them if they clash.
++	static constexpr uint8_t MIDI_CC_DATA_WHEEL = 1;
++	static constexpr uint8_t MIDI_CC_NOTE_VARIATION = 2;
++
+ 	std::array<uint8_t, 512> m_fast_pad_queue;
+ 	uint16_t m_fast_pad_head, m_fast_pad_count;
+ };
+@@ -1192,7 +1198,7 @@
+ 	}
+ 
+ 	const uint8_t kind = m_midi_status & 0xf0;
+-	if (kind != 0x80 && kind != 0x90)
++	if (kind != 0x80 && kind != 0x90 && kind != 0xb0)
+ 		return;
+ 	if (!m_midi_data_pos)
+ 	{
+@@ -1203,6 +1209,41 @@
+ 
+ 	m_midi_data_pos = 0;
+ 
++	// CONTROL CHANGE reaches the two continuous controls, which notes cannot.
++	//
++	// The DATA wheel and the NOTE VARIATION slider are the only things on the
++	// MPC's panel that are not keys, and this parser handled note-on and
++	// note-off and nothing else - so a controller could press every button on
++	// the machine and still not turn its most-used control. There was no
++	// mapping to get wrong; there was no path at all.
++	//
++	// The panel bus already speaks both: 0x80/0x81 with a magnitude is the
++	// wheel, and 0x86 carries the slider. Only the MIDI side was missing.
++	if (kind == 0xb0)
++	{
++		if (m_midi_note == MIDI_CC_DATA_WHEEL)
++		{
++			// Relative, two's complement, as every DAW encodes an endless
++			// encoder: 1..63 is clockwise, 65..127 is counter-clockwise. An
++			// absolute value would need the controller and the machine to
++			// agree where the wheel is, and an endless encoder has no answer.
++			int delta = (data < 64) ? int(data) : (int(data) - 128);
++			while (delta)
++			{
++				const int step = std::clamp(delta, -0x7f, 0x7f);
++				panel_hle_emit((step > 0) ? 0x81 : 0x80, uint8_t(std::abs(step)));
++				delta -= step;
++			}
++		}
++		else if (m_midi_note == MIDI_CC_NOTE_VARIATION)
++		{
++			// Absolute: it is a slider, and a slider does have an answer.
++			m_variation_slider = uint8_t(data << 1);
++			panel_hle_emit(0x86, uint8_t((m_variation_slider >> 1) & 0x7f));
++		}
++		return;
++	}
++
+ 	// Notes 52 upwards drive front-panel keys, so an external controller's
+ 	// buttons reach the firmware the same way its pads do. The key codes are
+ 	// contiguous from 0x01, so note 52 is Soft Key 1; see

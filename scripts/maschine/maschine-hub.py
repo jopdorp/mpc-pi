@@ -74,6 +74,14 @@ FIFO = "/run/daw-ctl.fifo"
 # akai/mpc2000.cpp already drives. Machine state, not our guess at it.
 LAMPS = os.environ.get("MPCPI_LAMP_PATH", "/dev/shm/mpc-lamps")
 
+# The two continuous controls reach the emulator over control change, not
+# notes. Must match MIDI_CC_DATA_WHEEL / MIDI_CC_NOTE_VARIATION in
+# patches/mame/0049.
+CC_DATA_WHEEL = 1
+CC_NOTE_VARIATION = 2
+# NOTE VARIATION is absolute on the wire, so its position lives here.
+_variation = 64
+
 # MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
 # else is a light that reports something you press somewhere else, which is
 # worse than no light: FULL LEVEL moved from GRID to SELECT to F7 during this
@@ -439,6 +447,16 @@ def self_test():
     assert flip(12) == 0 and flip(15) == 3
     assert sorted(flip(i) for i in range(16)) == list(range(16))
     assert all(flip(i) % 4 == i % 4 for i in range(16))
+
+    # The two continuous controls must produce CONTROL CHANGE, not silence.
+    wheel = encode_midi("mpc:data_wheel:+3")
+    assert wheel and wheel[0] == 0xB0 and wheel[1] == CC_DATA_WHEEL and wheel[2] == 3, wheel
+    back = encode_midi("mpc:data_wheel:-3")
+    assert back[2] == 125, back          # two's complement: -3 is 125
+    var = encode_midi("mpc:note_variation:+10")
+    assert var and var[0] == 0xB0 and var[1] == CC_NOTE_VARIATION
+    # The SWING knob is what turns the wheel.
+    assert control_map.MASTER_KNOBS["swing"] == "mpc:data_wheel"
 
     # One lamp, one meaning - and on the button that actually sends the key.
     assert len(set(LAMP_TO_LED.values())) == len(LAMP_TO_LED)
@@ -1368,6 +1386,26 @@ def encode_midi(target, down=True):
         note = 36 + int(pad)
         vel = int(vel)
         return bytes([0x90 if vel else 0x80, note, vel])
+    # The two continuous controls ride CONTROL CHANGE, not notes. They are the
+    # DATA wheel and the NOTE VARIATION slider, and they are not keys - which
+    # is why encoding them as one produced nothing at all for months:
+    # encode_midi split "mpc:data_wheel:+3" on the first colon, looked up
+    # "data_wheel:+3" in the KEYCODE table, missed, and returned b"".
+    if target.startswith("mpc:data_wheel:"):
+        delta = int(target.rsplit(":", 1)[1])
+        # Relative two's complement, clamped to what one message can carry.
+        step = max(-63, min(63, delta))
+        if not step:
+            return b""
+        return bytes([0xB0, CC_DATA_WHEEL, step & 0x7f if step > 0
+                      else (128 + step)])
+    if target.startswith("mpc:note_variation:"):
+        delta = int(target.rsplit(":", 1)[1])
+        # Absolute, because it is a slider: the hub holds the position.
+        global _variation
+        _variation = max(0, min(127, _variation + delta))
+        return bytes([0xB0, CC_NOTE_VARIATION, _variation])
+
     # Panel keys ride notes 52..97, matching the emulator's injection.
     name = target.split(":", 1)[1] if ":" in target else target
     codes = control_map_keycodes()
