@@ -1,0 +1,23 @@
+[Unit]
+Description=Ardour session (headless, luasession)
+After=basic.target sound.target user@1001.service mpcpi-emulator.service
+Wants=user@1001.service
+ConditionPathExists=/opt/mpc-pi-src/scripts/daw/ardour-env.sh
+
+[Service]
+Type=simple
+User=mpc
+Group=mpc
+# Cores 2-3: the graph's worker cores. NOT core 1, which belongs to
+# PipeWire's data loop - putting DSP there starves the thing that wakes it.
+ExecStart=/bin/sh -lc 'taskset --cpu-list 2-3 /opt/mpc-pi-src/scripts/daw/run-session.sh'
+# Same reason as the emulator: PAM limits do not reach a service.
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+LimitNICE=-19
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
