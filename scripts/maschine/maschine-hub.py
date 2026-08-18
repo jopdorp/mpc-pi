@@ -120,16 +120,21 @@ POLL_STATS = bool(os.environ.get("MPCPI_HUB_POLL_STATS"))
 BUTTON_POLL_EVERY = int(os.environ.get("MPCPI_BUTTON_POLL_EVERY", "4"))
 
 # How fast a pad's remembered peak fades, per report. Reports arrive about
-# every 1.4ms, so 0.93 leaves about a third after 20ms - the bleed can arrive
-# that late, and at 0.88 the peak had already decayed below the size of the
-# bleed it was supposed to explain.
-PAD_PEAK_DECAY = float(os.environ.get("MPCPI_PAD_PEAK_DECAY", "0.93"))
+# every 1.4ms, so 0.96 leaves about half after 20ms.
+#
+# Slowing the DECAY is the right lever for bleed that still gets through on
+# medium-soft hits, rather than raising PAD_BLEED. The coefficient applies to
+# genuine simultaneous hits too - at 0.45 a real 1500 hit beside a 3072 one
+# falls to 118 and is lost - whereas a longer memory only strengthens the
+# correction in the lagging case, which is the one that leaks.
+PAD_PEAK_DECAY = float(os.environ.get("MPCPI_PAD_PEAK_DECAY", "0.96"))
 
 # The pressure that means velocity 127. Where a pad tops out is a property of
-# the hardware, so it is a setting rather than a shift - and it should be
-# MEASURED: POLL_STATS prints the peak seen per pad, so play the grid as hard
-# as you ever will and read the number off.
-PAD_FULL_SCALE = int(os.environ.get("MPCPI_PAD_FULL_SCALE", "2600"))
+# the hardware AND of how hard the player actually hits, so it is a setting
+# rather than a shift. 1950 rather than 2600 - full velocity a quarter earlier,
+# by ear, so the top of the range is reachable without hammering.
+# POLL_STATS prints the peak seen per pad if it needs measuring again.
+PAD_FULL_SCALE = int(os.environ.get("MPCPI_PAD_FULL_SCALE", "1950"))
 
 # MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
 # else is a light that reports something you press somewhere else, which is
