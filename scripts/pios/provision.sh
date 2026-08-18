@@ -248,7 +248,14 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
+# ENABLE, not just start. All three of these were running but disabled, so the
+# first reboot took the DAW control chain out and the Maschine's knobs stopped
+# doing anything - /run/daw-ctl.fifo lives in /run and goes with it. Nothing
+# reported an error: Ardour was up, the screens were up, and the knobs were
+# simply inert.
+systemctl enable mpcpi-daw.service >/dev/null 2>&1 || true
 systemctl enable mpcpi-daw-ui.service >/dev/null 2>&1 || true
+systemctl enable mpcpi-daw-ctl.service >/dev/null 2>&1 || true
 
 log "done"
 cat <<EOF

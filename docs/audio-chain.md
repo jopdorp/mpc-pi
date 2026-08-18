@@ -293,6 +293,45 @@ first:
 
 The emulation thread should be the ONLY `RR 20` row.
 
+## The residual: occasional crackle with Ardour in the graph
+
+Not the old fault returning. The producer is not starving - realtime holds at
+98.7% and MAME's own underrun counter stays at 0. What moves is the DEVICE's
+xrun count, and only when Ardour is running:
+
+| configuration | realtime | underruns | codec xruns / 25s |
+|---|---|---|---|
+| MPC only, cushion 2.9ms | 98.7% | 0 | flat |
+| + Ardour, cushion 2.9ms | 98.7% | 0 | flat |
+| + Ardour, cushion 1.45ms | 98.7% | 0 | +2 |
+| + Ardour, cushion 46ms (old) | 98.7% | 0 | +2 |
+| Ardour starting | - | 0 | **+148 in one burst** |
+
+So it is audible but rare, it is downstream of MAME, and it tracks Ardour's
+presence rather than any buffer depth.
+
+**Leading suspect: priority and pinning, again.** That is what every audio fault
+on this appliance has turned out to be, and the placement is not obviously right:
+
+    core 1   PipeWire data-loop.0     SCHED_FIFO 88
+    core 2   Ardour RT-main           SCHED_FIFO 77, ~52% of the core
+             Ardour AudioEngine       SCHED_FIFO 85
+    core 3   MAME emulation thread    SCHED_RR   20
+             MAME effects thread      SCHED_FIFO 60
+             MAME thread-loop         SCHED_FIFO 60
+
+Ardour's AudioEngine at FIFO 85 is three below PipeWire's data loop and on a
+different core, which should be safe - but "should be safe" is exactly the
+reasoning that hid the SCHED_RR fault for weeks. What has NOT been measured
+here is the runqueue delay of PipeWire's own data loop and of Ardour's engine
+thread, only MAME's. `/proc/<tid>/schedstat` on data-loop.0 while Ardour runs is
+the next measurement, and the burst of 148 xruns at Ardour STARTUP - when it is
+instantiating 27 plugin inserts - suggests a transient overrun rather than a
+steady-state one.
+
+Also unmeasured: whether the two are contending below the scheduler, on memory
+bandwidth or the USB host controller, which no priority change would fix.
+
 ### Still open
 
 - `patches/mame/0046-sound-raise-the-effects-thread-above-emulation.patch` is the
