@@ -244,7 +244,10 @@ MPC_BUTTONS = {
     # --- the column beside the pads ---------------------------------------
     "scene":          "mpc:up",
     "pattern":        "mpc:down",
-    "pad_mode":       "mpc:over_dub",
+    # The panel reports this key as "keyboard" - 1st-gen MK1s silkscreen it
+    # KEYBOARD, later ones PAD MODE. It was bound as "pad_mode", which the
+    # decoder never sends, so OVER DUB could not be pressed at all.
+    "keyboard":       "mpc:over_dub",
     "navigate":       "mpc:main_screen",
     "duplicate":      "mpc:go_to",
     "select":         "mpc:undo",

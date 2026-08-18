@@ -577,7 +577,12 @@ def self_test():
     _s = _u.spec_from_file_location("mk1in", os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "mpc-mk1-input.py"))
     _m = _u.module_from_spec(_s); _s.loader.exec_module(_m)
-    known = {b for b in _m.MK1_BUTTONS if b} | {"pad_mode"}
+    # NO EXEMPTIONS. This set used to be "| {'pad_mode'}", an escape hatch
+    # added directly beneath a comment about "restart" being mapped and never
+    # sent - and it hid the same bug again: MPC_BUTTONS bound OVER DUB to
+    # "pad_mode", the panel reports that key as "keyboard", and OVER DUB was
+    # unreachable on the instrument for as long as the exemption existed.
+    known = {b for b in _m.MK1_BUTTONS if b}
     for table in (control_map.MPC_BUTTONS, control_map.DAW_BUTTONS):
         unknown = set(table) - known
         assert not unknown, "mapped buttons the decoder never sends: %s" % sorted(unknown)
