@@ -132,6 +132,23 @@ TRANSPORT = {
     "shift":           ("modifier", None),
 }
 
+# WHICH INSTRUMENT THE PANEL IS DRIVING.
+#
+# The MPC has six function keys and the MK1 has eight display buttons, so the
+# top-right one is spare on the MPC side and is the obvious home for "what am I
+# controlling". DISPLAY 8 toggles it; its own LED is lit in DAW mode, so the
+# state is readable without looking at a screen.
+#
+# In MPC mode only "mpc:" bindings are sent; in DAW mode only "daw:" ones. A
+# button with no binding for the current surface does nothing, rather than
+# doing something surprising - which is the whole point of a mode switch.
+#
+# Pads and their SHIFT layer are deliberately NOT switched: the pads are an
+# instrument, they play the MPC in both modes, and a DAW can map the same
+# notes if it wants them.
+SURFACE_TOGGLE = "display8"
+SURFACES = ("MPC", "DAW")
+
 # Everything else the MK1 has. Twelve buttons that did nothing, and with them
 # the MPC keys that had no way of being pressed - including the CURSOR, without
 # which the machine's own UI cannot be navigated from the controller at all.
@@ -203,12 +220,25 @@ PAD_SECTION = {
 
 # The MPC prints a shift function beside every pad. Honouring them costs
 # nothing and means the printing on a real MPC panel stays true.
+# SHIFT+pad is the MPC's NUMERIC KEYPAD.
+#
+# The MK1 has no number keys and the MPC needs them constantly - every value
+# field, every sequence and program number. They were the last block on the MPC
+# panel that nothing on the controller could reach.
+#
+# The MPC's digits ARE its mode keys: the panel prints "1 SONG", "2 MISC",
+# "3 LOAD" and so on, and the key sends the DIGIT on its own and the MODE with
+# SHIFT held on the MPC itself. So sending KEY['song'] here types a 1.
+#
+# Laid out as a calculator, which is how the pads sit: 1-2-3 along the bottom
+# row, 7-8-9 on the third, 0 just above. The top row keeps the transpose
+# functions, which are the ones worth having on a pad grid.
 SHIFT_PADS = {
-    1: "mpc:undo", 2: "daw:redo", 3: "daw:compare", 4: "daw:split",
-    5: "daw:quantize", 6: "daw:quantize50", 7: "daw:nudge_back",
-    8: "daw:nudge_fwd", 9: "daw:clear", 10: "daw:clear_automation",
-    11: "daw:copy", 12: "daw:paste", 13: "mpc:semitone_down",
-    14: "mpc:semitone_up", 15: "mpc:octave_down", 16: "mpc:octave_up",
+    1: "mpc:song",       2: "mpc:misc",      3: "mpc:load",   4: "mpc:sample",
+    5: "mpc:trim",       6: "mpc:program",   7: "mpc:mixer",  8: "mpc:other",
+    9: "mpc:midi_sync",  10: "mpc:zero",     11: "mpc:enter", 12: "mpc:main_screen",
+    13: "mpc:semitone_down", 14: "mpc:semitone_up",
+    15: "mpc:octave_down",   16: "mpc:octave_up",
 }
 
 # --- encoders --------------------------------------------------------

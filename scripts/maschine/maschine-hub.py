@@ -183,6 +183,8 @@ class Router:
                 "expected 8 mixer strips to match the 8 display knobs, got %d"
                 % len(self.strips))
         self.shift = False
+        # Which instrument the panel drives. See control_map.SURFACE_TOGGLE.
+        self.surface = "MPC"
         # What each button sent on its press edge, so the RELEASE can send the
         # matching note-off. Keyed by button name, not by target: shift can be
         # let go between press and release, and the key that must be released
@@ -198,11 +200,31 @@ class Router:
 
     # --- buttons ---
 
+    def wants(self, target):
+        """Is this target for the instrument the panel is currently driving?
+
+        A button with no binding for the current surface does NOTHING. That is
+        the point of a mode switch: in MPC mode nothing reaches Ardour, and in
+        DAW mode nothing reaches the MPC, so a press can never land somewhere
+        you were not looking.
+        """
+        if not target or target == "modifier":
+            return False
+        if target.startswith("mode:"):
+            return True          # hold-modes are the controller's own state
+        return target.startswith("mpc:") == (self.surface == "MPC")
+
     def button(self, name, down):
         """Returns a list of (kind, payload); kind is 'midi' or 'cmd'."""
         if name == "shift":
             self.shift = down
             return []
+
+        if name == control_map.SURFACE_TOGGLE:
+            if not down:
+                return []
+            self.surface = ("DAW" if self.surface == "MPC" else "MPC")
+            return [("surface", self.surface)]
 
         if name in HOLD_MODES:
             # Hold enters the mode; release leaves it, unless it was
@@ -245,6 +267,8 @@ class Router:
             self.page = target.split(":")[-1]
             return [("cmd", "page %s" % self.page)]
         if target and target.startswith("mpc:"):
+            if not self.wants(target):
+                return []
             self.pressed[name] = target
             return [("midi", target)]
 
@@ -255,7 +279,7 @@ class Router:
                 left = control_map.BUTTONS_LEFT.get(name)
                 if left:
                     key = left[1] if self.shift else left[0]
-                    if not key:
+                    if not key or not self.wants(key):
                         return []
                     self.pressed[name] = key
                     return [("midi", key)]
@@ -268,14 +292,28 @@ class Router:
         tr = control_map.TRANSPORT.get(name) or control_map.PANEL.get(name)
         if tr:
             key = tr[1] if self.shift else tr[0]
-            if not key or key == "modifier":
+            if not key or key == "modifier" or not self.wants(key):
                 return []
             self.pressed[name] = key
             return [("midi", key)]
         sec = control_map.PAD_SECTION.get(name)
         if sec and sec.startswith("mpc:"):
+            if not self.wants(sec):
+                return []
             self.pressed[name] = sec
             return [("midi", sec)]
+        if sec and sec.startswith("daw:"):
+            # These were declared and never routed - the branch above only
+            # handled "mpc:" and everything else fell through to nothing, so
+            # NAVIGATE, SELECT and DUPLICATE did nothing at all. Found by
+            # testing DAW mode, which is what the surface toggle is for.
+            if not self.wants(sec):
+                return []
+            rest = sec.split(":", 1)[1]
+            if rest.startswith("page:"):
+                self.page = rest.split(":", 1)[1]
+                return [("cmd", "page %s" % self.page)]
+            return [("cmd", rest.replace(":", " "))]
         return []
 
     # --- pads ---
@@ -419,10 +457,11 @@ def self_test():
     # was strip index 0 because indices 4-7 were remapped to 0-3.
     assert r.knob(4, -2) == [("cmd", "knob MIX LOOP -2")]
 
-    # The MPC's printed shift-pad functions stay true.
+    # SHIFT+pad is the MPC's numeric keypad. Pad 1 types a 1, which on the MPC
+    # is the key its panel prints "1 SONG".
     r.button("shift", True)
-    assert r.pad(0, 100) == [("midi", "mpc:undo")]
-    assert r.pad(4, 100) == [("cmd", "action quantize")]
+    assert r.pad(0, 100) == [("midi", "mpc:song")]
+    assert r.pad(4, 100) == [("midi", "mpc:trim")]
 
     # The grid is not upside down. The MK1 numbers its pads from the top row
     # down and the MPC numbers them from the bottom row up, so pad 0 - note 36,
@@ -487,6 +526,31 @@ def self_test():
     r4.button("select", False)
     assert LAMP_TO_LED["full_level"] == "Select"
     assert LAMP_TO_LED["sixteen_levels"] == "Grid"
+
+    # The surface toggle, and the isolation it is for.
+    r5 = Router()
+    assert r5.surface == "MPC"
+    assert r5.button("play", True) == [("midi", "mpc:play")]
+    r5.button("play", False)
+    assert r5.button(control_map.SURFACE_TOGGLE, True) == [("surface", "DAW")]
+    assert r5.surface == "DAW"
+    # In DAW mode an MPC-only button must reach NOTHING.
+    assert r5.button("play", True) == []
+    r5.button("play", False)
+    # ...and a DAW binding still works.
+    assert r5.button("navigate", True) == [("cmd", "page EDIT")]
+    r5.button("navigate", False)
+    assert r5.button(control_map.SURFACE_TOGGLE, True) == [("surface", "MPC")]
+    assert r5.button("play", True) == [("midi", "mpc:play")]
+
+    # SHIFT+pads are the MPC numeric keypad, and every digit must be a real key.
+    codes = control_map_keycodes()
+    digits = {1: "song", 2: "misc", 3: "load", 4: "sample", 5: "trim",
+              6: "program", 7: "mixer", 8: "other", 9: "midi_sync", 10: "zero"}
+    for pad, key in digits.items():
+        assert control_map.SHIFT_PADS[pad] == "mpc:" + key, \
+            "pad %d is not digit key %s" % (pad, key)
+        assert key in codes, "no MPC keycode for %s" % key
 
     print("maschine-hub self-test PASS: routing verified for buttons, "
           "pads, pad orientation, key release, knobs, shift and hold-modes")
@@ -1205,6 +1269,16 @@ def main():
                         sinks["pc"].write(encode_midi(payload, down))
                     except OSError:
                         sinks["pc"] = None
+            elif kind == "surface":
+                # The toggle's own LED IS the indicator, so it is set here and
+                # not through the lamp mirror - that reflects the MPC's state,
+                # and this is the controller's own.
+                if self_ref[0] is not None:
+                    self_ref[0].leds.set(
+                        "DisplayButton8",
+                        mk1_leds.BRIGHT if payload == "DAW" else mk1_leds.OFF)
+                    self_ref[0].flush_leds()
+                _trace("surf", payload, "controller now drives the " + payload)
             else:
                 _trace(kind, payload, "unrouted")
 
