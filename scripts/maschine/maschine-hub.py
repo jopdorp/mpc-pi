@@ -89,6 +89,26 @@ _variation = 64
 # 1000 and a nudge crossed the whole field. MPCPI_WHEEL_UNITS_PER_STEP tunes it
 # - lower is faster.
 WHEEL_UNITS_PER_STEP = float(os.environ.get("MPCPI_WHEEL_UNITS_PER_STEP", "40"))
+# How long a partial turn is carried before it is forgotten. Long enough for a
+# slow deliberate turn, short enough that idle sensor drift never accumulates.
+WHEEL_CARRY_S = float(os.environ.get("MPCPI_WHEEL_CARRY_MS", "250")) / 1000.0
+
+# Send MPC keys as a TAP - press and release together - rather than holding the
+# key for as long as the button is held.
+#
+# Holding is what the hardware does, and the firmware responds to it the way
+# the hardware does: it AUTO-REPEATS. On the cursor that means one deliberate
+# press walks two fields, because a comfortable press outlasts the repeat
+# delay. Nothing in the controller is double-firing - the trace shows exactly
+# one press and one release - the machine is doing what a held key means.
+#
+# A tap cannot repeat, so a press is one step. The cost is hold-to-scroll,
+# which is worth losing to make single presses trustworthy; set
+# MPCPI_TAP_KEYS=0 to hold instead.
+#
+# SHIFT is exempt and always holds: it is a modifier, and a modifier that taps
+# is not a modifier.
+TAP_KEYS = os.environ.get("MPCPI_TAP_KEYS", "1") not in ("0", "", "no")
 
 # MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
 # else is a light that reports something you press somewhere else, which is
@@ -207,6 +227,7 @@ class Router:
         self.surface = "MPC"
         # Carried remainder per master knob, so slow turns are not rounded away.
         self._wheel_accum = {}
+        self._wheel_seen = {}
         # What each button sent on its press edge, so the RELEASE can send the
         # matching note-off. Keyed by button name, not by target: shift can be
         # let go between press and release, and the key that must be released
@@ -276,6 +297,10 @@ class Router:
 
         if target:
             if target.startswith("mpc:"):
+                if TAP_KEYS and SEND_KEY_RELEASE:
+                    # Both, in order, so the firmware sees a short press and
+                    # never starts repeating.
+                    return [("midi", target), ("midi_up", target)]
                 self.pressed[name] = target
                 return [("midi", target)]
             if target.startswith("mode:"):
@@ -357,6 +382,23 @@ class Router:
             # sets how far the knob turns for one of them, and the remainder is
             # carried so a slow turn still moves rather than being rounded to
             # nothing.
+            # Drop a stale remainder before adding to it.
+            #
+            # These are analog sensors: an untouched knob wanders, and anything
+            # past the tracker's deadband arrives here. Carrying the remainder
+            # forever turns that wander into a random walk that eventually
+            # crosses a step - measured at seven wheel messages in six idle
+            # seconds, nudging whatever field the cursor was on, with nobody
+            # touching the controller.
+            #
+            # A real turn produces a continuous run of deltas; noise arrives in
+            # isolated ticks. Forgetting the remainder after a pause keeps the
+            # carry (so slow turns still register) without letting drift
+            # integrate.
+            now = time.monotonic()
+            if (now - self._wheel_seen.get(name, 0.0)) > WHEEL_CARRY_S:
+                self._wheel_accum[name] = 0
+            self._wheel_seen[name] = now
             self._wheel_accum[name] = self._wheel_accum.get(name, 0) + delta
             steps = int(self._wheel_accum[name] / WHEEL_UNITS_PER_STEP)
             if not steps:
@@ -396,6 +438,14 @@ class Router:
 def self_test():
     r = Router()
 
+    def sent(events):
+        """The MPC key a press produced, ignoring whether it tapped or held."""
+        for kind, payload in events:
+            if kind == "midi":
+                return payload
+        return None
+
+
     # ONE FUNCTION PER BUTTON, and no button may claim two MPC keys.
     import collections
     for surface, table in (("MPC", control_map.MPC_BUTTONS),
@@ -428,18 +478,18 @@ def self_test():
         assert control_map.MPC_BUTTONS["display%d" % i] == "mpc:soft%d" % i
 
     # Transport.
-    assert r.button("play", True) == [("midi", "mpc:play")]
+    assert sent(r.button("play", True)) == "mpc:play"
     r.button("play", False)
-    assert r.button("mute", True) == [("midi", "mpc:stop")]
+    assert sent(r.button("mute", True)) == "mpc:stop"
     r.button("mute", False)
-    assert r.button("loop", True) == [("midi", "mpc:play_start")]
+    assert sent(r.button("loop", True)) == "mpc:play_start"
     r.button("loop", False)
 
     # SHIFT is the MPC's own SHIFT key, held, AND our pad modifier.
     ev = r.button("shift", True)
     assert ev == [("midi", "mpc:shift")], ev
     assert r.shift is True
-    assert r.pad(0, 100) == [("midi", "mpc:song")]      # SHIFT+pad 1 types a 1
+    assert sent(r.pad(0, 100)) == "mpc:song"            # SHIFT+pad 1 types a 1
     up = r.button("shift", False)
     assert up == ([("midi_up", "mpc:shift")] if SEND_KEY_RELEASE else [])
     assert r.shift is False
@@ -460,7 +510,7 @@ def self_test():
     assert r.button("group_f", True) == [("cmd", "page MIX")]
     r.button("group_f", False)
     assert r.button(control_map.SURFACE_TOGGLE, True) == [("surface", "MPC")]
-    assert r.button("play", True) == [("midi", "mpc:play")]
+    assert sent(r.button("play", True)) == "mpc:play"
     r.button("play", False)
 
     # Knobs: one per mixer strip, and the master knobs by name.
@@ -472,6 +522,16 @@ def self_test():
     assert sorted(flip(i) for i in range(16)) == list(range(16))
     assert all(flip(i) % 4 == i % 4 for i in range(16))
 
+    # A cursor press is ONE step: tapped, so the firmware cannot auto-repeat.
+    r8 = Router()
+    ev = r8.button("browse_left", True)
+    if TAP_KEYS and SEND_KEY_RELEASE:
+        assert ev == [("midi", "mpc:left"), ("midi_up", "mpc:left")], ev
+        assert r8.button("browse_left", False) == [], "release already sent"
+    # SHIFT still HOLDS - a modifier that taps is not a modifier.
+    assert r8.button("shift", True) == [("midi", "mpc:shift")]
+    assert r8.button("shift", False) == [("midi_up", "mpc:shift")]
+
     # The wheel must be SCALED, and the remainder carried rather than dropped.
     r7 = Router()
     assert r7.master("swing", 5) == [], "a nudge should not move the wheel"
@@ -481,6 +541,12 @@ def self_test():
             total += int(payload.rsplit(":", 1)[1])
     assert total == int(100 / WHEEL_UNITS_PER_STEP), \
         "100 units gave %d steps, expected %d" % (total, 100 / WHEEL_UNITS_PER_STEP)
+
+    # Idle drift must NOT accumulate into wheel steps.
+    r9 = Router()
+    for _ in range(30):                       # isolated 4-unit ticks, far apart
+        r9._wheel_seen["swing"] = 0.0         # pretend each is long after the last
+        assert r9.master("swing", 4) == [], "sensor drift moved the wheel"
 
     # The two continuous controls must produce CONTROL CHANGE, not silence.
     wheel = encode_midi("mpc:data_wheel:+3")
