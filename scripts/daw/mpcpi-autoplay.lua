@@ -112,7 +112,12 @@ for name in pairs(LAMPS) do lamp_order[#lamp_order + 1] = name end
 table.sort(lamp_order)
 
 local last_lamps = nil
+local lamp_frames = 0
 local outputs = manager.machine.output
+
+-- Prove the exporter is RUNNING, separately from whether the values move.
+-- Without this a frozen file cannot be told from a notifier that fired once:
+-- "bank_a=1 and nothing ever changes" reads identically either way.
 
 local function export_lamps()
     local parts = {}
@@ -120,7 +125,8 @@ local function export_lamps()
         local ok, v = pcall(function() return outputs:get_value(LAMPS[name]) end)
         parts[#parts + 1] = name .. "=" .. ((ok and v and v ~= 0) and "1" or "0")
     end
-    local line = table.concat(parts, " ")
+    lamp_frames = lamp_frames + 1
+    local line = table.concat(parts, " ") .. " frames=" .. lamp_frames
     if line == last_lamps then
         return
     end
@@ -132,7 +138,19 @@ local function export_lamps()
     end
 end
 
-emu.add_machine_frame_notifier(function() pcall(export_lamps) end)
+-- KEEP THE TOKEN. add_machine_frame_notifier returns a subscription object,
+-- and the notifier lives only as long as something references it. Discarding
+-- it - `emu.add_machine_frame_notifier(fn)` as a bare statement - leaves the
+-- callback alive exactly until Lua's next collection, which measured as
+-- FIFTEEN frames: the lamp file was written a few times at boot and then froze
+-- forever, showing bank A lit and nothing else ever changing. That reads
+-- identically to "the machine never changes its lamps", which is why the
+-- exported line carries a frame counter now.
+--
+-- Global on purpose: a local would go out of scope at the end of this script.
+mpcpi_lamp_notifier = emu.add_machine_frame_notifier(function()
+    pcall(export_lamps)
+end)
 print("MPCPI_LAMP_EXPORT " .. lamp_path)
 
 if not autoplay then
