@@ -12,8 +12,25 @@ Requires=mpcpi-usb-gadget.service mpcpi-emulator.service mpcpi-daw.service
 PartOf=mpcpi-emulator.service mpcpi-daw.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+# Type=exec, NOT oneshot.
+#
+# As a oneshot this sat on the critical chain and cost 9.6s of boot - the
+# single largest unit on the appliance, measured with `systemd-analyze
+# critical-chain`. multi-user.target waits for a oneshot to FINISH, and this
+# one only finishes after its retry loop has waited for Ardour to publish
+# :Master and :LOOP1..5, which takes most of ten seconds.
+#
+# Nothing needs to block on it. The instrument is playable as soon as the
+# emulator and the hub are up; the gadget links are a tap for a computer
+# that is very probably not plugged in yet. With Type=exec systemd counts
+# the unit started as soon as the process execs, so the retry loop runs
+# alongside the rest of boot instead of in front of it.
+#
+# The tradeoff, stated plainly: `systemctl is-active` now says "active"
+# while retries are still in flight, so it is no longer a synchronous
+# answer to "are the links up". `mpc-usb-route.sh status` is, and that is
+# what any check should use.
+Type=exec
 # The graph needs a moment after every node appears. Retrying is cheaper than
 # guessing a delay - the script is idempotent, and it logs a channel as idle
 # rather than failing outright when only part of the graph (e.g. Ardour) is
