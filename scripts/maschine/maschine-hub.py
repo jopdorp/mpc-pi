@@ -224,6 +224,10 @@ LAMP_TO_LED = {
 # truth belongs. Derived from the table rather than listed, so adding a lamp
 # cannot silently hand its LED to the press feedback.
 LAMP_OWNED = set(LAMP_TO_LED.values())
+# The surface toggle's own LED is state too - it shows which instrument the
+# panel is driving. Press feedback lit it on press and CLEARED it on release,
+# which wiped the indicator every time it was used.
+LAMP_OWNED.add("DisplayButton8")
 
 
 
@@ -311,8 +315,13 @@ class Router:
 
     def __init__(self, lanes=None, strips=None):
         self.lanes = lanes or ["GTR1", "GTR2", "MIC", "AUX"]
-        self.strips = strips or ["MPC", "GTR1", "GTR2", "MIC",
-                                 "LOOP", "VERB", "DLY", "AUX"]
+        # Eight knobs, eight strips, in the order the desk is laid out:
+        # 1-5 record tracks, 6 delay, 7 reverb, 8 master. Must match
+        # STRIP_NAMES/SEND_NAMES in scripts/daw/session-template.lua - a knob
+        # addressing a strip that does not exist moves nothing and says
+        # nothing.
+        self.strips = strips or ["REC1", "REC2", "REC3", "REC4", "REC5",
+                                 "DELAY", "REVERB", "MASTER"]
         # One knob per strip is the whole point of the layout: 8 display
         # knobs, 8 strips, 8 channels on the interface. If these ever
         # diverge, some strip silently loses its knob - which is exactly
@@ -671,6 +680,10 @@ def self_test():
         raise AssertionError("pad_led(0) should raise - it is 1-based")
     except ValueError:
         pass
+
+    # The mode indicator must survive the press that changes it.
+    assert "DisplayButton8" in LAMP_OWNED, \
+        "press feedback would clear the surface indicator on release"
 
     # Press feedback must never write a machine-owned LED.
     for _b, _led in BUTTON_LEDS.items():

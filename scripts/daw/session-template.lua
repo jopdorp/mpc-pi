@@ -64,10 +64,28 @@ local function add_audio(nm, ins)
 	return tl:front()
 end
 
+-- The desk, sized to what the board can actually run.
+--
+-- It was eight source strips, eight individual-out tracks and two sends - 19
+-- routes carrying 27 plugins - and that measured 820us of every 1451us graph
+-- cycle, 57% of the budget before anything else ran. The same routes with the
+-- plugins stripped measured 231us and zero xruns, so the plugins were ~590us
+-- of it and the fixed cost was never the problem.
+--
+-- MAX_PLUGINS_PER_ROUTE is the ceiling that keeps it that way. GTR1 and GTR2
+-- carried eight inserts each, which is where most of the 27 came from.
+local STRIP_NAMES = { "REC1", "REC2", "REC3", "REC4", "REC5" }
+local SEND_NAMES = { "DELAY", "REVERB" }
+local MAX_PLUGINS_PER_ROUTE =
+	tonumber(os.getenv("MPCPI_MAX_PLUGINS") or "4")
+
 local tracks = {}
 step("create channel strips", function()
-	for _, nm in ipairs({ "MPC", "GTR1", "GTR2", "MIC",
-	                      "GTR1+", "GTR2+", "MIC+", "AUX" }) do
+	-- Five record tracks, then DELAY and REVERB as sends, then master:
+	-- knobs 1-5 are the tracks, 6 is delay, 7 is reverb, 8 is the master.
+	-- Eight strips for eight knobs, and the two sends sit where a mixer puts
+	-- them - next to the master, not scattered among the sources.
+	for _, nm in ipairs(STRIP_NAMES) do
 		tracks[nm] = add_audio(nm, 2)
 	end
 end)
@@ -97,7 +115,7 @@ end)
 -- the eight channel strips are created first and the panel addresses
 -- only those by position.
 local individual_active = os.getenv("MPC_INDIVIDUAL_ACTIVE") == "1"
-local individual_tracks = os.getenv("MPC_INDIVIDUAL_TRACKS") ~= "0"
+local individual_tracks = os.getenv("MPC_INDIVIDUAL_TRACKS") == "1"
 
 step("create individual-out tracks", function()
 	if not individual_tracks then
@@ -126,7 +144,7 @@ step("create individual-out tracks", function()
 end)
 
 step("create send buses", function()
-	for _, nm in ipairs({ "FX A", "FX B" }) do
+	for _, nm in ipairs(SEND_NAMES) do
 		local bl = session:new_audio_route(2, 2, ROUTE_GROUP, 1, nm,
 			ARDOUR.PresentationInfo.Flag.AudioBus,
 			ARDOUR.PresentationInfo.max_order)
@@ -295,7 +313,14 @@ local function read_chains(path)
 	for track, slots in pairs(root) do
 		local list = {}
 		for _, slot in ipairs(slots) do
-			if slot.uri and slot.uri ~= "" then
+			-- Cap the chain. Measured on this board, 27 plugins across the
+			-- desk cost 820us of a 1451us cycle and the same routes without
+			-- them cost 231us - so the inserts, not the routes, are what
+			-- pushes the graph past its deadline. Taking the FIRST N keeps
+			-- the head of each chain, which is where the corrective
+			-- processing sits; the tail is usually sweetening.
+			if slot.uri and slot.uri ~= ""
+					and #list < MAX_PLUGINS_PER_ROUTE then
 				list[#list + 1] = slot
 			end
 		end
