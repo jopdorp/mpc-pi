@@ -97,3 +97,38 @@ Next steps, in order:
 Doing (3) first would produce a PipeWire input node that looks like progress
 and samples nothing - which is worth stating plainly, because it is the
 tempting shortcut here.
+
+## Implementation (patch 0051)
+
+Built on the finding above plus one more: **DMA channel 3 already carries
+sample data between the CPU and the DSP's wave RAM** - `in_io16r_cb<3>` /
+`out_io16w_cb<3>` in mpc2000.cpp, with the DSP raising DRQ. That is the
+transfer the firmware already knows how to run for loading, and on real
+hardware sampling is the same transfer with the words originating at the
+ADC behind the FPGA instead of in wave RAM.
+
+So the patch does three things:
+
+1. `stream_alloc(0, 10, ...)` becomes `stream_alloc(2, 10, ...)`. The device
+   had no inputs at all, which is the root reason sampling could not work -
+   `stream.get()` had nothing to read.
+2. `sound_stream_update` captures those inputs into a ring buffer when
+   recording is enabled, summing L+R at half gain when both are selected
+   (WADCSN bits 6/7 choose). Capture happens before the voice loop, because
+   the machine can sample while it plays and a voice may be reading the RAM
+   recording is about to fill.
+3. `dma_r16_cb` returns captured words instead of wave RAM while recording.
+   An empty ring returns silence rather than stalling: a DMA that never
+   completes hangs the guest, and a gap in a recording is recoverable where
+   a hung machine is not.
+
+`wadcn_w` decodes bits rather than matching a value, because the start value
+is computed at runtime - see above. The stop constants the firmware writes
+(0x1A/0x1B) both have bits 7 and 6 clear, so "some channel enabled" already
+means "recording" in the firmware's own terms.
+
+**Status: applies cleanly, compiles pending, NOT yet verified against the
+SAMPLE screen.** The open question is whether the firmware points voice[0]
+at a record buffer and drives channel 3, which is what makes step 3 land in
+the right place. If it does not, the capture path is still correct and only
+the destination needs rework.

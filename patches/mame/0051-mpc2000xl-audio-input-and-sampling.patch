@@ -1,0 +1,220 @@
+diff --git a/src/devices/sound/l7a1045_l6028_dsp_a.cpp b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+index bd1fe109..451ba8f3 100644
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -216,7 +216,12 @@ void l7a1045_sound_device::device_start()
+ 
+ 	// Allocate the stream
+ 	m_sample_rate = clock() / 768.0f;
+-	m_stream = stream_alloc(0, 10, m_sample_rate);
++	// TWO INPUTS, ten outputs. The inputs are the analog sampling pair:
++	// without them stream.get() has nothing to read and the machine cannot
++	// record, which is why sampling never worked no matter what the
++	// firmware wrote to WADCSN.
++	m_stream = stream_alloc(2, 10, m_sample_rate);
++	m_rec_ring = std::make_unique<int16_t[]>(REC_RING);
+ 
+ 	m_dma_timer = timer_alloc(FUNC(l7a1045_sound_device::dma_timer_callback), this);
+ 
+@@ -255,6 +260,38 @@ void l7a1045_sound_device::device_reset()
+ 
+ void l7a1045_sound_device::sound_stream_update(sound_stream &stream)
+ {
++	// Capture first, play second. The incoming audio for THIS block has to
++	// be taken before the voice loop runs, because a voice may be playing
++	// back the very RAM that recording is about to fill - the machine is
++	// perfectly capable of sampling while it plays.
++	if (m_rec_on)
++	{
++		for (int j = 0; j < stream.samples(); j++)
++		{
++			// The MPC's sampler is mono per channel-enable: WADCSN's bits
++			// 6 and 7 choose L, R, or both, and both means the sum. Scale
++			// by a half when summing so two hot channels cannot clip a
++			// signal that neither would have clipped alone.
++			sound_stream::sample_t v = 0;
++			int n = 0;
++			if (m_rec_left)  { v += stream.get(0, j); n++; }
++			if (m_rec_right) { v += stream.get(1, j); n++; }
++			if (n == 2) v *= 0.5f;
++
++			int32_t q = int32_t(v * 32767.0f);
++			if (q > 32767) q = 32767;
++			if (q < -32768) q = -32768;
++
++			m_rec_ring[m_rec_wr & (REC_RING - 1)] = int16_t(q);
++			m_rec_wr++;
++			// Overrun: drop the OLDEST, never the newest. A sampler that
++			// silently keeps stale audio and discards what is being played
++			// into it right now is worse than one that glitches.
++			if (m_rec_wr - m_rec_rd > REC_RING)
++				m_rec_rd = m_rec_wr - REC_RING;
++		}
++	}
++
+ 	for (int i = 0; i < NUM_VOICES; i++)
+ 	{
+ 		if (m_key & (1 << i))
+@@ -620,6 +657,26 @@ uint16_t l7a1045_sound_device::dma_r16_cb()
+ 
+ 	m_drq_handler(CLEAR_LINE);
+ 
++	// WHILE RECORDING, THIS CHANNEL CARRIES THE ADC, NOT WAVE RAM.
++	//
++	// DMA channel 3 is already how sample data moves between the CPU and
++	// this device (see mpc2000.cpp's in_io16r_cb<3>/out_io16w_cb<3>), and
++	// the firmware drives it for loading. Sampling is the same transfer in
++	// the same direction the CPU already knows how to run - the only
++	// difference on real hardware is that the words originate at the ADC
++	// behind the Xilinx FPGA rather than in wave RAM.
++	//
++	// So: when WADCSN has enabled recording, hand the CPU captured audio.
++	// Returning silence when the ring is empty rather than stalling is
++	// deliberate - a DMA that never completes hangs the guest, and a gap
++	// in a recording is recoverable where a hung machine is not.
++	if (m_rec_on)
++	{
++		if (m_rec_rd == m_rec_wr)
++			return 0;
++		return uint16_t(m_rec_ring[m_rec_rd++ & (REC_RING - 1)]);
++	}
++
+ 	m_voice[0].pos++;
+ 	if (m_voice[0].sample_type == 1)
+ 	{
+@@ -651,6 +708,26 @@ void l7a1045_sound_device::dma_w16_cb(uint16_t data)
+ 	m_voice[0].pos++;
+ }
+ 
++void l7a1045_sound_device::set_record_enable(bool on, bool left, bool right)
++{
++	if (on == m_rec_on && left == m_rec_left && right == m_rec_right)
++		return;
++
++	// Resync the stream before changing state so audio already generated
++	// for this block is not retroactively captured (or missed).
++	m_stream->update();
++
++	if (on && !m_rec_on)
++	{
++		// Fresh start: drop whatever was left from a previous take rather
++		// than prepending it to this one.
++		m_rec_rd = m_rec_wr = 0;
++	}
++	m_rec_on = on;
++	m_rec_left = left;
++	m_rec_right = right;
++}
++
+ TIMER_CALLBACK_MEMBER(l7a1045_sound_device::dma_timer_callback)
+ {
+ 	m_drq_handler(ASSERT_LINE);
+diff --git a/src/devices/sound/l7a1045_l6028_dsp_a.h b/src/devices/sound/l7a1045_l6028_dsp_a.h
+index 17756956..c6eaac41 100644
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.h
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.h
+@@ -36,6 +36,14 @@ public:
+ 	uint16_t dma_r16_cb();
+ 	void dma_w16_cb(uint16_t data);
+ 
++	// AUDIO INPUT (sampling). The device had zero input streams -
++	// stream_alloc(0, 10, ...) - so the emulated MPC could not record at
++	// all. Two inputs now carry the analog pair; recording is gated by the
++	// machine driver from WADCSN, the FPGA register the firmware strobes
++	// to start and stop the ADC.
++	void set_record_enable(bool on, bool left, bool right);
++	bool recording() const { return m_rec_on; }
++
+ protected:
+ 	// device-level overrides
+ 	virtual void device_start() override ATTR_COLD;
+@@ -85,6 +93,18 @@ private:
+ 	uint16_t        m_control;
+ 	emu_timer       *m_dma_timer;
+ 
++	// Captured audio waiting to be handed to the CPU's DMA. A ring rather
++	// than a growing buffer: if nothing drains it the oldest audio is what
++	// should be lost, not the newest, and an emulator must never grow
++	// memory without bound because a guest forgot to stop recording.
++	static constexpr u32 REC_RING = 1 << 16;
++	std::unique_ptr<int16_t[]> m_rec_ring;
++	u32             m_rec_wr = 0;
++	u32             m_rec_rd = 0;
++	bool            m_rec_on = false;
++	bool            m_rec_left = true;
++	bool            m_rec_right = true;
++
+ 	uint8_t m_cur_channel;
+ 	uint8_t m_cur_register;
+ 	double  m_sample_rate;
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+index 8d01899e..02689bd8 100644
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -78,6 +78,7 @@ public:
+ 		, m_maincpu(*this, "maincpu")
+ 		, m_subcpu(*this, "subcpu")
+ 		, m_dsp(*this, "dsp")
++		, m_mic(*this, "mic")
+ #if ENABLE_FLASH
+ 		, m_flash(*this, "flash%u", 0U)
+ #endif
+@@ -118,6 +119,7 @@ private:
+ 	required_device<v53a_device> m_maincpu;
+ 	required_device<upd7810_device> m_subcpu;
+ 	required_device<l7a1045_sound_device> m_dsp;
++	required_device<microphone_device> m_mic;
+ #if ENABLE_FLASH
+ 	required_device_array<intel_28f016sa_16bit_device, 8> m_flash;
+ #endif
+@@ -371,6 +373,29 @@ uint8_t mpc2000_state::wadcsn_r()
+ void mpc2000_state::wadcn_w(uint8_t data)
+ {
+ 	m_wadcsn = data;
++
++	// WADCSN NOW DRIVES THE SAMPLER. It was a pure read-back stub: writes
++	// were stored and nothing happened, so the SAMPLE screen could be
++	// operated and never recorded anything.
++	//
++	// Bits, from the register map above:
++	//   7  enable the right channel input
++	//   6  enable the left channel input
++	//   3  analog input DISABLE (so recording wants it clear)
++	//
++	// The stop constants the firmware writes are 0x1A and 0x1B, both with
++	// bits 7 and 6 clear - which is exactly "no channel enabled", so
++	// treating "some channel enabled" as "recording" matches what the
++	// firmware already does rather than inventing a new convention.
++	//
++	// Disassembling the v1.20 ROM shows the start path computes its value
++	// at runtime (docs/mpc2000xl-sampling-protocol.md) rather than writing
++	// a constant, which is why no fixed "start" byte appears anywhere in
++	// the ROM and why this is decoded by bit rather than by value.
++	const bool left  = BIT(data, 6);
++	const bool right = BIT(data, 7);
++	const bool analog_ok = !BIT(data, 3);
++	m_dsp->set_record_enable((left || right) && analog_ok, left, right);
+ }
+ 
+ INPUT_CHANGED_MEMBER(mpc2000_state::variation_changed)
+@@ -708,6 +733,20 @@ void mpc2000_state::mpc2000(machine_config &config)
+ 
+ 	TIMER(config, "dialtimer").configure_periodic(FUNC(mpc2000_state::dial_timer_tick), attotime::from_hz(60.0));
+ 
++	// THE SAMPLING INPUT. The machine models eight individual OUTPUTS and
++	// had no input at all, which is the whole reason sampling could not
++	// work: with no capture stream there was nothing for the ADC path to
++	// carry. Two channels, because the MPC2000XL's analog input is a
++	// stereo pair and WADCSN selects L, R or both.
++	//
++	// This becomes an ordinary PipeWire capture stream through MAME's own
++	// sound module, so on the appliance it can be fed from anything in the
++	// graph - the USB gadget's return from a computer, or the audio
++	// interface's own inputs.
++	MICROPHONE(config, m_mic, 2).front();
++	m_mic->add_route(0, m_dsp, 1.0, 0);
++	m_mic->add_route(1, m_dsp, 1.0, 1);
++
+ 	SPEAKER(config, "speaker", 2).front();
+ 	SPEAKER(config, "outputs", 8).unknown();
+ 
