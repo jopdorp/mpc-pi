@@ -56,10 +56,16 @@ xrun_after=$(codec_xruns)
 
 journalctl -u mpcpi-emulator --since "-${secs}s" --no-pager -o cat > /tmp/cc-log || true
 
+# Frames per host sound update is the QUANTUM divided by the updates-per-quantum
+# setting, not a constant. Hardcoding 64 here read 49.3% at quantum 128 and sent
+# me looking for a producer fault that did not exist.
+frames=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^MAME_SOUND_UPDATE_FRAMES=//p')
+frames=${frames:-64}
+
 corrections=$(grep -c "audio buffer correction on stream 1" /tmp/cc-log || true)
 if [ "${corrections:-0}" -gt 0 ]; then
-    awk -v c="$corrections" -v s="$secs" \
-        'BEGIN { f = c * 500 * 64; printf "realtime: %.1f%% (%d frames delivered)\n", 100*f/(44100*s), f }'
+    awk -v c="$corrections" -v s="$secs" -v n="$frames" \
+        'BEGIN { f = c * 500 * n; printf "realtime: %.1f%% (%d frames delivered, %d per update)\n", 100*f/(44100*s), f, n }'
 else
     printf 'realtime: UNKNOWN - set MAME_PIPEWIRE_STATS=1 to measure it\n'
 fi

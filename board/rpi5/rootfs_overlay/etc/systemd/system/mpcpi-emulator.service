@@ -56,21 +56,35 @@ Environment=MAME_RT_PRIORITY=20
 # that the Maschine hub reads, which the turbo script points at /dev/shm/mpc-lcd.
 Environment=MPC_VIDEO_MODE=none
 Environment=SDL_VIDEODRIVER=dummy
-# 64, not the turbo default of 32. The M-Audio Duo is a USB 1.1 full-speed
-# device: 76 xruns per 16s at 32 against 2 at 64, measured on this board. This
-# must stay equal to default.clock.quantum in
-# pipewire.conf.d/95-mpcpi.conf - run-mpc.sh derives the sound cadence from it.
-# 64 works now. It did not while MAME's audio threads sat at the emulation
-# thread's SCHED_RR priority - see the ExecStartPost below and docs/audio-chain.md.
-# The "MAME emits a frame's audio in one burst every 10.9ms" reading was of the
+# 64 frames, 1.45ms. Two constraints, both of which have broken this appliance:
+#
+#   * MUST equal default.clock.quantum in pipewire.conf.d/95-mpcpi.conf -
+#     run-mpc.sh derives the sound-update cadence from it.
+#   * MUST NOT exceed api.alsa.period-size in the Duo's wireplumber rule while
+#     disable-tsched is on, or the graph stops dead at QUANT 0 in silence.
+#
+# 64 also runs clean now - realtime 98.0%, underruns 0, codec xruns flat - and
+# did not while MAME's audio threads sat at the emulation thread's SCHED_RR
+# priority; see the ExecStartPost below and docs/audio-chain.md. The old reading
+# that "MAME emits a whole frame's audio in one burst every 10.9ms" was of the
 # CONSUMER being gated by the scheduler, not of the producer bursting.
 Environment=MPC_PIPEWIRE_FRAMES=64
 # One host sound update per graph quantum, so a callback consumes a whole number
 # of producer updates.
 Environment=MPC_SOUND_UPDATES_PER_QUANTUM=1
-# Output cushion and buffer pool. 32 quanta is 46ms; with the producer no longer
-# starved the ring holds ~2112 frames in steady state and never empties.
-Environment=MAME_PIPEWIRE_PREBUFFER_QUANTA=32
+# Output cushion, in QUANTA. Two, so 128 frames at a 64-frame quantum - 2.9ms.
+#
+# This was 32 quanta, which is a leftover from when the cushion was mitigation:
+# the producer was starved of 90% of its audio (docs/audio-chain.md) and depth
+# was the only thing that moved the symptom. Depth is not free - it is output
+# latency, in front of the DAC, and it scales with the quantum, so the same "32"
+# meant 46ms at a 64-frame quantum and 93ms at 128. On an instrument that is the
+# difference between playing and not.
+#
+# With the producer delivering full rate the ring does not need a cushion to
+# survive. If one quantum is not enough, the answer is to find what is late,
+# not to buy time in front of the DAC.
+Environment=MAME_PIPEWIRE_PREBUFFER_QUANTA=2
 Environment=MAME_PIPEWIRE_BUFFERS=16
 # Stereo, as the host runs it - the machine has several speaker devices and
 # only :speaker carries the program's audio.
