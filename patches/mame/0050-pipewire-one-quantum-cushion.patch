@@ -1,0 +1,57 @@
+From: mpc-pi
+Subject: [PATCH] pipewire: let the cushion actually be one quantum
+
+MAME_PIPEWIRE_PREBUFFER_QUANTA was not honoured at the bottom of its range. The
+cushion was
+
+    max(wanted * quanta, wanted + producer_frames)
+
+and with quanta=1 at a 64-frame quantum that is max(64, 128) = 128, so asking
+for one quantum and asking for two both produced 128 frames - 2.9ms - and
+setting it to 1 changed nothing at all.
+
+The second term existed to guarantee a whole producer update fits in the
+cushion. That is no longer a separate constraint: the producer's update size is
+tied to the quantum by MPC_SOUND_UPDATES_PER_QUANTUM, so one quantum already IS
+one update.
+
+One quantum is the true floor and the patch keeps it. Below that the callback
+asks for `wanted` frames every cycle while the pacing loop stops the producer
+with less than one request in hand - an underrun by construction, not by bad
+luck. So "half a period" is not available at any setting, and the honest answer
+to asking for one is 1.45ms rather than 2.90ms.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+diff --git a/src/osd/modules/sound/pipewire_sound.cpp b/src/osd/modules/sound/pipewire_sound.cpp
+--- a/src/osd/modules/sound/pipewire_sound.cpp
++++ b/src/osd/modules/sound/pipewire_sound.cpp
+@@ -803,10 +803,24 @@
+ 	// MAME_PIPEWIRE_PREBUFFER_QUANTA sets the depth. Four quanta at 64 frames is
+ 	// 5.8ms of output cushion - still an instrument latency, unlike the 23ms a
+ 	// 1024-frame quantum costs to paper over the same jitter.
+-	stream->m_prebuffer_frames = std::max(
+-			stream->m_prebuffer_frames,
+-			std::max(wanted * m_prebuffer_quanta,
+-					wanted + stream->m_producer_frames));
++	// The cushion is what MAME_PIPEWIRE_PREBUFFER_QUANTA asks for, floored at
++	// ONE graph quantum - and no longer silently raised to a quantum plus a
++	// producer update.
++	//
++	// That extra term made the setting a lie at the bottom of its range: with
++	// PREBUFFER_QUANTA=1 at a 64-frame quantum the cushion was
++	// max(64, 64+64) = 128 frames, so asking for one quantum and asking for
++	// two produced exactly the same 2.9ms. The floor was there to guarantee a
++	// whole producer update fits, but the producer's update size is now tied
++	// to the quantum (MPC_SOUND_UPDATES_PER_QUANTUM), so one quantum already
++	// is one update.
++	//
++	// One quantum is the real floor and cannot be crossed: the callback asks
++	// for `wanted` frames every cycle, so a cushion below that stops the
++	// producer with less than one request in hand, which is an underrun by
++	// construction rather than by bad luck.
++	const uint32_t asked = wanted * std::max(1u, m_prebuffer_quanta);
++	stream->m_prebuffer_frames = std::max(stream->m_prebuffer_frames, asked);
+ 	const auto callback_now = std::chrono::steady_clock::now();
+ 	const auto callback_gap_us = stream->m_last_callback.time_since_epoch().count()
+ 		? std::chrono::duration_cast<std::chrono::microseconds>(callback_now - stream->m_last_callback).count()
