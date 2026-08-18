@@ -111,14 +111,17 @@ def button(d, x, y, w, h, label, name=None, force=None):
 
 
 PANEL_IMG = os.path.join(HERE, "..", "..", "docs", "reference", "mk1-panel-raw.png")
+MPC_IMG   = os.path.join(HERE, "..", "..", "docs", "reference",
+                         "mpc2000xl-panel-page.png")
 
-# Where each control sits on the manual's own panel figure (1179x982), read off
-# the figure rather than invented. Boxes are (x, y, w, h) in that image's pixels.
+# Both panels come from the manufacturers' own manuals. An earlier version of
+# this drew the Maschine from mk1_leds.LED_ORDER - the order cabl reports LEDs
+# in, which says nothing about where a button is - and produced a device that
+# does not exist.
 #
-# This project drew this diagram once from the LED wire order and got a panel
-# that does not exist. The wire order is the order cabl reports LEDs in; it has
-# nothing to do with where the buttons are. So the geometry now comes from the
-# 1.5 manual's controller overview, page 22.
+# Maschine: MASCHINE 1.5 Reference Manual p.22, figure is 1179x982.
+# MPC2000XL: Operator's Manual p.4 "Panel Descriptions / Front Panel",
+#            page rendered at 260 dpi to 2149x3041.
 PANEL_BOXES = {
     "control":        (161,  82,  58, 32),
     "step":           (238,  76,  58, 38),
@@ -154,141 +157,171 @@ PANEL_BOXES = {
     "solo":           (498, 734,  58, 44),
     "mute":           (498, 790,  58, 44),
 }
-# The eight display buttons across the top of the figure.
 for _i in range(8):
     PANEL_BOXES["display%d" % (_i + 1)] = (330 + _i * 91, 90, 66, 26)
 
-# Crop to the panel itself. The manual's figure carries a numbered callout
-# column down each side and a second, half-cut panel below - all of it noise
-# here, and the callout numbers actively fight our own labels.
+# MPC controls, in the rendered page's pixels, before cropping.
+MPC_BOXES = {
+    "F1-F6":        (566, 880, 360,  40),
+    "MAIN SCREEN":  (752, 985,  70,  35),
+    "WINDOW":       (896, 980,  70,  38),
+    "SHIFT":        (424,1148,  62,  38),
+    "ENTER":        (600,1148,  70,  38),
+    "AFTER":        (428,1272,  62,  36),
+    "TAP TEMPO":    (602,1262,  74,  52),
+    "UNDO":         (566,1370,  66,  32),
+    "ERASE":        (652,1370,  66,  32),
+    "CURSOR":       (786,1278, 140,  96),
+    "DATA":         (770, 1060, 200, 200),
+    "STEP":         (556,1446, 148,  38),
+    "GO TO":        (722,1446,  76,  38),
+    "BAR":          (818,1446, 152,  38),
+    "REC":          (556,1530,  70,  50),
+    "OVER DUB":     (644,1530,  70,  50),
+    "STOP":         (734,1530,  70,  50),
+    "PLAY":         (820,1530,  70,  50),
+    "PLAY START":   (908,1530,  70,  50),
+    "FULL LEVEL":   (1186, 800, 100,  70),
+    "16 LEVELS":    (1282, 800, 100,  70),
+    "NEXT SEQ":     (1186, 892, 100,  56),
+    "TRACK MUTE":   (1282, 892, 100,  56),
+    "PAD BANK A-D": (1394, 892, 348,  56),
+    "PADS 1-16":    (1150, 990, 620, 590),
+}
+# Which Maschine control drives each MPC control. Derived from control_map so
+# the two halves of the picture cannot disagree.
+MPC_SOURCE = {}
+for _btn, _pair in list(control_map.TRANSPORT.items()) + list(control_map.PANEL.items()):
+    for _shift, _t in ((False, _pair[0]), (True, _pair[1])):
+        if _t and _t.startswith("mpc:"):
+            _k = _t.split(":", 1)[1].replace("_", " ").upper()
+            _label = ("SHIFT+" if _shift else "") + _btn.replace("_", " ").upper()
+            MPC_SOURCE.setdefault(_k, []).append(_label)
+for _btn, _t in control_map.PAD_SECTION.items():
+    if _t.startswith("mpc:"):
+        _k = _t.split(":", 1)[1].replace("_", " ").upper()
+        MPC_SOURCE.setdefault(_k, []).append(_btn.replace("_", " ").upper())
+for _btn, _t in control_map.GROUPS.items():
+    if _t.startswith("mpc:"):
+        _k = _t.split(":", 1)[1].replace("_", " ").upper()
+        MPC_SOURCE.setdefault(_k, []).append(_btn.replace("_", " ").upper())
+
+MPC_ALIAS = {
+    "F1-F6": "SOFT1", "MAIN SCREEN": "MAIN SCREEN", "WINDOW": "WINDOW",
+    "SHIFT": "SHIFT", "ENTER": "ENTER", "AFTER": "AFTER",
+    "TAP TEMPO": "TAP TEMPO", "UNDO": "UNDO", "ERASE": "ERASE",
+    "STEP": "STEP LEFT", "GO TO": "GO TO", "BAR": "BAR LEFT",
+    "REC": "RECORD", "OVER DUB": "OVER DUB", "STOP": "STOP",
+    "PLAY": "PLAY", "PLAY START": "PLAY START",
+    "FULL LEVEL": "FULL LEVEL", "16 LEVELS": "SIXTEEN LEVELS",
+    "NEXT SEQ": "NEXT SEQ", "TRACK MUTE": "TRACK MUTE",
+    "PAD BANK A-D": "BANK A", "CURSOR": "LEFT", "DATA": None,
+    "PADS 1-16": None,
+}
+MPC_LAMPS = {
+    "AFTER": "led0", "REC": "led1", "PLAY": "led3", "OVER DUB": "led4",
+    "FULL LEVEL": "led8", "16 LEVELS": "led15", "TRACK MUTE": "led11",
+    "NEXT SEQ": "led12", "PAD BANK A-D": "led13/10/14/9",
+}
+
 CROP = (104, 8, 1092, 858)
 CROP_DX, CROP_DY = CROP[0], CROP[1]
+MK_SCALE = 1.5
+mk = Image.open(PANEL_IMG).convert("RGB").crop(CROP)
+MKW, MKH = int(mk.width * MK_SCALE), int(mk.height * MK_SCALE)
+mk = mk.resize((MKW, MKH), Image.LANCZOS)
 
-SCALE = 1.55
-panel = Image.open(PANEL_IMG).convert("RGB").crop(CROP)
-PW_, PH_ = int(panel.width * SCALE), int(panel.height * SCALE)
-panel = panel.resize((PW_, PH_), Image.LANCZOS)
+MCROP = (337, 590, 1815, 1660)
+MC_DX, MC_DY = MCROP[0], MCROP[1]
+MPC_SCALE = 1.0
+mp = Image.open(MPC_IMG).convert("RGB").crop(MCROP)
+MPW, MPH = int(mp.width * MPC_SCALE), int(mp.height * MPC_SCALE)
+mp = mp.resize((MPW, MPH), Image.LANCZOS)
 
-W = PW_ + 860
-H = PH_ + 300
+W = 80 + MKW + 60 + MPW + 40
+H = 190 + max(MKH, MPH) + 210
 
 img = Image.new("RGB", (W, H), BG)
 d = ImageDraw.Draw(img)
 
 d.text((40, 26), "Maschine MK1  \u2192  MPC2000XL", font=F_TITLE, fill=TEXT)
 d.text((40, 76),
-       "Panel figure: MASCHINE 1.5 Reference Manual p.22 (1st-generation "
-       "labels). Bindings read live from scripts/maschine/control_map.py.",
+       "Both panels are the manufacturers' own figures - MASCHINE 1.5 Reference "
+       "Manual p.22 (1st-generation labels) and the MPC2000XL Operator's Manual "
+       "p.4. Bindings are read live from scripts/maschine/control_map.py.",
        font=F_SUB, fill=DIM)
 
-PANEL_X, PANEL_Y = 40, 140
-img.paste(panel, (PANEL_X, PANEL_Y))
+MKX, MKY = 40, 150
+img.paste(mk, (MKX, MKY))
+d.text((MKX, MKY - 26), "MASCHINE MK1 - what you press", font=F_HEAD, fill=TEXT)
 
-def mark(name, box):
+MPX, MPY = MKX + MKW + 60, 150
+img.paste(mp, (MPX, MPY))
+d.text((MPX, MPY - 26), "AKAI MPC2000XL - what the emulator receives",
+       font=F_HEAD, fill=TEXT)
+
+
+def tag(x, y, text, colour, above=False):
+    tw = d.textlength(text, font=F_SMALL)
+    ty = y - 18 if above else y
+    d.rectangle((x - 3, ty, x + tw + 5, ty + 17), fill=BG)
+    d.text((x + 1, ty + 1), text, font=F_SMALL, fill=colour)
+
+
+for name, box in PANEL_BOXES.items():
     bx, by, bw, bh = box
-    x, y, w, h = [int(v * SCALE) for v in
-                  (bx - CROP_DX, by - CROP_DY, bw, bh)]
-    x += PANEL_X; y += PANEL_Y
+    x = MKX + int((bx - CROP_DX) * MK_SCALE)
+    y = MKY + int((by - CROP_DY) * MK_SCALE)
+    w, h = int(bw * MK_SCALE), int(bh * MK_SCALE)
     plain, shifted = binding(name)
     col = colour_for(plain)
     d.rounded_rectangle((x, y, x + w, y + h), radius=4, outline=col, width=3)
-    label = short(plain)
-    if label:
-        tw = d.textlength(label, font=F_SMALL)
-        ly = y + h + 2
-        d.rectangle((x - 2, ly, x - 2 + tw + 8, ly + 17), fill=BG)
-        d.text((x + 2, ly + 1), label, font=F_SMALL, fill=col)
+    if short(plain):
+        tag(x, y + h + 2, short(plain), col)
     if shifted:
-        sl = "\u21e7" + short(shifted)
-        tw = d.textlength(sl, font=F_SMALL)
-        ly = y + h + 20
-        d.rectangle((x - 2, ly, x - 2 + tw + 8, ly + 17), fill=BG)
-        d.text((x + 2, ly + 1), sl, font=F_SMALL, fill=SHIFTED)
+        tag(x, y + h + 20, "\u21e7" + short(shifted), SHIFTED)
 
-for name, box in PANEL_BOXES.items():
-    mark(name, box)
+for name, box in MPC_BOXES.items():
+    bx, by, bw, bh = box
+    x = MPX + int((bx - MC_DX) * MPC_SCALE)
+    y = MPY + int((by - MC_DY) * MPC_SCALE)
+    w, h = int(bw * MPC_SCALE), int(bh * MPC_SCALE)
+    key = MPC_ALIAS.get(name)
+    srcs = MPC_SOURCE.get(key, []) if key else []
+    lamp = MPC_LAMPS.get(name)
+    col = MAPPED if srcs else (SHIFTED if name == "PADS 1-16" else UNMAPPED)
+    if name in ("DATA",):
+        col = DAWCOL
+    d.rounded_rectangle((x, y, x + w, y + h), radius=4, outline=col, width=3)
+    label = name
+    tag(x, y - 18, label, TEXT)
+    if name == "PADS 1-16":
+        tag(x, y + h + 2, "16 pads, notes 36-51", MAPPED)
+    elif name == "DATA":
+        tag(x, y + h + 2, "SWING knob", DAWCOL)
+    elif srcs:
+        tag(x, y + h + 2, " / ".join(sorted(set(srcs))[:2]), MAPPED)
+    else:
+        tag(x, y + h + 2, "not mapped", UNMAPPED)
+    if lamp:
+        tag(x, y + h + 20, "lamp " + lamp, SHIFTED)
 
-# ------------------------------------------------------------------- MPC ----
-CX = PANEL_X + PW_ + 30
-d.text((CX, PANEL_Y - 4), "WHAT THE MPC2000XL RECEIVES", font=F_HEAD, fill=TEXT)
-
-GROUPS_OUT = [
-    ("TRANSPORT", [("PLAY", "led3"), ("STOP", None), ("PLAY START", None),
-                   ("REC", "led1"), ("OVER DUB", "led4"), ("GO TO", None),
-                   ("STEP \u25c0 \u25b6", None), ("BAR \u25c0 \u25b6", None)]),
-    ("PAD / PERFORM", [("AFTER (note repeat)", "led0"), ("FULL LEVEL", "led8"),
-                       ("16 LEVELS", "led15"), ("TRACK MUTE", "led11"),
-                       ("NEXT SEQ", "led12"),
-                       ("BANK A/B/C/D", "led13/10/14/9")]),
-    ("SCREEN / EDIT", [("SOFT KEY 1-6", None), ("MAIN SCREEN", None),
-                       ("WINDOW", None), ("ENTER", None),
-                       ("CURSOR \u25c0 \u25b6 \u25b2 \u25bc", None),
-                       ("UNDO", None), ("ERASE", None)]),
-    ("MODES", [("LOAD", None), ("SAVE / MISC", None), ("MIXER", None),
-               ("PROGRAM", None), ("SAMPLE", None), ("TRIM", None),
-               ("SONG", None), ("TAP TEMPO", None), ("MIDI SYNC", None)]),
-]
-y = PANEL_Y + 30
-for title, items in GROUPS_OUT:
-    d.text((CX, y), title, font=F_BTN, fill=DIM)
-    y += 24
-    for label, lamp in items:
-        d.rounded_rectangle((CX, y, CX + 320, y + 30), radius=5, fill=PAD,
-                            outline=SHIFTED if lamp else PAD_EDGE, width=2)
-        d.text((CX + 10, y + 7), label, font=F_SMALL, fill=TEXT)
-        if lamp:
-            d.text((CX + 312, y + 7), lamp, font=F_SMALL, fill=SHIFTED,
-                   anchor="ra")
-        y += 34
-    y += 12
-
-d.text((CX + 350, PANEL_Y + 30), "PADS", font=F_BTN, fill=DIM)
-for row in range(4):
-    for col in range(4):
-        pad = (3 - row) * 4 + col
-        bx = CX + 350 + col * 88
-        by = PANEL_Y + 54 + row * 76
-        d.rounded_rectangle((bx, by, bx + 80, by + 68), radius=6, fill=PAD,
-                            outline=MAPPED, width=2)
-        d.text((bx + 40, by + 10), "PAD %d" % (pad + 1), font=F_BTN,
-               fill=TEXT, anchor="ma")
-        d.text((bx + 40, by + 34), "note %d" % (36 + pad), font=F_SMALL,
-               fill=MAPPED, anchor="ma")
-        sh = control_map.SHIFT_PADS.get(pad + 1)
-        if sh:
-            d.text((bx + 40, by + 50), short(sh)[:11], font=F_SMALL,
-                   fill=SHIFTED if sh.startswith("mpc:") else DAWCOL, anchor="ma")
-
-ky = PANEL_Y + 54 + 4 * 76 + 24
-d.text((CX + 350, ky), "KNOBS", font=F_BTN, fill=DIM)
-ky += 26
-for label, meaning in (("K1-K8", "8 Ardour mixer strips"),
-                       ("VOLUME", "DAW master"),
-                       ("TEMPO", "note variation"),
-                       ("SWING", "MPC DATA wheel")):
-    d.rounded_rectangle((CX + 350, ky, CX + 700, ky + 30), radius=5, fill=PAD,
-                        outline=DAWCOL, width=2)
-    d.text((CX + 360, ky + 7), label, font=F_SMALL, fill=TEXT)
-    d.text((CX + 692, ky + 7), meaning, font=F_SMALL, fill=DAWCOL, anchor="ra")
-    ky += 34
-
-# ---------------------------------------------------------------- legend ----
-LY = PANEL_Y + PH_ + 24
+LY = 150 + max(MKH, MPH) + 30
 for i, (col, name, meaning) in enumerate([
-        (MAPPED,  "green",  "sends an MPC panel key or pad"),
-        (SHIFTED, "amber",  "needs SHIFT held, or is an MPC lamp mirrored back to the controller"),
-        (DAWCOL,  "blue",   "goes to Ardour through daw-ctl, not to the MPC"),
-        (UNMAPPED,"red",    "no binding - the button does nothing")]):
-    x = 40 + (i % 2) * 700
+        (MAPPED,  "green",  "a Maschine button reaches this MPC control"),
+        (SHIFTED, "amber",  "needs SHIFT, or is an MPC lamp mirrored to the controller"),
+        (DAWCOL,  "blue",   "goes to Ardour, or is a knob rather than a key"),
+        (UNMAPPED,"red",    "nothing on the Maschine reaches it")]):
+    x = 40 + (i % 2) * 760
     yy = LY + (i // 2) * 30
     d.rectangle((x, yy, x + 30, yy + 18), fill=PAD, outline=col, width=3)
     d.text((x + 42, yy), name, font=F_LEG, fill=col)
     d.text((x + 120, yy), meaning, font=F_LEG, fill=DIM)
 
-d.text((40, H - 40),
-       "Pad 1 is bottom-left on both machines; the MK1 reports its pads from "
-       "the TOP row down and the hub flips the row at the hardware boundary. "
-       "SHIFT+PLAY is STOP - the MK1 has no stop button.",
+d.text((40, H - 46),
+       "Pad 1 is bottom-left on both machines; the MK1 reports its pads from the "
+       "TOP row down and the hub flips the row at the hardware boundary. "
+       "SHIFT+PLAY is STOP, because the MK1 has no stop button.",
        font=F_SMALL, fill=DIM)
 
 if __name__ == "__main__":
