@@ -1,0 +1,17 @@
+[Unit]
+Description=MPC-Pi panel renderer (screen R)
+After=network.target
+
+# Paths corrected: this unit was captured from the development
+# board carrying /opt/mpc-pi/... from the Buildroot layout, which
+# does not exist on the Pi OS card. It failed five times with
+# "can't open file", then systemd gave up on it.
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mpc-pi-src/scripts/maschine/daw-ui-daemon.py --out /dev/shm/daw-ui --hz 30
+Restart=always
+RestartSec=1
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

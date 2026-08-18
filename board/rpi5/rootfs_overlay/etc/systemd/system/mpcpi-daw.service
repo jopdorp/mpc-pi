@@ -8,9 +8,17 @@ ConditionPathExists=/opt/mpc-pi-src/scripts/daw/ardour-env.sh
 Type=simple
 User=mpc
 Group=mpc
-# Cores 2-3: the graph's worker cores. NOT core 1, which belongs to
-# PipeWire's data loop - putting DSP there starves the thing that wakes it.
-ExecStart=/bin/sh -lc 'taskset --cpu-list 2-3 /opt/mpc-pi-src/scripts/daw/run-session.sh'
+# Core 2 alone. NOT core 1, which belongs to PipeWire's data loop - putting
+# DSP there starves the thing that wakes it - and no longer core 3, which is
+# the emulator's.
+#
+# This used to be 2-3. Sharing core 3 with the emulator is exactly the shape of
+# fault that cost weeks here: MAME's audio threads inherited the emulation
+# thread's SCHED_RR 20, and under SCHED_RR an equal-priority thread never
+# preempts, so the audio producer only ran when emulation happened to block and
+# 90% of the audio was lost before it reached the graph (docs/audio-chain.md).
+# Ardour is a heavy, RT-scheduled tenant; it has no business on that core.
+ExecStart=/bin/sh -lc 'taskset --cpu-list 2 /opt/mpc-pi-src/scripts/daw/run-session.sh'
 # Same reason as the emulator: PAM limits do not reach a service.
 LimitRTPRIO=95
 LimitMEMLOCK=infinity

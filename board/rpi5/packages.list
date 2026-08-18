@@ -14,18 +14,31 @@ pipewire-jack
 wireplumber
 alsa-utils
 
-# --- the DAW: REMOVED ---------------------------------------------------
-# ardour, lua5.1, luajit, lilv-utils, and the plugins its session
-# instantiated (guitarix, dragonfly-reverb, lsp-plugins-lv2, x42-plugins,
-# zam-plugins) are all gone for now.
+# --- the DAW -----------------------------------------------------------
+# Removed while the monitoring path crackled, restored now that it does not.
 #
-# Not because the DAW work was wrong - the session builds and runs - but
-# because the monitoring path crackles and Ardour was measurably part of it:
-# it burned 57% of every 32-frame quantum (pw-top B/Q 0.57), and stopping it
-# cut the codec's xruns from 233 to 88 per 16s. An appliance cannot be
-# debugged with its heaviest consumer in the graph.
-#
-# Restore from git history when the audio path is clean.
+# The removal was justified by "Ardour burned 57% of every 32-frame quantum
+# and stopping it cut the codec's xruns from 233 to 88 per 16s". The xrun
+# figures were real; the crackle they were blamed for was not Ardour's. It was
+# MAME's own audio threads sitting at the emulation thread's SCHED_RR priority,
+# which cost 90% of the audio before it ever reached the graph - see
+# docs/audio-chain.md. Ardour is back in, and mpcpi-daw.service now runs it on
+# isolated core 2 rather than 2-3, so it no longer shares a core with the
+# emulator.
+ardour
+lua5.1
+luajit
+lilv-utils
+
+# --- plugins the shipped session instantiates --------------------------
+# Pinned by name because the session template fails to load without
+# them, and a missing plugin in Ardour is a silently bypassed insert
+# rather than an error.
+guitarix
+dragonfly-reverb
+lsp-plugins-lv2
+x42-plugins
+zam-plugins
 
 # --- emulator runtime --------------------------------------------------
 # /usr/local/bin/mpc is a hand-built binary, NOT a package. Nothing in
