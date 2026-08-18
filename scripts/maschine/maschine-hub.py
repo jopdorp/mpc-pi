@@ -496,8 +496,19 @@ class Mk1:
     # ON at 400 clears the worst observed bleed by 176 and still sits far below
     # the softest real hit. OFF at 150 gives hysteresis, so a pad decaying
     # through the on-threshold cannot chatter a second note-on.
-    PAD_ON_THRESHOLD = 300
-    PAD_OFF_THRESHOLD = 120
+    PAD_ON_THRESHOLD = int(os.environ.get("MPCPI_PAD_ON", "300"))
+    # OFF is deliberately far below ON, not just a little below.
+    #
+    # The three guards are all here and all necessary: a note-on threshold
+    # ABOVE the note-off threshold, a latch so a pad must fall through OFF
+    # before it can fire again, and a time lockout. At OFF=120 a hard hit could
+    # still ring down through 120 and back up through 300 inside one stroke,
+    # which is a legitimate pair of crossings and therefore not something the
+    # latch can reject - only the DEPTH it has to fall to can.
+    #
+    # 60 means the pad has to come most of the way back to rest. On a one-shot
+    # sampler the later note-off costs nothing.
+    PAD_OFF_THRESHOLD = int(os.environ.get("MPCPI_PAD_OFF", "60"))
     # Fraction of the NEXT-SCANNED channel subtracted from each pad, to cancel
     # the sample-and-hold bleed described above. MPCPI_PAD_BLEED overrides it.
     #
@@ -522,9 +533,25 @@ class Mk1:
     # second time. That is a real crossing, so no threshold arrangement rejects
     # it - only time does. This is what a drum pad calls retrigger lockout.
     #
-    # 30ms still allows 33 hits a second on one pad, which is faster than the
-    # grid can be played. MPCPI_PAD_RETRIGGER_MS overrides it.
-    PAD_RETRIGGER_S = float(os.environ.get("MPCPI_PAD_RETRIGGER_MS", "30")) / 1000.0
+    # 100ms per pad, which allows 10 hits a second ON ONE PAD. This is a floor
+    # on the SAME pad only - two different pads can still be hit together, and
+    # a roll alternating pads is unaffected.
+    #
+    # Worth knowing where the ceiling is: straight 16ths at 150bpm is 10 hits a
+    # second, so a fast single-pad roll can reach this. Lower
+    # MPCPI_PAD_RETRIGGER_MS if a genuine roll starts losing notes.
+    PAD_RETRIGGER_S = float(os.environ.get("MPCPI_PAD_RETRIGGER_MS", "100")) / 1000.0
+    # Switch debounce for the BUTTONS, seconds.
+    #
+    # _ctrl diffed the raw bitfield with no debounce at all, so a bouncy
+    # contact - which every mechanical switch is - sent as many press/release
+    # pairs as it bounced. On NOTE REPEAT, a toggle, an even number of bounces
+    # leaves the state where it started and an odd number flips it: the button
+    # works "sometimes", which is exactly how it was described.
+    #
+    # 12ms is longer than contact bounce and far shorter than a deliberate
+    # double-tap, so nothing playable is lost.
+    BUTTON_DEBOUNCE_S = float(os.environ.get("MPCPI_BUTTON_DEBOUNCE_MS", "12")) / 1000.0
     # Kept as the name the diagnostic reports against.
     PAD_THRESHOLD = PAD_ON_THRESHOLD
 
@@ -592,6 +619,8 @@ class Mk1:
         self.pad_last_on = [0.0] * 16
         self.pad_suppressed = 0
         self.buttons = 0
+        self.button_changed_at = [0.0] * 48
+        self.button_bounces = 0
         self.encoders = mk1_encoders.EncoderTracker()
         self.frames = {}
         self.leds = mk1_leds.LedBank()
@@ -877,7 +906,21 @@ class Mk1:
             # Byte 6 also carries the validity flag at bit 6, which is
             # bit position 46 overall - past the 42 names in the table,
             # so it is never mistaken for a button.
-            bits = int.from_bytes(bytes(data[1:7]), "little")
+            raw_bits = int.from_bytes(bytes(data[1:7]), "little")
+            # Debounce per button, against the DEBOUNCED state - not against
+            # the last raw report. Comparing raw to raw lets a bounce through
+            # as soon as it settles differently for one report.
+            now = time.monotonic()
+            bits = self.buttons
+            for pos in range(48):
+                raw = (raw_bits >> pos) & 1
+                if raw == ((bits >> pos) & 1):
+                    continue
+                if (now - self.button_changed_at[pos]) < self.BUTTON_DEBOUNCE_S:
+                    self.button_bounces += 1
+                    continue
+                self.button_changed_at[pos] = now
+                bits ^= (1 << pos)
             changed = bits ^ self.buttons
             self.buttons = bits
             if TRACE and changed:
@@ -952,6 +995,14 @@ def main():
     ap.add_argument("--left", default=LCD_L)
     ap.add_argument("--right", default=LCD_R)
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--led-only", default=None, metavar="NAME",
+                    help="diagnostic: light exactly ONE led by name and hold "
+                         "it, so the wire order can be checked against the "
+                         "panel. Stop mpcpi-maschine first")
+    ap.add_argument("--led-walk", type=float, default=None, metavar="SECONDS",
+                    help="diagnostic: light every led in turn for SECONDS "
+                         "each, printing the name, to find where an index "
+                         "really lands. Stop mpcpi-maschine first")
     ap.add_argument("--pad-stats", type=float, default=None, metavar="SECONDS",
                     help="diagnostic: read raw pad pressures for SECONDS and "
                          "print a grid of resting/peak values and threshold "
@@ -966,6 +1017,9 @@ def main():
     if args.no_usb:
         print("routing only; no controller opened")
         return 0
+
+    if args.led_only or args.led_walk is not None:
+        return led_probe(args.led_only, args.led_walk)
 
     if args.pad_stats is not None:
         return pad_stats(args.pad_stats)
@@ -1168,6 +1222,46 @@ def main():
             deliver(out)
             del out[:]
         time.sleep(0.002)
+
+
+def led_probe(only, walk):
+    """Light LEDs by NAME so the wire order can be checked against the panel.
+
+    mk1_leds.LED_ORDER is cabl's wire order, and the group-1 header carries an
+    off-by-one that the file warns against "correcting" without hardware in
+    front of you. This is that hardware check: if the light that comes on is
+    not the one named, the table or the block offset is wrong by exactly the
+    distance between them.
+    """
+    mk1 = Mk1()
+    mk1.leds.all(mk1_leds.OFF)
+    mk1.leds.backlight(mk1_leds.BACKLIGHT_DEFAULT)
+    mk1.flush_leds(force=True)
+    if only:
+        if only not in mk1_leds.LED_INDEX:
+            print("no such LED: %s\nnames: %s"
+                  % (only, " ".join(mk1_leds.LED_ORDER)), file=sys.stderr)
+            return 2
+        mk1.leds.set(only, mk1_leds.BRIGHT)
+        mk1.flush_leds(force=True)
+        print("LIT: %s (index %d). Ctrl-C when you have looked."
+              % (only, mk1_leds.LED_INDEX[only]))
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    for name in mk1_leds.LED_ORDER:
+        if name.startswith("Unused") or name == "DisplayBacklight":
+            continue
+        mk1.leds.all(mk1_leds.OFF)
+        mk1.leds.backlight(mk1_leds.BACKLIGHT_DEFAULT)
+        mk1.leds.set(name, mk1_leds.BRIGHT)
+        mk1.flush_leds(force=True)
+        print("  %-18s index %d" % (name, mk1_leds.LED_INDEX[name]), flush=True)
+        time.sleep(walk)
+    return 0
 
 
 def pad_stats(seconds):
