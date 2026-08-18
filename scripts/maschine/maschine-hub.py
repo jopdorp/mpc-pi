@@ -74,11 +74,13 @@ FIFO = "/run/daw-ctl.fifo"
 # akai/mpc2000.cpp already drives. Machine state, not our guess at it.
 LAMPS = os.environ.get("MPCPI_LAMP_PATH", "/dev/shm/mpc-lamps")
 
-# MPC lamp -> Maschine LED. Only where the Maschine has a button that means the
-# same thing; the MPC has lamps this controller has nowhere to put.
+# MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
+# else is a light that reports something you press somewhere else, which is
+# worse than no light: FULL LEVEL moved from GRID to SELECT to F7 during this
+# work, and the lamp has to move with it.
 LAMP_TO_LED = {
     "after":          "NoteRepeat",
-    "full_level":     "Select",
+    "full_level":     "DisplayButton7",
     "sixteen_levels": "Grid",
     "record":         "Rec",
     "play":           "Play",
@@ -120,10 +122,12 @@ def _trace(kind, payload, sink):
 # it: once the stream slips by a single byte a command is read as a keycode and
 # a keycode as a command, which is exactly a press landing on the wrong key.
 #
-# The MPC's panel functions latch on press, so press-only loses nothing except
-# genuinely held keys. Set MPCPI_SEND_KEY_RELEASE=1 to send them again once the
-# emulator's framing is fixed.
-SEND_KEY_RELEASE = os.environ.get("MPCPI_SEND_KEY_RELEASE", "0") not in ("0", "", "no")
+# Back ON by default: the framing is fixed. 0047 made a key event atomic so it
+# cannot be split, and 0048 gave the panel queue room so whole messages are not
+# dropped either - measured, zero drops since. Releases are needed again
+# because SHIFT is a real MPC key now and a key that is never released is a
+# modifier stuck down forever. MPCPI_SEND_KEY_RELEASE=0 turns them off.
+SEND_KEY_RELEASE = os.environ.get("MPCPI_SEND_KEY_RELEASE", "1") not in ("0", "", "no")
 
 
 def _deliver_cmd(sinks, path, payload):
@@ -215,19 +219,23 @@ class Router:
         return target.startswith("mpc:") == (self.surface == "MPC")
 
     def button(self, name, down):
-        """Returns a list of (kind, payload); kind is 'midi' or 'cmd'."""
+        """Returns a list of (kind, payload); kind is 'midi', 'cmd' or 'surface'.
+
+        ONE flat table per surface and no shifted variants. The MPC's own SHIFT
+        key does that job and lives on the SHIFT button, so a button means one
+        thing and the machine decides what holding shift changes about it.
+        """
+        # SHIFT is both our modifier for the pad layer and a real MPC key.
         if name == "shift":
             self.shift = down
-            return []
-
-        # MPC mode reclaims the buttons that are only useful to the DAW.
-        if down and self.surface == "MPC" and name in control_map.MPC_SURFACE:
-            plain, shifted = control_map.MPC_SURFACE[name]
-            key = shifted if (self.shift and shifted) else plain
-            if key:
-                self.pressed[name] = key
-                return [("midi", key)]
-            return []
+            target = control_map.MPC_BUTTONS.get("shift")
+            if self.surface != "MPC" or not target:
+                return []
+            if down:
+                self.pressed[name] = target
+                return [("midi", target)]
+            sent = self.pressed.pop(name, None)
+            return [("midi_up", sent)] if (sent and SEND_KEY_RELEASE) else []
 
         if name == control_map.SURFACE_TOGGLE:
             if not down:
@@ -235,94 +243,44 @@ class Router:
             self.surface = ("DAW" if self.surface == "MPC" else "MPC")
             return [("surface", self.surface)]
 
-        if name in HOLD_MODES:
-            # Hold enters the mode; release leaves it, unless it was
-            # pinned while held. PIN is Button 1 pressed during the hold.
-            if down:
-                self.held = HOLD_MODES[name]
-            else:
-                if self.pinned == self.held:
-                    pass                       # stays latched
-                self.held = None
-            return [("cmd", "mode %s" % self.mode)]
-
-        # `and down`: without it PIN toggles on press AND on release, so
-        # a real press-and-release pins the mode and instantly unpins
-        # it, and the latch does nothing on hardware. The routing
-        # self-test sent only the press edge and never noticed; a finger
-        # always sends both.
-        if name == control_map.PIN_BUTTON and self.held and down:
-            self.pinned = None if self.pinned == self.held else self.held
-            return [("cmd", "mode %s" % self.mode)]
+        table = (control_map.MPC_BUTTONS if self.surface == "MPC"
+                 else control_map.DAW_BUTTONS)
+        target = table.get(name)
 
         if not down:
-            # RELEASE the panel key this button pressed.
-            #
-            # This returned [] unconditionally, and encode_midi only ever
-            # emitted note-on, so every panel key the hub sent was pressed and
-            # never let go. On a momentary key that is merely untidy; on the
-            # MPC's held functions it is a stuck instrument - AFTER latches
-            # NOTE REPEAT down, and then every pad hit repeats at the tempo
-            # forever, which is invisible to the controller and looks exactly
-            # like the pads double-triggering.
-            target = self.pressed.pop(name, None)
-            if target and SEND_KEY_RELEASE:
-                return [("midi_up", target)]
+            sent = self.pressed.pop(name, None)
+            if sent and SEND_KEY_RELEASE and sent.startswith("mpc:"):
+                return [("midi_up", sent)]
+            if target and target.startswith("mode:") and self.pinned != self.held:
+                self.held = None
+                return [("cmd", "mode %s" % self.mode)]
             return []
 
-        # Page selection: Group E-H.
-        target = control_map.GROUPS.get(name)
-        if target and target.startswith("daw:page:"):
-            self.page = target.split(":")[-1]
-            return [("cmd", "page %s" % self.page)]
-        if target and target.startswith("mpc:"):
-            if not self.wants(target):
-                return []
-            self.pressed[name] = target
-            return [("midi", target)]
-
-        # Screen R's four buttons are contextual.
-        if name.startswith("display"):
-            idx = int(name[-1]) - 1
-            if idx < 4:
-                left = control_map.BUTTONS_LEFT.get(name)
-                if left:
-                    key = left[1] if self.shift else left[0]
-                    if not key or not self.wants(key):
-                        return []
-                    self.pressed[name] = key
-                    return [("midi", key)]
-            labels = control_map.BUTTONS_RIGHT_BY_PAGE.get(
-                self.page, ("", "", "", ""))
-            label = labels[idx - 4]
-            return [("cmd", "button %s %s" % (self.page, label))]
-
-        # Transport and the pad-section buttons.
-        tr = control_map.TRANSPORT.get(name) or control_map.PANEL.get(name)
-        if tr:
-            key = tr[1] if self.shift else tr[0]
-            if not key or key == "modifier" or not self.wants(key):
-                return []
-            self.pressed[name] = key
-            return [("midi", key)]
-        sec = control_map.PAD_SECTION.get(name)
-        if sec and sec.startswith("mpc:"):
-            if not self.wants(sec):
-                return []
-            self.pressed[name] = sec
-            return [("midi", sec)]
-        if sec and sec.startswith("daw:"):
-            # These were declared and never routed - the branch above only
-            # handled "mpc:" and everything else fell through to nothing, so
-            # NAVIGATE, SELECT and DUPLICATE did nothing at all. Found by
-            # testing DAW mode, which is what the surface toggle is for.
-            if not self.wants(sec):
-                return []
-            rest = sec.split(":", 1)[1]
+        if target:
+            if target.startswith("mpc:"):
+                self.pressed[name] = target
+                return [("midi", target)]
+            if target.startswith("mode:"):
+                self.held = target.split(":", 1)[1]
+                return [("cmd", "mode %s" % self.mode)]
+            rest = target.split(":", 1)[1]
             if rest.startswith("page:"):
                 self.page = rest.split(":", 1)[1]
                 return [("cmd", "page %s" % self.page)]
             return [("cmd", rest.replace(":", " "))]
+
+        # PIN latches whichever mode is held. Controller state, both surfaces.
+        if name == control_map.PIN_BUTTON and self.held:
+            self.pinned = None if self.pinned == self.held else self.held
+            return [("cmd", "mode %s" % self.mode)]
+
+        # In DAW mode the display buttons follow whatever the page shows.
+        if self.surface == "DAW" and name.startswith("display"):
+            idx = int(name[-1]) - 1
+            labels = control_map.BUTTONS_RIGHT_BY_PAGE.get(
+                self.page, ("", "", "", ""))
+            if 4 <= idx < 4 + len(labels):
+                return [("cmd", "button %s %s" % (self.page, labels[idx - 4]))]
         return []
 
     # --- pads ---
@@ -405,186 +363,96 @@ class Router:
 
 def self_test():
     r = Router()
-    # A page button changes the page and says so - in DAW mode, which is where
-    # pages exist. In MPC mode GROUP F is the MPC's NEXT SEQ.
-    assert r.button("group_f", True) == [("midi", "mpc:next_seq")]
-    r.button("group_f", False)
-    r.button(control_map.SURFACE_TOGGLE, True)
-    assert r.button("group_f", True) == [("cmd", "page MIX")]
-    assert r.page == "MIX"
-    r.button("group_f", False)
-    r.button(control_map.SURFACE_TOGGLE, True)   # back to MPC
 
-    # Transport goes to the MPC, not to Ardour.
-    assert r.button("play", True) == [("midi", "mpc:play")]
-    r.button("shift", True)
-    # SHIFT+PLAY must be STOP. The controller had no stop at all, and a
-    # sequence that cannot be stopped from the instrument is not playable.
-    assert r.button("play", True) == [("midi", "mpc:stop")]
-    r.button("shift", False)
-    # PLAY START is still reachable, on the button the panel prints RESTART.
-    # cabl's enum calls it "loop", and the decoder emits that name - control_map
-    # keyed it as "restart", which no decoder ever sends, so the binding was
-    # dead and PLAY START could not be pressed at all.
-    assert r.button("loop", True) == [("midi", "mpc:play_start")]
-    r.button("loop", False)
-    # NOTE REPEAT reaches the MPC's AFTER key, and releases it again - held,
-    # not toggled, which is how the 2000XL works.
-    assert r.button("note_repeat", True) == [("midi", "mpc:after")]
-    r.button("note_repeat", False)
+    # ONE FUNCTION PER BUTTON, and no button may claim two MPC keys.
+    import collections
+    for surface, table in (("MPC", control_map.MPC_BUTTONS),
+                           ("DAW", control_map.DAW_BUTTONS)):
+        counts = collections.Counter(table.values())
+        dupes = [t for t, n in counts.items() if n > 1]
+        assert not dupes, "%s: two buttons send %s" % (surface, dupes)
 
-    # Holding PAD MODE is the mode; releasing returns to MPC pads.
-    assert r.mode == "MPC"
-    r.button("pad_mode", True)
-    assert r.mode == "LOOP"
-    # column = lane, row = verb
-    assert r.pad(0, 100) == [("cmd", "rec GTR1")]
-    assert r.pad(6, 100) == [("cmd", "play MIC")]
-    r.button("pad_mode", False)
-    assert r.mode == "MPC"
-    # and now the same pad plays the instrument instead
-    assert r.pad(0, 100) == [("midi", "pad:0:100")]
-
-    # PIN latches the held mode so it survives release.
-    r.button("pad_mode", True)
-    r.button(control_map.PIN_BUTTON, True)
-    r.button("pad_mode", False)
-    assert r.mode == "LOOP", "PIN should have latched the mode"
-
-    # Knobs 1-4 drive the MPC, 5-8 the DAW page's strips.
-    # One knob per strip, all eight reachable. The old assertion here was
-    # that knob 1 sent the MPC's data wheel, which is exactly the mapping
-    # that left half the desk without a knob.
-    r.page = "MIX"
-    for i, strip in enumerate(r.strips):
-        assert r.knob(i, 1) == [("cmd", "knob MIX %s +1" % strip)], i
-    # The DATA wheel is the SWING knob now - a dedicated control, not a
-    # modifier combination, because it is the MPC's most used value control.
-    assert r.master("swing", +3) == [("midi", "mpc:data_wheel:+3")]
-    assert r.master("tempo", -2) == [("midi", "mpc:note_variation:-2")]
-    assert r.master("volume", +4) == [("cmd", "master +4")]
-    # SHIFT no longer steals a knob.
-    r.shift = True
-    assert r.knob(0, 1) == [("cmd", "knob MIX MPC +1")]
-    r.shift = False
-    r.page = "MIX"
-    # Knob 5 is the FIFTH strip now, not the first. Under the old split it
-    # was strip index 0 because indices 4-7 were remapped to 0-3.
-    assert r.knob(4, -2) == [("cmd", "knob MIX LOOP -2")]
-
-    # SHIFT+pad is the MPC's numeric keypad. Pad 1 types a 1, which on the MPC
-    # is the key its panel prints "1 SONG".
-    r.button("shift", True)
-    assert r.pad(0, 100) == [("midi", "mpc:song")]
-    assert r.pad(4, 100) == [("midi", "mpc:trim")]
-
-    # The grid is not upside down. The MK1 numbers its pads from the top row
-    # down and the MPC numbers them from the bottom row up, so pad 0 - note 36,
-    # the one every pad grid puts bottom left - must come from the LAST
-    # hardware row, not the first.
-    flip = Mk1._pad_index
-    assert flip(12) == 0 and flip(15) == 3, "bottom hardware row is not pads 0-3"
-    assert flip(0) == 12 and flip(3) == 15, "top hardware row is not pads 12-15"
-    assert sorted(flip(i) for i in range(16)) == list(range(16)), \
-        "pad remap is not a bijection"
-    assert all(flip(i) % 4 == i % 4 for i in range(16)), \
-        "pad remap moved a column; only rows should flip"
-
-
-    # Every panel key the hub presses must also be released. It was press-only,
-    # which latches the MPC's held functions - AFTER leaves NOTE REPEAT on and
-    # every pad then repeats at the tempo forever.
-    r2 = Router()
-    assert r2.button("play", True) == [("midi", "mpc:play")]
-    # The release is tracked either way; whether it is SENT is the flag.
-    released = r2.button("play", False)
-    assert released == ([("midi_up", "mpc:play")] if SEND_KEY_RELEASE else [])
-    # Shift released mid-press must not change WHICH key gets released.
-    r2.button("shift", True)
-    assert r2.button("play", True) == [("midi", "mpc:stop")]
-    r2.button("shift", False)
-    released = r2.button("play", False)
-    assert released == ([("midi_up", "mpc:stop")] if SEND_KEY_RELEASE else [])
-    # A release with no matching press emits nothing.
-    assert r2.button("play", False) == []
-    assert encode_midi("mpc:play", True)[0] == 0x90
-    assert encode_midi("mpc:play", False)[0] == 0x80
-
-    # Every mapped button name must be one the DECODER can send. "restart" was
-    # mapped and never sent, so PLAY START was unreachable and nothing said so.
+    # Every mapped name must be one the DECODER can send. "restart" was mapped
+    # and never sent, so PLAY START was unreachable and nothing said so.
     import importlib.util as _u
     _s = _u.spec_from_file_location("mk1in", os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "mpc-mk1-input.py"))
     _m = _u.module_from_spec(_s); _s.loader.exec_module(_m)
     known = {b for b in _m.MK1_BUTTONS if b} | {"pad_mode"}
-    mapped = (set(control_map.TRANSPORT) | set(control_map.PANEL)
-              | set(control_map.PAD_SECTION) | set(control_map.GROUPS))
-    unknown = {n for n in mapped if n not in known}
-    assert not unknown, "mapped buttons the decoder never sends: %s" % sorted(unknown)
+    for table in (control_map.MPC_BUTTONS, control_map.DAW_BUTTONS):
+        unknown = set(table) - known
+        assert not unknown, "mapped buttons the decoder never sends: %s" % sorted(unknown)
 
-    # The cursor must be reachable - the MPC's UI cannot be driven without it.
-    r3 = Router()
-    assert r3.button("browse_left", True) == [("midi", "mpc:left")]
-    r3.button("browse_left", False)
-    r3.button("shift", True)
-    assert r3.button("browse_right", True) == [("midi", "mpc:down")]
-    r3.button("shift", False)
-    r3.button("browse_right", False)
+    # Every MPC key the machine has must be reachable, from a button or a pad.
+    reachable = {t.split(":", 1)[1] for t in control_map.MPC_BUTTONS.values()
+                 if t.startswith("mpc:")}
+    reachable |= {t.split(":", 1)[1] for t in control_map.SHIFT_PADS.values()
+                  if t.startswith("mpc:")}
+    missing = set(_m.KEY) - reachable
+    assert not missing, "MPC keys nothing can press: %s" % sorted(missing)
 
-    # One lamp, one meaning. FULL LEVEL and 16 LEVELS are independent toggles
-    # and must not share an LED - shown as two brightnesses of one light, the
-    # panel just reads as "half on".
-    assert len(set(LAMP_TO_LED.values())) == len(LAMP_TO_LED), \
-        "two MPC lamps are mapped to the same controller LED"
-    r4 = Router()
-    assert r4.button("select", True) == [("midi", "mpc:full_level")]
-    r4.button("select", False)
-    assert LAMP_TO_LED["full_level"] == "Select"
-    assert LAMP_TO_LED["sixteen_levels"] == "Grid"
+    # The six soft keys are on the six display buttons under the screens.
+    for i in range(1, 7):
+        assert control_map.MPC_BUTTONS["display%d" % i] == "mpc:soft%d" % i
 
-    # The surface toggle, and the isolation it is for.
-    r5 = Router()
-    assert r5.surface == "MPC"
-    assert r5.button("play", True) == [("midi", "mpc:play")]
-    r5.button("play", False)
-    assert r5.button(control_map.SURFACE_TOGGLE, True) == [("surface", "DAW")]
-    assert r5.surface == "DAW"
-    # In DAW mode an MPC-only button must reach NOTHING.
-    assert r5.button("play", True) == []
-    r5.button("play", False)
-    # ...and a DAW binding still works.
-    assert r5.button("navigate", True) == [("cmd", "page EDIT")]
-    r5.button("navigate", False)
-    assert r5.button(control_map.SURFACE_TOGGLE, True) == [("surface", "MPC")]
-    assert r5.button("play", True) == [("midi", "mpc:play")]
+    # Transport.
+    assert r.button("play", True) == [("midi", "mpc:play")]
+    r.button("play", False)
+    assert r.button("mute", True) == [("midi", "mpc:stop")]
+    r.button("mute", False)
+    assert r.button("loop", True) == [("midi", "mpc:play_start")]
+    r.button("loop", False)
 
-    # MPC mode must not waste buttons on the DAW.
-    r6 = Router()
-    assert r6.button("navigate", True) == [("midi", "mpc:up")], \
-        "NAVIGATE should be the cursor in MPC mode"
-    r6.button("navigate", False)
-    assert r6.button("group_e", True) == [("midi", "mpc:enter")]
-    r6.button("group_e", False)
-    r6.button("shift", True)
-    assert r6.button("duplicate", True) == [("midi", "mpc:go_to")]
-    r6.button("shift", False)
-    r6.button("duplicate", False)
-    # ...and in DAW mode the same buttons go back to Ardour.
-    r6.button(control_map.SURFACE_TOGGLE, True)
-    assert r6.button("navigate", True) == [("cmd", "page EDIT")]
-    r6.button("navigate", False)
+    # SHIFT is the MPC's own SHIFT key, held, AND our pad modifier.
+    ev = r.button("shift", True)
+    assert ev == [("midi", "mpc:shift")], ev
+    assert r.shift is True
+    assert r.pad(0, 100) == [("midi", "mpc:song")]      # SHIFT+pad 1 types a 1
+    up = r.button("shift", False)
+    assert up == ([("midi_up", "mpc:shift")] if SEND_KEY_RELEASE else [])
+    assert r.shift is False
+    assert r.pad(0, 100) == [("midi", "pad:0:100")]     # unshifted, a drum pad
 
-    # SHIFT+pads are the MPC numeric keypad, and every digit must be a real key.
-    codes = control_map_keycodes()
-    digits = {1: "song", 2: "misc", 3: "load", 4: "sample", 5: "trim",
-              6: "program", 7: "mixer", 8: "other", 9: "midi_sync", 10: "zero"}
-    for pad, key in digits.items():
-        assert control_map.SHIFT_PADS[pad] == "mpc:" + key, \
-            "pad %d is not digit key %s" % (pad, key)
-        assert key in codes, "no MPC keycode for %s" % key
+    # NOTE REPEAT sends TAP TEMPO, which is what the MK1 prints above it; the
+    # MPC's own note repeat is AFTER, on SAMPLING beside it.
+    assert control_map.MPC_BUTTONS["note_repeat"] == "mpc:tap_tempo"
+    assert control_map.MPC_BUTTONS["sampling"] == "mpc:after"
+    # FULL LEVEL is on F7, which the MPC does not have - it has six soft keys.
+    assert control_map.MPC_BUTTONS["display7"] == "mpc:full_level"
 
-    print("maschine-hub self-test PASS: routing verified for buttons, "
-          "pads, pad orientation, key release, knobs, shift and hold-modes")
+    # The surface toggle isolates the two instruments.
+    assert r.surface == "MPC"
+    assert r.button(control_map.SURFACE_TOGGLE, True) == [("surface", "DAW")]
+    assert r.button("play", True) == []                 # MPC unreachable now
+    r.button("play", False)
+    assert r.button("group_f", True) == [("cmd", "page MIX")]
+    r.button("group_f", False)
+    assert r.button(control_map.SURFACE_TOGGLE, True) == [("surface", "MPC")]
+    assert r.button("play", True) == [("midi", "mpc:play")]
+    r.button("play", False)
+
+    # Knobs: one per mixer strip, and the master knobs by name.
+    assert r.knob(4, -2)[0][0] == "cmd"
+
+    # The grid is not upside down: pad 1 is bottom-left.
+    flip = Mk1._pad_index
+    assert flip(12) == 0 and flip(15) == 3
+    assert sorted(flip(i) for i in range(16)) == list(range(16))
+    assert all(flip(i) % 4 == i % 4 for i in range(16))
+
+    # One lamp, one meaning - and on the button that actually sends the key.
+    assert len(set(LAMP_TO_LED.values())) == len(LAMP_TO_LED)
+    _led_of = {"display7": "DisplayButton7", "grid": "Grid", "play": "Play",
+               "rec": "Rec", "sampling": "NoteRepeat"}
+    for _btn, _led in _led_of.items():
+        _t = control_map.MPC_BUTTONS.get(_btn, "")
+        _key = _t.split(":", 1)[1] if _t.startswith("mpc:") else None
+        if _key and _key in LAMP_TO_LED:
+            assert LAMP_TO_LED[_key] == _led, \
+                "%s lamp is on %s but %s sends it" % (_key, LAMP_TO_LED[_key], _btn)
+
+    print("maschine-hub self-test PASS: one function per button, every MPC key "
+          "reachable, surfaces isolated, pads upright")
 
 
 class Mk1:

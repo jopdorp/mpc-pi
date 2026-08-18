@@ -60,7 +60,7 @@ F_HEAD  = font(20, True)
 SURFACE = "MPC"          # which page is being drawn; set by render()
 
 
-def for_surface(target):
+def _unused_for_surface(target):
     """Hide a binding that the surface being drawn does not use.
 
     The panel means different things in each mode - that is what the toggle is
@@ -76,20 +76,17 @@ def for_surface(target):
 
 
 def binding(name):
-    """(plain, shifted) for a Maschine button, from the live control map."""
+    """The single binding for a button on the surface being drawn.
+
+    One flat table per surface, so the two pages cannot show each other's
+    bindings - which they did while this read four overlapping tables and the
+    MPC page carried Ardour labels.
+    """
     if name == control_map.SURFACE_TOGGLE:
         return ("switch:MPC/DAW", None)
-    if SURFACE == "MPC" and name in control_map.MPC_SURFACE:
-        return control_map.MPC_SURFACE[name]
-    for table in (control_map.TRANSPORT, control_map.PANEL):
-        if name in table:
-            plain, shifted = table[name]
-            return (for_surface(plain), for_surface(shifted))
-    if name in control_map.PAD_SECTION:
-        return (for_surface(control_map.PAD_SECTION[name]), None)
-    if name in control_map.GROUPS:
-        return (for_surface(control_map.GROUPS[name]), None)
-    return (None, None)
+    table = (control_map.MPC_BUTTONS if SURFACE == "MPC"
+             else control_map.DAW_BUTTONS)
+    return (table.get(name), None)
 
 
 def short(target):
@@ -184,6 +181,9 @@ PANEL_BOXES = {
     "solo":           (498, 734,  58, 44),
     "mute":           (498, 790,  58, 44),
 }
+# The eight display buttons across the top. Labelled, because they were drawn
+# as bare boxes and "you didn't label F1-6" was a fair complaint.
+DISPLAY_LABELS = ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "MODE")
 for _i in range(8):
     PANEL_BOXES["display%d" % (_i + 1)] = (330 + _i * 91, 90, 66, 26)
 
@@ -218,20 +218,11 @@ MPC_BOXES = {
 # Which Maschine control drives each MPC control. Derived from control_map so
 # the two halves of the picture cannot disagree.
 MPC_SOURCE = {}
-for _btn, _pair in list(control_map.TRANSPORT.items()) + list(control_map.PANEL.items()):
-    for _shift, _t in ((False, _pair[0]), (True, _pair[1])):
+for _surface_table in (control_map.MPC_BUTTONS,):
+    for _btn, _t in _surface_table.items():
         if _t and _t.startswith("mpc:"):
             _k = _t.split(":", 1)[1].replace("_", " ").upper()
-            _label = ("SHIFT+" if _shift else "") + _btn.replace("_", " ").upper()
-            MPC_SOURCE.setdefault(_k, []).append(_label)
-for _btn, _t in control_map.PAD_SECTION.items():
-    if _t.startswith("mpc:"):
-        _k = _t.split(":", 1)[1].replace("_", " ").upper()
-        MPC_SOURCE.setdefault(_k, []).append(_btn.replace("_", " ").upper())
-for _btn, _t in control_map.GROUPS.items():
-    if _t.startswith("mpc:"):
-        _k = _t.split(":", 1)[1].replace("_", " ").upper()
-        MPC_SOURCE.setdefault(_k, []).append(_btn.replace("_", " ").upper())
+            MPC_SOURCE.setdefault(_k, []).append(_btn.replace("_", " ").upper())
 
 MPC_ALIAS = {
     "F1-F6": "SOFT1", "MAIN SCREEN": "MAIN SCREEN", "WINDOW": "WINDOW",
@@ -349,14 +340,10 @@ def _render():
     TY += 34
 
     rows = []
-    for btn, (plain, shifted) in sorted(control_map.TRANSPORT.items()):
-        rows.append(("transport", btn, plain, shifted))
-    for btn, (plain, shifted) in sorted(control_map.PANEL.items()):
-        rows.append(("panel", btn, plain, shifted))
-    for btn, target in sorted(control_map.PAD_SECTION.items()):
-        rows.append(("pad section", btn, target, None))
-    for btn, target in sorted(control_map.GROUPS.items()):
-        rows.append(("groups", btn, target, None))
+    table = (control_map.MPC_BUTTONS if SURFACE == "MPC"
+             else control_map.DAW_BUTTONS)
+    for btn, target in sorted(table.items()):
+        rows.append(("", btn, target, None))
 
     COLS = 3
     per = (len(rows) + COLS - 1) // COLS
@@ -366,8 +353,7 @@ def _render():
     for c in range(COLS):
         hx = 40 + c * CW
         d.text((hx, TY), "MASCHINE", font=F_SMALL, fill=DIM)
-        d.text((hx + 200, TY), "MPC / DAW", font=F_SMALL, fill=DIM)
-        d.text((hx + 400, TY), "WITH SHIFT", font=F_SMALL, fill=DIM)
+        d.text((hx + 200, TY), "SENDS", font=F_SMALL, fill=DIM)
         d.line((hx, TY + 18, hx + CW - 40, TY + 18), fill=PANEL_EDGE, width=1)
 
     for i, (section, btn, plain, shifted) in enumerate(rows):
@@ -385,10 +371,7 @@ def _render():
         pt = short(plain)
         d.text((x + 200, y), pt if pt else "-", font=F_SMALL,
                fill=colour_for(plain) if plain else UNMAPPED)
-        if shifted:
-            d.text((x + 400, y), short(shifted), font=F_SMALL, fill=SHIFTED)
-        else:
-            d.text((x + 400, y), "-", font=F_SMALL, fill=(80, 84, 94))
+    
 
     # pad shift functions, their own short block
     PTY = TY + 26 + per * ROWH + 26

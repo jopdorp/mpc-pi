@@ -113,150 +113,110 @@ BUTTONS_RIGHT_BY_PAGE = {
 # Transport maps one-for-one onto the MPC's, because that is the muscle
 # memory most worth preserving. SHIFT reaches the bar-level moves, which
 # is also where the MPC puts them.
-TRANSPORT = {
-    # SHIFT+PLAY is STOP, not PLAY START. There was no stop anywhere on the
-    # controller - the MK1 has no dedicated stop button, and the MPC's STOP key
-    # was reachable from nothing, so a running sequence could only be stopped
-    # from the emulator itself. PLAY START is not lost: RESTART already sends
-    # it, which is what that button is for.
-    "play":            ("mpc:play", "mpc:stop"),
-    "rec":             ("mpc:record", "mpc:over_dub"),
-    "erase":           ("mpc:erase", "mpc:undo"),
-    # LOOP, not "restart": there is no button called restart on an MK1 - it is
-    # not in MK1_BUTTONS - so this entry was unreachable and PLAY START could
-    # not be pressed at all. LOOP is the natural home for "start from the top".
-    "loop":            ("mpc:play_start", "mpc:go_to"),
-    "transport_left":  ("mpc:step_left", "mpc:bar_left"),
-    "transport_right": ("mpc:step_right", "mpc:bar_right"),
-    "grid":            ("mpc:sixteen_levels", "mpc:full_level"),
-    "shift":           ("modifier", None),
-}
-
-# WHICH INSTRUMENT THE PANEL IS DRIVING.
+# WHICH INSTRUMENT THE PANEL DRIVES.
 #
 # The MPC has six function keys and the MK1 has eight display buttons, so the
 # top-right one is spare on the MPC side and is the obvious home for "what am I
-# controlling". DISPLAY 8 toggles it; its own LED is lit in DAW mode, so the
-# state is readable without looking at a screen.
-#
-# In MPC mode only "mpc:" bindings are sent; in DAW mode only "daw:" ones. A
-# button with no binding for the current surface does nothing, rather than
-# doing something surprising - which is the whole point of a mode switch.
-#
-# Pads and their SHIFT layer are deliberately NOT switched: the pads are an
-# instrument, they play the MPC in both modes, and a DAW can map the same
-# notes if it wants them.
+# controlling". DISPLAY 8 toggles it and lights its own LED in DAW mode.
 SURFACE_TOGGLE = "display8"
 SURFACES = ("MPC", "DAW")
 
-# What these buttons mean IN MPC MODE, overriding their DAW-side meaning.
-#
-# Six buttons were reserved for Ardour - NAVIGATE, DUPLICATE and GROUP E-H -
-# and once the surface toggle exists, reserving them costs the MPC six buttons
-# for nothing: in MPC mode those presses went nowhere. They now carry the MPC
-# functions that were reachable only with SHIFT held, or not at all.
-#
-# Chosen by what an MPC player actually reaches for, in order:
-#   * the CURSOR. Up and down were on SHIFT+BROWSE, and no machine whose whole
-#     interface is a field cursor should need a modifier to move it.
-#   * ENTER, which confirms every value the cursor lands on.
-#   * NEXT SEQ and TRACK MUTE, the two performance functions, and TAP TEMPO.
-#
-# GROUP A-D stay the MPC's pad banks in both modes - they are the same idea on
-# both machines, and the bank lamps mirror back to them.
-MPC_SURFACE = {
-    "navigate":  ("mpc:up",         "mpc:window"),
-    "duplicate": ("mpc:down",       "mpc:go_to"),
-    "group_e":   ("mpc:enter",      None),
-    "group_f":   ("mpc:next_seq",   None),
-    "group_g":   ("mpc:track_mute", None),
-    "group_h":   ("mpc:tap_tempo",  None),
-}
 
-# Everything else the MK1 has. Twelve buttons that did nothing, and with them
-# the MPC keys that had no way of being pressed - including the CURSOR, without
-# which the machine's own UI cannot be navigated from the controller at all.
+# ONE FUNCTION PER BUTTON. No shift layer.
 #
-# The intent for some of these was already recorded in mpc-mk1-input.py's
-# BUTTON_TO_KEYCODE (browse->main screen, sampling->sample, note repeat->after)
-# but the hub reads THIS file, so that table was never wired to anything.
+# The MK1 has 41 buttons and the MPC needs 35 keys that are not digits, so
+# there is no reason to hide anything behind a modifier - and every reason not
+# to. SHIFT on this panel is a real MPC key as well as our modifier, so a
+# "shift+shift" does not exist, and a shifted binding is a binding you have to
+# remember rather than read.
 #
-# Same (plain, shifted) shape as TRANSPORT.
-PANEL = {
-    # The cursor. BROWSE </> are the only left/right pair left on the panel,
-    # and shift reaches up/down - the MPC's four arrows on two buttons.
-    "browse_left":  ("mpc:left",       "mpc:up"),
-    "browse_right": ("mpc:right",      "mpc:down"),
-    # BROWSE is a file browser on both machines.
-    "browse":       ("mpc:load",       "mpc:misc"),
-    # SAMPLING is the MPC's sampler, and TRIM is where a sample goes next.
-    "sampling":     ("mpc:sample",     "mpc:trim"),
-    # CONTROL reaches the mixer, and the program it is mixing.
-    "control":      ("mpc:mixer",      "mpc:program"),
-    # STEP opens the MPC's WINDOW - the detail dialog for whatever field the
-    # cursor is on - and shift confirms.
-    "step":         ("mpc:window",     "mpc:enter"),
-    # SNAP is timing: tap the tempo, or reach the sync settings.
-    "snap":         ("mpc:tap_tempo",  "mpc:midi_sync"),
-    # AUTO WRITE is performance state: mute a track, queue the next sequence.
-    "auto_write":   ("mpc:track_mute", "mpc:next_seq"),
-    # FULL LEVEL gets its OWN button, so it can have its own lamp.
+# The ONLY shift layer is SHIFT+pad, which types the MPC's ten digits. Those
+# ten keys are the MPC's mode keys too - its panel prints "1 SONG", "2 MISC" -
+# so putting them on the pads reaches both without spending a button on either.
+#
+# Where the MK1's own printed label matches an MPC idea, it wins: NOTE REPEAT
+# prints TAP TEMPO above it, so that is what it sends.
+MPC_BUTTONS = {
+    # --- the six soft keys under the LCD, and the two spare display buttons --
+    "display1":       "mpc:soft1",
+    "display2":       "mpc:soft2",
+    "display3":       "mpc:soft3",
+    "display4":       "mpc:soft4",
+    "display5":       "mpc:soft5",
+    "display6":       "mpc:soft6",
+    # F7 is spare on the MPC side - it only has six - so FULL LEVEL lives here
+    # and keeps its own lamp. It cannot sit on SHIFT+GRID: SHIFT is itself an
+    # MPC key, so a shifted binding costs the key it shadows.
+    "display7":       "mpc:full_level",
+    # display8 is SURFACE_TOGGLE and sends nothing to the MPC.
+
+    # --- left column ------------------------------------------------------
+    "control":        "mpc:bar_left",
+    "step":           "mpc:enter",
+    "browse":         "mpc:window",
+    "sampling":       "mpc:after",        # the MPC's note-repeat key
+    "browse_left":    "mpc:left",
+    "browse_right":   "mpc:right",
+    "snap":           "mpc:bar_right",
+    "auto_write":     "mpc:track_mute",
+    # NOTE REPEAT prints TAP TEMPO above it, and that is the scarcer function:
+    # the MPC's own note repeat is AFTER, which is on SAMPLING beside it.
+    "note_repeat":    "mpc:tap_tempo",
+
+    # --- transport --------------------------------------------------------
+    "loop":           "mpc:play_start",   # the button the panel prints RESTART
+    "transport_left": "mpc:step_left",
+    "transport_right":"mpc:step_right",
+    "grid":           "mpc:sixteen_levels",
+    "play":           "mpc:play",
+    "rec":            "mpc:record",
+    "erase":          "mpc:erase",
+    # SHIFT IS SHIFT. It sends the MPC's own SHIFT key, held for as long as the
+    # button is held, so every shifted function on the machine works the way
+    # its own panel prints it - and we never invent a second meaning for a
+    # button, which is a thing to memorise rather than read.
     #
-    # It used to live only on SHIFT+GRID, sharing the Grid button with
-    # 16 LEVELS - and therefore sharing one LED between two independent
-    # toggles. That was shown as bright-for-one and dim-for-the-other, which
-    # reads on the hardware as "the light is half on" and tells you something
-    # is engaged without telling you what. SELECT is in the pad column, next
-    # to the pads the toggle affects, and its DAW use moves to SHIFT.
-    "select":       ("mpc:full_level", "daw:select"),
+    # It is still our modifier for the pad layer as well: SHIFT+pad sends the
+    # MPC's numeric keys, and because the machine sees SHIFT held at the same
+    # time it reads them as its MODE keys, exactly as pressing SHIFT and a
+    # number does on the real panel.
+    "shift":          "mpc:shift",
+
+    # --- the pad banks ----------------------------------------------------
+    "group_a":        "mpc:bank_a",
+    "group_b":        "mpc:bank_b",
+    "group_c":        "mpc:bank_c",
+    "group_d":        "mpc:bank_d",
+    # GROUP E-H are deliberately empty in MPC mode: every MPC key already has a
+    # button, and inventing duplicates to fill them would make the panel harder
+    # to read, not easier. They are the DAW's page buttons in DAW mode.
+
+    # --- the column beside the pads ---------------------------------------
+    "scene":          "mpc:up",
+    "pattern":        "mpc:down",
+    "pad_mode":       "mpc:over_dub",
+    "navigate":       "mpc:main_screen",
+    "duplicate":      "mpc:go_to",
+    "select":         "mpc:undo",
+    "solo":           "mpc:next_seq",
+    "mute":           "mpc:stop",
 }
 
-# Group A-D are the MPC's pad banks - a direct analogue, same letters.
-# E-H select the DAW page, so the eight group buttons split cleanly into
-# "which MPC bank" and "which DAW view" with nothing to remember.
-GROUPS = {
-    "group_a": "mpc:bank_a", "group_b": "mpc:bank_b",
-    "group_c": "mpc:bank_c", "group_d": "mpc:bank_d",
-    "group_e": "daw:page:LOOP", "group_f": "daw:page:MIX",
-    "group_g": "daw:page:FX", "group_h": "daw:page:SONG",
+# DAW mode. Only what Ardour actually understands today; the rest of the panel
+# does nothing while the toggle is on the DAW, which is the point of the toggle.
+DAW_BUTTONS = {
+    "group_e":        "daw:page:LOOP",
+    "group_f":        "daw:page:MIX",
+    "group_g":        "daw:page:FX",
+    "group_h":        "daw:page:SONG",
+    "navigate":       "daw:page:EDIT",
+    "duplicate":      "daw:duplicate",
+    "select":         "daw:select",
+    "mute":           "mode:MUTE",
+    "solo":           "mode:SOLO",
+    "pad_mode":       "mode:LOOP",
 }
 
-# Mode buttons down the left of the pads. Their MPC-side equivalents are
-# used where one exists so the button keeps meaning something familiar.
-PAD_SECTION = {
-    # Hold-to-enter mode buttons; see MODES above. Each is momentary, and
-    # each latches with + Button 1 (PIN).
-    "pad_mode": "mode:LOOP",        # 1st-gen panels print this KEYBOARD
-    "mute": "mode:MUTE",
-    "solo": "mode:SOLO",
-
-    "duplicate": "daw:duplicate",
-    # NAVIGATE opens the track editor; from there SELECT+pad drills into
-    # a single take's WAVE view.
-    "navigate": "daw:page:EDIT",
-    "pattern": "mpc:main_screen",
-    "scene": "mpc:song",
-    # NOTE REPEAT was unmapped, so the button did nothing and the MPC never
-    # saw its AFTER key. On the 2000XL that key IS note repeat, and it is held
-    # rather than toggled - which only works now that the hub sends a release.
-    "note_repeat": "mpc:after",
-}
-
-# The MPC prints a shift function beside every pad. Honouring them costs
-# nothing and means the printing on a real MPC panel stays true.
-# SHIFT+pad is the MPC's NUMERIC KEYPAD.
-#
-# The MK1 has no number keys and the MPC needs them constantly - every value
-# field, every sequence and program number. They were the last block on the MPC
-# panel that nothing on the controller could reach.
-#
-# The MPC's digits ARE its mode keys: the panel prints "1 SONG", "2 MISC",
-# "3 LOAD" and so on, and the key sends the DIGIT on its own and the MODE with
-# SHIFT held on the MPC itself. So sending KEY['song'] here types a 1.
-#
-# Laid out as a calculator, which is how the pads sit: 1-2-3 along the bottom
-# row, 7-8-9 on the third, 0 just above. The top row keeps the transpose
-# functions, which are the ones worth having on a pad grid.
 SHIFT_PADS = {
     1: "mpc:song",       2: "mpc:misc",      3: "mpc:load",   4: "mpc:sample",
     5: "mpc:trim",       6: "mpc:program",   7: "mpc:mixer",  8: "mpc:other",
