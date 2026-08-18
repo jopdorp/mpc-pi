@@ -134,7 +134,38 @@ PAD_PEAK_DECAY = float(os.environ.get("MPCPI_PAD_PEAK_DECAY", "0.96"))
 # rather than a shift. 1950 rather than 2600 - full velocity a quarter earlier,
 # by ear, so the top of the range is reachable without hammering.
 # POLL_STATS prints the peak seen per pad if it needs measuring again.
-PAD_FULL_SCALE = int(os.environ.get("MPCPI_PAD_FULL_SCALE", "1950"))
+PAD_FULL_SCALE = int(os.environ.get("MPCPI_PAD_FULL_SCALE", "2300"))
+
+# PHYSICAL crosstalk: pressing one pad flexes the rubber sheet and lifts its
+# neighbours' sensors too. That is a different fault from the scan bleed the
+# subtraction handles, and it needs a different rule:
+#
+#   * it follows PHYSICAL adjacency - left, right, above, below - not the scan
+#     order, so it can appear on either side.
+#   * the sensor really is being pressed, so there is nothing to subtract. The
+#     only thing that separates it from a deliberate hit is that it is weaker
+#     and arrives at the same moment as a much harder one nearby.
+#
+# So: within CROSSTALK_WINDOW, a pad is suppressed if a physical neighbour was
+# struck harder. Requiring the other pad to be clearly harder is what keeps a
+# deliberate two-finger hit intact - two pads played together land at similar
+# strengths, while a knock-on is a fraction of what caused it.
+CROSSTALK_WINDOW_S = float(os.environ.get("MPCPI_CROSSTALK_MS", "20")) / 1000.0
+CROSSTALK_RATIO = float(os.environ.get("MPCPI_CROSSTALK_RATIO", "1.8"))
+
+
+def _pad_neighbours(pad):
+    """Pads physically touching this one: left, right, above, below."""
+    row, col = divmod(pad, 4)
+    out = []
+    if col > 0: out.append(pad - 1)
+    if col < 3: out.append(pad + 1)
+    if row > 0: out.append(pad - 4)
+    if row < 3: out.append(pad + 4)
+    return out
+
+
+PAD_NEIGHBOURS = {p: _pad_neighbours(p) for p in range(16)}
 
 # MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
 # else is a light that reports something you press somewhere else, which is
@@ -627,7 +658,21 @@ class Mk1:
     # 200 a bleed of 224 is a note-on: hitting one pad fires its scan
     # neighbour, which is what "the hi-hat repeats when I play fast" was.
     #
-    # 250, and the idle floor is what decides whether that is safe.
+    # 300, and it cannot go to 250. The trace shows why:
+    #
+    #   pad3 raw=256   raw=512   raw=1792   raw=2048   raw=2560   raw=3584
+    #
+    # every reading a MULTIPLE OF 256. That channel reports in sixteen coarse
+    # steps, so 256 is the smallest non-zero value it can produce - and a
+    # threshold of 250 sits BELOW the pad's minimum signal, which makes the
+    # faintest contact a note-on. It also fires on the ghost, and no amount of
+    # bleed subtraction helps: when the ghost fired, the neighbour read 0 and
+    # its remembered peak read 0, so there was nothing to subtract.
+    #
+    # 300 requires the second step. Softer hits than that cannot be
+    # distinguished from noise on this hardware, at this report rate.
+    #
+    # The old note, still true:
     #
     # It measured 0 on all sixteen pads at the device's normal report rate, so
     # 250 has the whole range to itself. It is NOT unconditionally safe: asking
@@ -637,7 +682,7 @@ class Mk1:
     #
     # So if the report rate is ever changed, measure the floor again first.
     # POLL_STATS prints it per pad.
-    PAD_ON_THRESHOLD = int(os.environ.get("MPCPI_PAD_ON", "250"))
+    PAD_ON_THRESHOLD = int(os.environ.get("MPCPI_PAD_ON", "300"))
     # OFF is deliberately far below ON, not just a little below.
     #
     # The three guards are all here and all necessary: a note-on threshold
@@ -762,6 +807,8 @@ class Mk1:
         self.pad_raw = [0] * 16
         self.pad_peak = [0] * 16
         self.pad_last_on = [0.0] * 16
+        self.pad_last_force = [0] * 16
+        self.pad_crosstalk = 0
         self._ctrl_tick = 0
         self._pad_read_at = 0.0
         self._pad_gaps = []
@@ -1077,6 +1124,23 @@ class Mk1:
             # decaying through it - or scan bleed from the neighbouring
             # channel touching it - is a fresh note-on every time it crosses.
             if not self.pad_on[pad] and pressure > self.PAD_ON_THRESHOLD:
+                # Was a PHYSICAL neighbour struck much harder, just now?
+                now_t = time.monotonic()
+                knocked = None
+                for nb in PAD_NEIGHBOURS[pad]:
+                    if (now_t - self.pad_last_on[nb]) > CROSSTALK_WINDOW_S:
+                        continue
+                    if self.pad_last_force[nb] >= pressure * CROSSTALK_RATIO:
+                        knocked = nb
+                        break
+                if knocked is not None:
+                    self.pad_on[pad] = True      # latch, so it cannot re-fire
+                    self.pad_crosstalk += 1
+                    _trace("pad", "p%d suppressed: p%d hit %dx harder"
+                           % (pad + 1, knocked + 1,
+                              self.pad_last_force[knocked] // max(1, pressure)),
+                           "dropped")
+                    continue
                 if TRACE:
                     _trace("padraw",
                            "pad%-2d raw=%-5d nb(raw%d)=%-5d peak=%-5d -> %d"
@@ -1091,6 +1155,7 @@ class Mk1:
                     _trace("pad", "p%d retrigger suppressed" % pad, "dropped")
                     continue
                 self.pad_last_on[pad] = now
+                self.pad_last_force[pad] = pressure
                 # Velocity from the leading edge: the stream is pressure,
                 # not note-on, so the first crossing is the hit.
                 out += router.pad(pad, self.velocity(pressure))
