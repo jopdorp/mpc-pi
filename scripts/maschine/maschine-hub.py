@@ -346,8 +346,21 @@ def self_test():
     r.button("shift", True)
     assert r.pad(0, 100) == [("midi", "mpc:undo")]
     assert r.pad(4, 100) == [("cmd", "action quantize")]
+
+    # The grid is not upside down. The MK1 numbers its pads from the top row
+    # down and the MPC numbers them from the bottom row up, so pad 0 - note 36,
+    # the one every pad grid puts bottom left - must come from the LAST
+    # hardware row, not the first.
+    flip = Mk1._pad_index
+    assert flip(12) == 0 and flip(15) == 3, "bottom hardware row is not pads 0-3"
+    assert flip(0) == 12 and flip(3) == 15, "top hardware row is not pads 12-15"
+    assert sorted(flip(i) for i in range(16)) == list(range(16)), \
+        "pad remap is not a bijection"
+    assert all(flip(i) % 4 == i % 4 for i in range(16)), \
+        "pad remap moved a column; only rows should flip"
+
     print("maschine-hub self-test PASS: routing verified for buttons, "
-          "pads, knobs, shift and hold-modes")
+          "pads, pad orientation, knobs, shift and hold-modes")
 
 
 class Mk1:
@@ -578,14 +591,31 @@ class Mk1:
             pass
         return events
 
+    @staticmethod
+    def _pad_index(raw):
+        """Hardware pad number to MPC pad number.
+
+        The MK1 numbers its pads from the TOP row down; the MPC - and every
+        other pad grid, and the note mapping in encode_midi, which starts at
+        note 36 - numbers them from the BOTTOM row up. Left it unconverted and
+        the grid plays upside down: the top row triggers what is printed on the
+        bottom row.
+
+        Flip the row, keep the column. Do it here, at the hardware boundary, so
+        everything downstream - the router, the PAD MODE command map, the
+        printed shift functions - speaks one coordinate system.
+        """
+        return (3 - (raw >> 2)) * 4 + (raw & 3)
+
     def _pads(self, data, router):
         out = []
         for i in range(1, len(data) - 1, 2):
             hi, lo = data[i], data[i + 1]
-            pad = (hi & 0xF0) >> 4
+            raw = (hi & 0xF0) >> 4
             pressure = ((hi & 0x0F) << 8) | lo
-            if pad > 15:
+            if raw > 15:
                 continue
+            pad = self._pad_index(raw)
             was = self.pad_state[pad]
             self.pad_state[pad] = pressure
             if pressure > self.PAD_THRESHOLD and was <= self.PAD_THRESHOLD:
