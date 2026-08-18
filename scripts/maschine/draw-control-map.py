@@ -57,21 +57,46 @@ F_LEG   = font(16)
 F_HEAD  = font(20, True)
 
 
+SURFACE = "MPC"          # which page is being drawn; set by render()
+
+
+def for_surface(target):
+    """Hide a binding that the surface being drawn does not use.
+
+    The panel means different things in each mode - that is what the toggle is
+    for - so one picture cannot honestly show both. Drawing the MPC page with
+    Ardour bindings on it would be a picture of a controller that does not
+    exist, which this project has already produced once.
+    """
+    if not target or target in ("modifier",):
+        return target
+    if target.startswith("switch:") or target.startswith("mode:"):
+        return target
+    return target if (target.startswith("mpc:") == (SURFACE == "MPC")) else None
+
+
 def binding(name):
     """(plain, shifted) for a Maschine button, from the live control map."""
+    if name == control_map.SURFACE_TOGGLE:
+        return ("switch:MPC/DAW", None)
+    if SURFACE == "MPC" and name in control_map.MPC_SURFACE:
+        return control_map.MPC_SURFACE[name]
     for table in (control_map.TRANSPORT, control_map.PANEL):
         if name in table:
-            return table[name]
+            plain, shifted = table[name]
+            return (for_surface(plain), for_surface(shifted))
     if name in control_map.PAD_SECTION:
-        return (control_map.PAD_SECTION[name], None)
+        return (for_surface(control_map.PAD_SECTION[name]), None)
     if name in control_map.GROUPS:
-        return (control_map.GROUPS[name], None)
+        return (for_surface(control_map.GROUPS[name]), None)
     return (None, None)
 
 
 def short(target):
     if not target:
         return ""
+    if target.startswith("switch:"):
+        return target.split(":", 1)[1]
     if target == "modifier":
         return "SHIFT"
     kind, _, rest = target.partition(":")
@@ -85,6 +110,8 @@ def short(target):
 
 
 def colour_for(plain):
+    if plain and plain.startswith("switch:"):
+        return SHIFTED
     if not plain or plain == "modifier":
         return UNMAPPED if not plain else PAD
     if plain.startswith("mpc:"):
@@ -241,187 +268,205 @@ mp = mp.resize((MPW, MPH), Image.LANCZOS)
 W = 80 + MKW + 60 + MPW + 40
 H = 190 + max(MKH, MPH) + 960
 
-img = Image.new("RGB", (W, H), BG)
-d = ImageDraw.Draw(img)
+def _render():
+    img = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(img)
 
-d.text((40, 26), "Maschine MK1  \u2192  MPC2000XL", font=F_TITLE, fill=TEXT)
-d.text((40, 76),
-       "Both panels are the manufacturers' own figures - MASCHINE 1.5 Reference "
-       "Manual p.22 (1st-generation labels) and the MPC2000XL Operator's Manual "
-       "p.4. Bindings are read live from scripts/maschine/control_map.py.",
-       font=F_SUB, fill=DIM)
+    d.text((40, 26),
+           "Maschine MK1  \u2192  " + ("MPC2000XL" if SURFACE == "MPC"
+                                      else "Ardour  (DAW mode)"),
+           font=F_TITLE, fill=TEXT)
+    d.text((40, 76),
+           "Both panels are the manufacturers' own figures - MASCHINE 1.5 Reference "
+           "Manual p.22 (1st-generation labels) and the MPC2000XL Operator's Manual "
+           "p.4. Bindings are read live from scripts/maschine/control_map.py.",
+           font=F_SUB, fill=DIM)
 
-MKX, MKY = 40, 150
-img.paste(mk, (MKX, MKY))
-d.text((MKX, MKY - 26), "MASCHINE MK1 - what you press", font=F_HEAD, fill=TEXT)
+    MKX, MKY = 40, 150
+    img.paste(mk, (MKX, MKY))
+    d.text((MKX, MKY - 26),
+           "MASCHINE MK1 - what you press in %s MODE  (DISPLAY 8 toggles)" % SURFACE,
+           font=F_HEAD, fill=TEXT)
 
-MPX, MPY = MKX + MKW + 60, 150
-img.paste(mp, (MPX, MPY))
-d.text((MPX, MPY - 26), "AKAI MPC2000XL - what the emulator receives",
-       font=F_HEAD, fill=TEXT)
-
-
-def tag(x, y, text, colour, above=False):
-    tw = d.textlength(text, font=F_SMALL)
-    ty = y - 18 if above else y
-    d.rectangle((x - 3, ty, x + tw + 5, ty + 17), fill=BG)
-    d.text((x + 1, ty + 1), text, font=F_SMALL, fill=colour)
+    MPX, MPY = MKX + MKW + 60, 150
+    img.paste(mp, (MPX, MPY))
+    d.text((MPX, MPY - 26),
+           "AKAI MPC2000XL - what the emulator receives" if SURFACE == "MPC"
+           else "AKAI MPC2000XL - UNREACHABLE in DAW mode",
+           font=F_HEAD, fill=TEXT)
 
 
-for name, box in PANEL_BOXES.items():
-    bx, by, bw, bh = box
-    x = MKX + int((bx - CROP_DX) * MK_SCALE)
-    y = MKY + int((by - CROP_DY) * MK_SCALE)
-    w, h = int(bw * MK_SCALE), int(bh * MK_SCALE)
-    plain, shifted = binding(name)
-    col = colour_for(plain)
-    d.rounded_rectangle((x, y, x + w, y + h), radius=4, outline=col, width=3)
-    if short(plain):
-        tag(x, y + h + 2, short(plain), col)
-    if shifted:
-        tag(x, y + h + 20, "\u21e7" + short(shifted), SHIFTED)
+    def tag(x, y, text, colour, above=False):
+        tw = d.textlength(text, font=F_SMALL)
+        ty = y - 18 if above else y
+        d.rectangle((x - 3, ty, x + tw + 5, ty + 17), fill=BG)
+        d.text((x + 1, ty + 1), text, font=F_SMALL, fill=colour)
 
-for name, box in MPC_BOXES.items():
-    bx, by, bw, bh = box
-    x = MPX + int((bx - MC_DX) * MPC_SCALE)
-    y = MPY + int((by - MC_DY) * MPC_SCALE)
-    w, h = int(bw * MPC_SCALE), int(bh * MPC_SCALE)
-    key = MPC_ALIAS.get(name)
-    srcs = MPC_SOURCE.get(key, []) if key else []
-    lamp = MPC_LAMPS.get(name)
-    col = MAPPED if srcs else (SHIFTED if name == "PADS 1-16" else UNMAPPED)
-    if name in ("DATA",):
-        col = DAWCOL
-    d.rounded_rectangle((x, y, x + w, y + h), radius=4, outline=col, width=3)
-    label = name
-    tag(x, y - 18, label, TEXT)
-    if name == "PADS 1-16":
-        tag(x, y + h + 2, "16 pads, notes 36-51", MAPPED)
-    elif name == "DATA":
-        tag(x, y + h + 2, "SWING knob", DAWCOL)
-    elif srcs:
-        tag(x, y + h + 2, " / ".join(sorted(set(srcs))[:2]), MAPPED)
-    else:
-        tag(x, y + h + 2, "not mapped", UNMAPPED)
-    if lamp:
-        tag(x, y + h + 20, "lamp " + lamp, SHIFTED)
 
-# ------------------------------------------------------- the table ---------
-# Every binding, spelled out. The picture shows WHERE; this shows WHAT, and it
-# is the part you can read from across the room or print and stick to the rig.
-TY = 150 + max(MKH, MPH) + 34
-d.text((40, TY), "EVERY BINDING", font=F_HEAD, fill=TEXT)
-TY += 34
+    for name, box in PANEL_BOXES.items():
+        bx, by, bw, bh = box
+        x = MKX + int((bx - CROP_DX) * MK_SCALE)
+        y = MKY + int((by - CROP_DY) * MK_SCALE)
+        w, h = int(bw * MK_SCALE), int(bh * MK_SCALE)
+        plain, shifted = binding(name)
+        col = colour_for(plain)
+        d.rounded_rectangle((x, y, x + w, y + h), radius=4, outline=col, width=3)
+        if short(plain):
+            tag(x, y + h + 2, short(plain), col)
+        if shifted:
+            tag(x, y + h + 20, "\u21e7" + short(shifted), SHIFTED)
 
-rows = []
-for btn, (plain, shifted) in sorted(control_map.TRANSPORT.items()):
-    rows.append(("transport", btn, plain, shifted))
-for btn, (plain, shifted) in sorted(control_map.PANEL.items()):
-    rows.append(("panel", btn, plain, shifted))
-for btn, target in sorted(control_map.PAD_SECTION.items()):
-    rows.append(("pad section", btn, target, None))
-for btn, target in sorted(control_map.GROUPS.items()):
-    rows.append(("groups", btn, target, None))
+    for name, box in MPC_BOXES.items():
+        bx, by, bw, bh = box
+        x = MPX + int((bx - MC_DX) * MPC_SCALE)
+        y = MPY + int((by - MC_DY) * MPC_SCALE)
+        w, h = int(bw * MPC_SCALE), int(bh * MPC_SCALE)
+        key = MPC_ALIAS.get(name)
+        srcs = MPC_SOURCE.get(key, []) if key else []
+        lamp = MPC_LAMPS.get(name)
+        col = MAPPED if srcs else (SHIFTED if name == "PADS 1-16" else UNMAPPED)
+        if name in ("DATA",):
+            col = DAWCOL
+        d.rounded_rectangle((x, y, x + w, y + h), radius=4, outline=col, width=3)
+        label = name
+        tag(x, y - 18, label, TEXT)
+        if name == "PADS 1-16":
+            tag(x, y + h + 2, "16 pads, notes 36-51", MAPPED)
+        elif name == "DATA":
+            tag(x, y + h + 2, "SWING knob", DAWCOL)
+        elif srcs:
+            tag(x, y + h + 2, " / ".join(sorted(set(srcs))[:2]), MAPPED)
+        else:
+            tag(x, y + h + 2, "not mapped", UNMAPPED)
+        if lamp:
+            tag(x, y + h + 20, "lamp " + lamp, SHIFTED)
 
-COLS = 3
-per = (len(rows) + COLS - 1) // COLS
-CW = (W - 80) // COLS
-ROWH = 26
+    # ------------------------------------------------------- the table ---------
+    # Every binding, spelled out. The picture shows WHERE; this shows WHAT, and it
+    # is the part you can read from across the room or print and stick to the rig.
+    TY = 150 + max(MKH, MPH) + 34
+    d.text((40, TY), "EVERY BINDING", font=F_HEAD, fill=TEXT)
+    TY += 34
 
-for c in range(COLS):
-    hx = 40 + c * CW
-    d.text((hx, TY), "MASCHINE", font=F_SMALL, fill=DIM)
-    d.text((hx + 200, TY), "MPC / DAW", font=F_SMALL, fill=DIM)
-    d.text((hx + 400, TY), "WITH SHIFT", font=F_SMALL, fill=DIM)
-    d.line((hx, TY + 18, hx + CW - 40, TY + 18), fill=PANEL_EDGE, width=1)
+    rows = []
+    for btn, (plain, shifted) in sorted(control_map.TRANSPORT.items()):
+        rows.append(("transport", btn, plain, shifted))
+    for btn, (plain, shifted) in sorted(control_map.PANEL.items()):
+        rows.append(("panel", btn, plain, shifted))
+    for btn, target in sorted(control_map.PAD_SECTION.items()):
+        rows.append(("pad section", btn, target, None))
+    for btn, target in sorted(control_map.GROUPS.items()):
+        rows.append(("groups", btn, target, None))
 
-for i, (section, btn, plain, shifted) in enumerate(rows):
-    c, r = i // per, i % per
-    x = 40 + c * CW
-    y = TY + 26 + r * ROWH
-    if r % 2 == 0:
-        d.rectangle((x - 6, y - 4, x + CW - 46, y + ROWH - 6), fill=(26, 28, 33))
-    label = btn.replace("_", " ").upper()
-    if btn == "loop":
-        label = "RESTART"
-    elif btn == "pad_mode":
-        label = "PAD MODE"
-    d.text((x, y), label, font=F_SMALL, fill=TEXT)
-    pt = short(plain)
-    d.text((x + 200, y), pt if pt else "-", font=F_SMALL,
-           fill=colour_for(plain) if plain else UNMAPPED)
-    if shifted:
-        d.text((x + 400, y), short(shifted), font=F_SMALL, fill=SHIFTED)
-    else:
-        d.text((x + 400, y), "-", font=F_SMALL, fill=(80, 84, 94))
+    COLS = 3
+    per = (len(rows) + COLS - 1) // COLS
+    CW = (W - 80) // COLS
+    ROWH = 26
 
-# pad shift functions, their own short block
-PTY = TY + 26 + per * ROWH + 26
-d.text((40, PTY), "PADS - SHIFT FUNCTIONS (printed on the MK1 panel)",
-       font=F_HEAD, fill=TEXT)
-PTY += 32
-for i in range(16):
-    c, r = i // 8, i % 8
-    x = 40 + c * 520
-    y = PTY + r * ROWH
-    if r % 2 == 0:
-        d.rectangle((x - 6, y - 4, x + 474, y + ROWH - 6), fill=(26, 28, 33))
-    d.text((x, y), "PAD %-2d  note %d" % (i + 1, 36 + i), font=F_SMALL, fill=TEXT)
-    sh = control_map.SHIFT_PADS.get(i + 1)
-    d.text((x + 200, y), short(sh) if sh else "-", font=F_SMALL,
-           fill=colour_for(sh) if sh else UNMAPPED)
+    for c in range(COLS):
+        hx = 40 + c * CW
+        d.text((hx, TY), "MASCHINE", font=F_SMALL, fill=DIM)
+        d.text((hx + 200, TY), "MPC / DAW", font=F_SMALL, fill=DIM)
+        d.text((hx + 400, TY), "WITH SHIFT", font=F_SMALL, fill=DIM)
+        d.line((hx, TY + 18, hx + CW - 40, TY + 18), fill=PANEL_EDGE, width=1)
 
-# Knobs. They were absent from this table entirely, which is how a SWING knob
-# that emits nothing at all went unnoticed.
-KY = PTY + 8 * ROWH + 30
-d.text((40, KY), "KNOBS", font=F_HEAD, fill=TEXT)
-KY += 32
-knob_rows = [("K1 - K8", "8 Ardour mixer strips, one each",
-              "MIX / LOOP page", DAWCOL)]
-for _n in ("volume", "tempo", "swing"):
-    _t = control_map.MASTER_KNOBS.get(_n)
-    if _t and _t.startswith("mpc:"):
-        _key = _t.split(":", 1)[1]
-        _reaches = _key in mk1in.KEY
-        knob_rows.append((_n.upper(), short(_t),
-                          "reaches the MPC" if _reaches
-                          else "NOT SENT - no MIDI path for a wheel",
-                          MAPPED if _reaches else UNMAPPED))
-    else:
-        knob_rows.append((_n.upper(), short(_t) if _t else "-",
-                          "Ardour master fader", DAWCOL))
-for i, (name, target, note, col) in enumerate(knob_rows):
-    y = KY + i * ROWH
-    if i % 2 == 0:
-        d.rectangle((34, y - 4, 1000, y + ROWH - 6), fill=(26, 28, 33))
-    d.text((40, y), name, font=F_SMALL, fill=TEXT)
-    d.text((240, y), target, font=F_SMALL, fill=col)
-    d.text((470, y), note, font=F_SMALL, fill=DIM if col != UNMAPPED else UNMAPPED)
+    for i, (section, btn, plain, shifted) in enumerate(rows):
+        c, r = i // per, i % per
+        x = 40 + c * CW
+        y = TY + 26 + r * ROWH
+        if r % 2 == 0:
+            d.rectangle((x - 6, y - 4, x + CW - 46, y + ROWH - 6), fill=(26, 28, 33))
+        label = btn.replace("_", " ").upper()
+        if btn == "loop":
+            label = "RESTART"
+        elif btn == "pad_mode":
+            label = "PAD MODE"
+        d.text((x, y), label, font=F_SMALL, fill=TEXT)
+        pt = short(plain)
+        d.text((x + 200, y), pt if pt else "-", font=F_SMALL,
+               fill=colour_for(plain) if plain else UNMAPPED)
+        if shifted:
+            d.text((x + 400, y), short(shifted), font=F_SMALL, fill=SHIFTED)
+        else:
+            d.text((x + 400, y), "-", font=F_SMALL, fill=(80, 84, 94))
 
-LY = KY + len(knob_rows) * ROWH + 24
-for i, (col, name, meaning) in enumerate([
-        (MAPPED,  "green",  "a Maschine button reaches this MPC control"),
-        (SHIFTED, "amber",  "needs SHIFT, or is an MPC lamp mirrored to the controller"),
-        (DAWCOL,  "blue",   "goes to Ardour, or is a knob rather than a key"),
-        (UNMAPPED,"red",    "nothing on the Maschine reaches it")]):
-    x = 40 + (i % 2) * 760
-    yy = LY + (i // 2) * 30
-    d.rectangle((x, yy, x + 30, yy + 18), fill=PAD, outline=col, width=3)
-    d.text((x + 42, yy), name, font=F_LEG, fill=col)
-    d.text((x + 120, yy), meaning, font=F_LEG, fill=DIM)
+    # pad shift functions, their own short block
+    PTY = TY + 26 + per * ROWH + 26
+    d.text((40, PTY), "PADS - SHIFT FUNCTIONS (printed on the MK1 panel)",
+           font=F_HEAD, fill=TEXT)
+    PTY += 32
+    for i in range(16):
+        c, r = i // 8, i % 8
+        x = 40 + c * 520
+        y = PTY + r * ROWH
+        if r % 2 == 0:
+            d.rectangle((x - 6, y - 4, x + 474, y + ROWH - 6), fill=(26, 28, 33))
+        d.text((x, y), "PAD %-2d  note %d" % (i + 1, 36 + i), font=F_SMALL, fill=TEXT)
+        sh = control_map.SHIFT_PADS.get(i + 1)
+        d.text((x + 200, y), short(sh) if sh else "-", font=F_SMALL,
+               fill=colour_for(sh) if sh else UNMAPPED)
 
-d.text((40, H - 40),
-       "Pad 1 is bottom-left on both machines; the MK1 reports its pads from the "
-       "TOP row down and the hub flips the row at the hardware boundary. "
-       "SHIFT+PLAY is STOP, because the MK1 has no stop button.",
-       font=F_SMALL, fill=DIM)
+    # Knobs. They were absent from this table entirely, which is how a SWING knob
+    # that emits nothing at all went unnoticed.
+    KY = PTY + 8 * ROWH + 30
+    d.text((40, KY), "KNOBS", font=F_HEAD, fill=TEXT)
+    KY += 32
+    knob_rows = [("K1 - K8", "8 Ardour mixer strips, one each",
+                  "MIX / LOOP page", DAWCOL)]
+    for _n in ("volume", "tempo", "swing"):
+        _t = control_map.MASTER_KNOBS.get(_n)
+        if _t and _t.startswith("mpc:"):
+            _key = _t.split(":", 1)[1]
+            _reaches = _key in mk1in.KEY
+            knob_rows.append((_n.upper(), short(_t),
+                              "reaches the MPC" if _reaches
+                              else "NOT SENT - no MIDI path for a wheel",
+                              MAPPED if _reaches else UNMAPPED))
+        else:
+            knob_rows.append((_n.upper(), short(_t) if _t else "-",
+                              "Ardour master fader", DAWCOL))
+    for i, (name, target, note, col) in enumerate(knob_rows):
+        y = KY + i * ROWH
+        if i % 2 == 0:
+            d.rectangle((34, y - 4, 1000, y + ROWH - 6), fill=(26, 28, 33))
+        d.text((40, y), name, font=F_SMALL, fill=TEXT)
+        d.text((240, y), target, font=F_SMALL, fill=col)
+        d.text((470, y), note, font=F_SMALL, fill=DIM if col != UNMAPPED else UNMAPPED)
+
+    LY = KY + len(knob_rows) * ROWH + 24
+    for i, (col, name, meaning) in enumerate([
+            (MAPPED,  "green",  "a Maschine button reaches this MPC control"),
+            (SHIFTED, "amber",  "needs SHIFT, or is an MPC lamp mirrored to the controller"),
+            (DAWCOL,  "blue",   "goes to Ardour, or is a knob rather than a key"),
+            (UNMAPPED,"red",    "nothing on the Maschine reaches it")]):
+        x = 40 + (i % 2) * 760
+        yy = LY + (i // 2) * 30
+        d.rectangle((x, yy, x + 30, yy + 18), fill=PAD, outline=col, width=3)
+        d.text((x + 42, yy), name, font=F_LEG, fill=col)
+        d.text((x + 120, yy), meaning, font=F_LEG, fill=DIM)
+
+    d.text((40, H - 40),
+           "Pad 1 is bottom-left on both machines; the MK1 reports its pads from the "
+           "TOP row down and the hub flips the row at the hardware boundary. "
+           "SHIFT+PLAY is STOP, because the MK1 has no stop button.",
+           font=F_SMALL, fill=DIM)
+
+    return img
+
+
+def render(surface, out):
+    global SURFACE
+    SURFACE = surface
+    img = _render()
+    img.save(out)
+    print("wrote %s (%dx%d)" % (out, img.width, img.height))
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("-o", "--out",
-                    default=os.path.join(HERE, "..", "..", "docs", "reference",
-                                         "maschine-mpc2000xl-mapping.png"))
+    ap.add_argument("-o", "--out", default=os.path.join(
+        HERE, "..", "..", "docs", "reference", "maschine-mpc2000xl-mapping.png"))
     args = ap.parse_args()
-    out = os.path.abspath(args.out)
-    img.save(out)
-    print("wrote %s (%dx%d)" % (out, W, H))
+    base = os.path.abspath(args.out)
+    render("MPC", base)
+    render("DAW", base.replace(".png", "-daw.png"))

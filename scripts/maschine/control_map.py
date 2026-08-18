@@ -149,6 +149,30 @@ TRANSPORT = {
 SURFACE_TOGGLE = "display8"
 SURFACES = ("MPC", "DAW")
 
+# What these buttons mean IN MPC MODE, overriding their DAW-side meaning.
+#
+# Six buttons were reserved for Ardour - NAVIGATE, DUPLICATE and GROUP E-H -
+# and once the surface toggle exists, reserving them costs the MPC six buttons
+# for nothing: in MPC mode those presses went nowhere. They now carry the MPC
+# functions that were reachable only with SHIFT held, or not at all.
+#
+# Chosen by what an MPC player actually reaches for, in order:
+#   * the CURSOR. Up and down were on SHIFT+BROWSE, and no machine whose whole
+#     interface is a field cursor should need a modifier to move it.
+#   * ENTER, which confirms every value the cursor lands on.
+#   * NEXT SEQ and TRACK MUTE, the two performance functions, and TAP TEMPO.
+#
+# GROUP A-D stay the MPC's pad banks in both modes - they are the same idea on
+# both machines, and the bank lamps mirror back to them.
+MPC_SURFACE = {
+    "navigate":  ("mpc:up",         "mpc:window"),
+    "duplicate": ("mpc:down",       "mpc:go_to"),
+    "group_e":   ("mpc:enter",      None),
+    "group_f":   ("mpc:next_seq",   None),
+    "group_g":   ("mpc:track_mute", None),
+    "group_h":   ("mpc:tap_tempo",  None),
+}
+
 # Everything else the MK1 has. Twelve buttons that did nothing, and with them
 # the MPC keys that had no way of being pressed - including the CURSOR, without
 # which the machine's own UI cannot be navigated from the controller at all.

@@ -220,6 +220,15 @@ class Router:
             self.shift = down
             return []
 
+        # MPC mode reclaims the buttons that are only useful to the DAW.
+        if down and self.surface == "MPC" and name in control_map.MPC_SURFACE:
+            plain, shifted = control_map.MPC_SURFACE[name]
+            key = shifted if (self.shift and shifted) else plain
+            if key:
+                self.pressed[name] = key
+                return [("midi", key)]
+            return []
+
         if name == control_map.SURFACE_TOGGLE:
             if not down:
                 return []
@@ -396,9 +405,15 @@ class Router:
 
 def self_test():
     r = Router()
-    # A page button changes the page and says so.
+    # A page button changes the page and says so - in DAW mode, which is where
+    # pages exist. In MPC mode GROUP F is the MPC's NEXT SEQ.
+    assert r.button("group_f", True) == [("midi", "mpc:next_seq")]
+    r.button("group_f", False)
+    r.button(control_map.SURFACE_TOGGLE, True)
     assert r.button("group_f", True) == [("cmd", "page MIX")]
     assert r.page == "MIX"
+    r.button("group_f", False)
+    r.button(control_map.SURFACE_TOGGLE, True)   # back to MPC
 
     # Transport goes to the MPC, not to Ardour.
     assert r.button("play", True) == [("midi", "mpc:play")]
@@ -542,6 +557,22 @@ def self_test():
     r5.button("navigate", False)
     assert r5.button(control_map.SURFACE_TOGGLE, True) == [("surface", "MPC")]
     assert r5.button("play", True) == [("midi", "mpc:play")]
+
+    # MPC mode must not waste buttons on the DAW.
+    r6 = Router()
+    assert r6.button("navigate", True) == [("midi", "mpc:up")], \
+        "NAVIGATE should be the cursor in MPC mode"
+    r6.button("navigate", False)
+    assert r6.button("group_e", True) == [("midi", "mpc:enter")]
+    r6.button("group_e", False)
+    r6.button("shift", True)
+    assert r6.button("duplicate", True) == [("midi", "mpc:go_to")]
+    r6.button("shift", False)
+    r6.button("duplicate", False)
+    # ...and in DAW mode the same buttons go back to Ardour.
+    r6.button(control_map.SURFACE_TOGGLE, True)
+    assert r6.button("navigate", True) == [("cmd", "page EDIT")]
+    r6.button("navigate", False)
 
     # SHIFT+pads are the MPC numeric keypad, and every digit must be a real key.
     codes = control_map_keycodes()
