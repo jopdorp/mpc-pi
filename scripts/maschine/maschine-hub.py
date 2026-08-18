@@ -621,6 +621,30 @@ def self_test():
 
     # The surface toggle isolates the two instruments.
     assert r.surface == "MPC"
+    # PIN and the surface toggle are handled BEFORE the DAW_BUTTONS lookup, so
+    # a binding in that table for either one is dead code that looks alive.
+    # Nothing checked it, and PIN has already moved once - from display1, when
+    # display1 became LOOP1's mute button.
+    assert control_map.PIN_BUTTON not in control_map.DAW_BUTTONS, \
+        "%s is PIN and also bound in DAW_BUTTONS" % control_map.PIN_BUTTON
+    assert control_map.SURFACE_TOGGLE not in control_map.DAW_BUTTONS, \
+        "%s toggles the surface and is also bound" % control_map.SURFACE_TOGGLE
+    assert control_map.PIN_BUTTON != control_map.SURFACE_TOGGLE
+    # The strip buttons are display1..N; PIN must not be one of them.
+    _strip_btns = {"display%d" % (i + 1)
+                   for i in range(len(control_map.MUTE_STRIPS))}
+    assert control_map.PIN_BUTTON not in _strip_btns, \
+        "PIN is on a button that mutes a strip"
+    assert control_map.SURFACE_TOGGLE not in _strip_btns, \
+        "the surface toggle is on a button that mutes a strip"
+    # Every mode must be reachable: a mode with no button can only be the
+    # resting state, or it can never be entered.
+    for _m, _d in control_map.MODES.items():
+        assert _d.get("button") or _m == control_map.DEFAULT_MODE, \
+            "mode %s has no button and is not the resting state" % _m
+        assert _d["pads"] == "mpc", \
+            "mode %s steals the pads; they belong to the MPC" % _m
+
     # THE PADS STAY THE MPC'S, whatever mode is held and whichever surface is
     # up. This is the property the whole mixer redesign exists to protect.
     _rm = Router()
