@@ -59,7 +59,8 @@ class Daw:
             self.engine.add_lane(name, bars=4)
         self.page = "LOOP"
         self.mode = "MPC"
-        self.focus_bank = 0
+        # No focus_bank. All eight knobs address all eight strips at once,
+        # so there was never a second bank to focus - see control_map.MODES.
         # dB, not fader position. It was 0.8 here and read as dB by
         # the readout, which printed "0.8 DB" for a strip nobody had
         # touched - a unity fader claiming +0.8.
@@ -109,9 +110,6 @@ class Daw:
             return []
         if verb == "mode" and len(parts) > 1:
             self.mode = parts[1].upper()
-            return []
-        if verb == "bank":
-            self.focus_bank = (self.focus_bank + 1) % 2
             return []
         if verb == "gain" and len(parts) > 2:
             name, db = parts[1], float(parts[2])
@@ -176,9 +174,9 @@ class Daw:
     KNOB_FX_STEP = float(os.environ.get("MPCPI_KNOB_FX_STEP", "0.0005"))
 
     def knob(self, page, target, delta):
-        if page in ("MIX", "LOOP"):
-            # The lane strip is an ordinary strip, so LOOP and MIX are
-            # the same call - see ardour_bindings.KNOBS.
+        if page == "LOOP":
+            # One strips page. MIX was the same geometry drawn by the same
+            # function with a flag, so it was merged rather than maintained.
             if target not in self.gains:
                 return ["error no-strip %s" % target]
             db = self.gains[target] + delta * self.KNOB_DB_STEP
@@ -253,7 +251,6 @@ class Daw:
             "recording": sum(1 for l in self.engine.lanes.values()
                              if l.state in ("recording", "rec", "dub")),
             "xruns": self.xruns, "message": self.message,
-            "focus_bank": self.focus_bank,
             "lanes": lanes,
             "mixer": [{"name": n,
                        "gain": self.fader(self.gains.get(n, 0.0)),

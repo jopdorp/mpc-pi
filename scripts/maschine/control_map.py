@@ -43,30 +43,40 @@ import os
 # map over the current page, so you see what the pads mean *before* you
 # hit one. Release restores the page underneath.
 
+# A MODE RETARGETS THE DISPLAY BUTTONS, NOT THE PADS.
+#
+# The pads stay wired to the MPC in every mode and on both surfaces. That is
+# the point: you can keep playing while you mix, and the instrument never goes
+# quiet because the panel is in a mixer mode. Modes used to steal the grid -
+# hold MUTE and the pads became strip selectors - which meant reaching for the
+# mixer took the drums away.
+#
+# Seven strips need muting and there are exactly seven display buttons free,
+# because display8 is the surface toggle and the master needs neither: soloing
+# it does nothing and muting it kills the whole desk from a button beside the
+# loop tracks.
 MODES = {
     "MPC": {
         "button": None,          # the resting state, nothing held
         "pads": "mpc",
         "help": "the MPC's own pads, banked by Group A-D",
     },
-    "LOOP": {
-        "button": "pad_mode",    # 1st-gen panels print this KEYBOARD
-        "pads": "loops",
-        "help": "hold PAD MODE: 4 lanes x REC/PLAY/STOP/CLEAR",
-    },
     "MUTE": {
         "button": "mute",
-        "pads": "mute",
-        "help": "hold MUTE: each pad mutes its lane",
+        "pads": "mpc",
+        "help": "hold MUTE: display 1-7 mute LOOP1..REVERB",
     },
     "SOLO": {
         "button": "solo",
-        "pads": "solo",
-        "help": "hold SOLO: each pad solos its lane",
+        "pads": "mpc",
+        "help": "hold SOLO: display 1-7 solo LOOP1..REVERB",
     },
 }
 DEFAULT_MODE = "MPC"
-PIN_BUTTON = "display1"          # held mode + this = latch, labelled PIN
+PIN_BUTTON = "group_f"           # held mode + this = latch, labelled PIN
+                                 # (was display1, which is now LOOP1's
+                                 #  mute button; group_f came free when
+                                 #  the MIX page was merged into LOOP)
 
 # --- pads ------------------------------------------------------------
 #
@@ -79,6 +89,8 @@ PIN_BUTTON = "display1"          # held mode + this = latch, labelled PIN
 # therefore true on the pads, on the screen and in the MPC's own idiom.
 
 PAD_ROLE_MPC = "pad %d (bank %s)"
+# The loop verbs. No longer a pad grid - the pads stay the MPC's - so these
+# ride the page's own REC and ARM buttons instead.
 LOOP_PAD_ROWS = ("REC", "PLAY", "STOP", "CLEAR")
 
 # --- buttons ---------------------------------------------------------
@@ -97,8 +109,13 @@ BUTTONS_LEFT = {
 # Screen R's four buttons are contextual: the page decides. The labels
 # are drawn in the cells directly under each button.
 BUTTONS_RIGHT_BY_PAGE = {
+    # One strips page, so these four no longer change underneath the hand.
+    # MUTE and SOLO are absent on purpose: they have their own dedicated
+    # buttons on the panel, and duplicating them here spent two of the four
+    # slots on controls that were already reachable.
+    # BANK is absent because there is nothing to bank - all eight knobs
+    # address all eight strips at once.
     "LOOP": ("REC", "ARM", "UNDO", "PIN"),
-    "MIX":  ("MUTE", "SOLO", "BANK", "PIN"),
     "FX":   ("BYP", "PREV", "NEXT", "PIN"),
     "SONG": ("PREV", "NEXT", "MARK", "PIN"),
     # WAVE is a drill-in editor, not a top-level page: SELECT + pad opens
@@ -145,6 +162,11 @@ STRIPS = (_names("MPCPI_STRIPS", ["LOOP1", "LOOP2", "LOOP3", "LOOP4", "LOOP5"])
           + _names("MPCPI_SENDS", ["DELAY", "REVERB"])
           + ["MASTER"])
 
+
+# The strips the display buttons address while MUTE or SOLO is held, in button
+# order: display1 is the first, display7 the last. Master is absent on purpose -
+# see MODES. Derived, so renaming or resizing the desk carries through.
+MUTE_STRIPS = [n for n in STRIPS if n != "MASTER"]
 
 SURFACE_TOGGLE = "display8"
 SURFACES = ("MPC", "DAW")
@@ -234,7 +256,6 @@ MPC_BUTTONS = {
 # does nothing while the toggle is on the DAW, which is the point of the toggle.
 DAW_BUTTONS = {
     "group_e":        "daw:page:LOOP",
-    "group_f":        "daw:page:MIX",
     "group_g":        "daw:page:FX",
     "group_h":        "daw:page:SONG",
     "navigate":       "daw:page:EDIT",
@@ -242,7 +263,6 @@ DAW_BUTTONS = {
     "select":         "daw:select",
     "mute":           "mode:MUTE",
     "solo":           "mode:SOLO",
-    "pad_mode":       "mode:LOOP",
 }
 
 SHIFT_PADS = {
@@ -277,8 +297,7 @@ KNOBS_LEFT = ("mpc:data_wheel", "mpc:note_variation", "mpc:rec_gain",
               "mpc:main_volume")
 
 KNOBS_RIGHT_BY_PAGE = {
-    "LOOP": "lane level",
-    "MIX": "channel gain (buttons cycle gain / send A / send B)",
+    "LOOP": "strip level - all eight knobs, all eight strips, no banking",
     "FX": "focused parameter bank (EQ: freq/gain/Q/type per band)",
     "SONG": "scrub",
     "WAVE": "trim start / trim end / zoom / gain",

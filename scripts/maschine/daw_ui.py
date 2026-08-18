@@ -30,7 +30,7 @@ except ImportError:  # running from the repo root
     from ui import Frame, OFF, DIM, MUTED, NORMAL, BRIGHT, GLYPH_H
     import control_map
 
-PAGES = ("LOOP", "MIX", "FX", "SONG")
+PAGES = ("LOOP", "FX", "SONG")
 
 # Knobs 1-4 and Buttons 1-4 belong to the LEFT display, 5-8 to the RIGHT
 # (NI's manual and the kernel driver's own comments: "4 under the left
@@ -45,9 +45,9 @@ COLS = 4
 COL_W = 62
 COL_X = [i * 64 for i in range(COLS)]
 
-# More than four items page in banks of four, Elektron-style: press the
-# page button again to toggle. Dots in the button cell show which bank.
-BANK_SIZE = COLS
+# NO BANKING. Knobs 0-7 address strips 0-7 directly, so all eight are live at
+# once and there is nothing to page to. This used to be BANK_SIZE with dots in
+# the status bar and a button to cycle it, all of which selected nothing.
 
 # The MK1's eight buttons sit ABOVE the displays and its encoders BELOW
 # them, so the legend for the buttons hugs the top edge and the
@@ -101,9 +101,18 @@ def draw_status(f, st):
     # lit button is the indicator that fails when attention is on the
     # music rather than the panel.
     f.text_inverted(3, y, st["page"])
+    # The mode word used to be printed unconditionally and spent most of its
+    # life reading "MPC" - daw-ctl initialises self.mode to that and only
+    # changes it for MUTE and SOLO. On the DAW screen "MPC" says nothing, and
+    # a permanent label that is usually wrong is worse than no label.
+    #
+    # Now it appears only when a mode is actually engaged, which is the only
+    # time it carries information.
     mode = st.get("mode", "")
-    if mode:
-        f.text(6 + f.text_width(st["page"]), y, mode, MUTED)
+    if mode in ("MUTE", "SOLO"):
+        f.text(6 + f.text_width(st["page"]), y, mode, BRIGHT)
+    else:
+        mode = ""
 
     x_right = 254
     xruns = st.get("xruns", 0)
@@ -125,19 +134,9 @@ def draw_status(f, st):
         f.fill(tx, y, 2, GLYPH_H, MUTED)
         f.fill(tx + 4, y, 2, GLYPH_H, MUTED)
 
-    # Bank dots: more than four items page in fours, Elektron-style, and
-    # the page indicator ships from day one rather than being retrofitted
-    # after users cannot tell there is a second page.
-    banks = st.get("banks", 1)
-    if banks > 1:
-        cur = st.get("bank", 0)
-        dx = 6 + f.text_width(st["page"]) + f.text_width(st.get("mode", ""))
-        for b in range(banks):
-            if b == cur:
-                f.fill(dx, y + 2, 4, 4, BRIGHT)
-            else:
-                f.rect(dx, y + 2, 4, 4, DIM)
-            dx += 6
+    # NO BANK DOTS. Knobs 0-7 address strips 0-7 directly - see Router.knob -
+    # so every strip is live at once and there is no second bank to page to.
+    # The dots selected nothing and cost a button to operate.
 
 
     # The expanded-label line: the full, untruncated name and value of
@@ -184,52 +183,84 @@ def column_divider(f, i, top=BODY_Y):
 # --- LOOP ------------------------------------------------------------
 
 
+def short_name(name):
+    """Fit a strip name into a 31px column and still leave a gutter.
+
+    Five characters is exactly 30px of a 31px column, so full names touched
+    their neighbours and read as one word: LOOP1LOOP2LOOP3DELAYREVERMASTE.
+    Truncation alone did not help - REVERB and MASTER both became five
+    characters of nothing in particular.
+
+    Loops keep their number, which is the only part that distinguishes them,
+    and everything else keeps its first three letters.
+    """
+    if name.startswith("LOOP") and name[4:].isdigit():
+        return "L" + name[4:]
+    return name[:3]
+
+
+def short_db(db):
+    """Levels to at most four characters, so columns keep their gutter.
+
+    A tenth of a dB matters when trimming near unity and is noise at -20, so
+    the decimal is spent where it is useful: -6.5 keeps it, -18.0 does not.
+    """
+    try:
+        v = float(db)
+    except (TypeError, ValueError):
+        return str(db)[:4]
+    return "%.0f" % v if abs(v) >= 10 else "%.1f" % v
+
+
 def page_loop(f, st):
-    _strips_view(f, st, "LOOP")
+    """The one mixer page: every strip, every knob, all the time.
 
+    There used to be two pages, LOOP and MIX, drawn by the same function with
+    a flag - same geometry, same columns, same order - differing only in
+    whether a column's second bar was the audio meter or the loop position.
+    That is not two pages, it is one page with something missing from each
+    half, and it cost a button and a decision to move between them. Now every
+    column carries both.
 
-# --- MIX -------------------------------------------------------------
+    Three things also came out rather than moving:
 
-
-def _strips_view(f, st, lens):
-    """The shared vertical-strip view behind both MIX and LOOP.
-
-    One geometry, two lenses: a channel occupies the same column on both
-    pages, so the hand that just muted GTR2 on MIX finds GTR2's loop in
-    the same place on LOOP. What changes per lens is only the meaning of
-    the columns inside a strip: MIX shows the audio meter with peak and
-    clip plus the two send bars; LOOP swaps the meter for the loop
-    position sweep and a bars-remaining digit, and strips that are not
-    loop lanes go quiet instead of pretending.
+      * THE MASTER COLUMN, which was drawn twice. strips[7] IS the master -
+        it is knob 8 - and a ninth column then drew it again as "MSTR". A
+        leftover from before the master became an ordinary strip. Removing it
+        widens every remaining column from 28px to 31px.
+      * THE ENCODER BAR along the bottom, which repeated the name and level of
+        four strips whose name and fader were already drawn directly above it.
+        14px of a 64px screen - 22% - spent on a second copy.
+      * BANKING. Knobs 0-7 address strips 0-7 directly (see Router.knob), so
+        all eight are live at once and there was never a second bank to page
+        to. The dots selected nothing.
     """
     draw_header(f, st)
     strips = list(st["mixer"][:8])
-    master = st.get("master", {"name": "MSTR"})
     lanes = {l.get("name"): l for l in st.get("lanes", [])}
-    n = len(strips) + 1
-    sw = 255 // n
-    focus = st.get("focus_bank", 0) * 4
+    sw = 255 // max(1, len(strips))
 
     top = BODY_Y + 9
-    bot = ENCBAR_Y - 4
+    bot = 55                      # the dB readout owns the last eight rows
     travel = bot - top - 2
 
-    def vmeter(mx, level, peak, clip, ink=NORMAL):
-        f.fill(mx, top, 3, travel + 2, OFF)
+    def vmeter(mx, level, peak, clip, ink=NORMAL, w=3):
+        f.fill(mx, top, w, travel + 2, OFF)
         f.vline(mx - 1, top, travel + 2, DIM)
-        f.vline(mx + 3, top, travel + 2, DIM)
+        f.vline(mx + w, top, travel + 2, DIM)
         lit = int(level * travel)
         if lit:
-            f.fill(mx, top + travel + 1 - lit, 3, lit, ink)
+            f.fill(mx, top + travel + 1 - lit, w, lit, ink)
         if peak:
-            f.hline(mx, top + travel + 1 - int(peak * travel), 3, BRIGHT)
+            f.hline(mx, top + travel + 1 - int(peak * travel), w, BRIGHT)
         if clip:
-            f.fill(mx, top - 3, 3, 2, BRIGHT)
+            f.fill(mx, top - 3, w, 2, BRIGHT)
 
-    def strip(i, x, ch, is_master=False):
+    def strip(i, x, ch):
         lane = lanes.get(ch.get("name"))
         state = lane.get("state") if lane else None
-        name = ch.get("name", "-")[:4]
+        name = short_name(ch.get("name", "-"))
+        is_master = ch.get("name") == "MASTER"
 
         if is_master or ch.get("solo") or state == "rec":
             f.fill(x, BODY_Y, sw - 2, GLYPH_H + 2, BRIGHT)
@@ -241,57 +272,49 @@ def _strips_view(f, st, lens):
             f.rect(x, BODY_Y, sw - 2, GLYPH_H + 2, NORMAL)
             f.text_center(x, sw - 2, BODY_Y + 1, name, NORMAL)
         else:
-            quiet = (lens == "LOOP" and not is_master and lane is None)
             f.text_center(x, sw - 2, BODY_Y + 1, name,
-                          DIM if (ch.get("mute") or quiet) else NORMAL)
+                          DIM if ch.get("mute") else NORMAL)
 
+        # fader
         fx_ = x + 4
         f.vline(fx_, top, travel + 2, DIM)
         f.hline(fx_ - 2, top + int(travel * 0.25), 5, DIM)
         ky = top + int((1.0 - ch.get("gain", 0.8)) * travel)
         f.fill(fx_ - 3, ky, 7, 3, BRIGHT)
 
-        if is_master:
-            vmeter(x + 12, master.get("level_l", 0.0),
-                   master.get("peak_l", 0.0), master.get("clip"))
-            vmeter(x + 18, master.get("level_r", 0.0),
-                   master.get("peak_r", 0.0), False)
-        elif lens == "LOOP":
-            if lane:
-                bars = lane.get("bars", 0)
-                pos = ((lane.get("bar", 0) + lane.get("phase", 0.0)) / bars
-                       if bars else 0.0)
-                vmeter(x + 12, pos, 0.0, False,
-                       BRIGHT if state in ("rec", "dub") else NORMAL)
-                remain = lane.get("bars_remaining")
-                if remain is not None:
-                    f.text(x + 19, top + 1, str(remain)[:1], BRIGHT)
-        else:
-            vmeter(x + 12, ch.get("level", 0.0), ch.get("peak", 0.0),
-                   ch.get("clip"))
+        # audio meter - on EVERY strip, which is what the MIX page used to be
+        vmeter(x + 11, ch.get("level", 0.0), ch.get("peak", 0.0),
+               ch.get("clip"))
+
+        # loop position - on the strips that ARE loops, which is what the
+        # LOOP page used to be. A strip with no lane simply has no sweep,
+        # rather than a whole page where most columns are blank.
+        if lane:
+            bars = lane.get("bars", 0)
+            pos = ((lane.get("bar", 0) + lane.get("phase", 0.0)) / bars
+                   if bars else 0.0)
+            vmeter(x + 17, pos, 0.0, False,
+                   BRIGHT if state in ("rec", "dub") else NORMAL, w=2)
+            remain = lane.get("bars_remaining")
+            if remain is not None:
+                f.text(x + 22, top + 1, str(remain)[:1], BRIGHT)
+        elif not is_master:
             for j, key in enumerate(("send_a", "send_b")):
-                sx = x + 19 + j * 4
+                sx = x + 17 + j * 4
                 f.vline(sx, top, travel + 2, DIM)
                 lit = int(ch.get(key, 0.0) * travel)
                 if lit:
                     f.fill(sx, top + travel + 1 - lit, 2, lit, MUTED)
 
-        if not is_master and focus <= i < focus + 4:
-            f.hline(x, bot + 2, sw - 2, BRIGHT)
+        # The level in dB, under its own fader. This is the one thing the
+        # encoder bar carried that the column did not already say.
+        db = ch.get("db")
+        if db not in (None, ""):
+            f.text_center(x, sw - 2, bot + 3, short_db(db),
+                          DIM if ch.get("mute") else NORMAL)
 
     for i, ch in enumerate(strips):
         strip(i, 1 + i * sw, ch)
-    strip(8, 1 + 8 * sw, master, is_master=True)
-
-    focused = strips[focus:focus + 4]
-    draw_encoder_bar(f, st, [
-        {"norm": ch.get("gain", 0.0), "level": NORMAL,
-         "text": "%s %s" % (ch.get("name", "")[:4], ch.get("db", ""))}
-        for ch in focused])
-
-
-def page_mix(f, st):
-    _strips_view(f, st, "MIX")
 
 
 # --- FX --------------------------------------------------------------
@@ -1022,7 +1045,7 @@ def page_edit(f, st):
     ])
 
 
-RENDERERS = {"EDIT": page_edit, "WAVE": page_wave, "LOOP": page_loop, "MIX": page_mix, "FX": page_fx,
+RENDERERS = {"EDIT": page_edit, "WAVE": page_wave, "LOOP": page_loop, "FX": page_fx,
              "SONG": page_song}
 
 
@@ -1038,27 +1061,25 @@ def render(st):
 
 
 def sample_state(page):
+    # Built from control_map.STRIPS, not from a hand-written list of names.
+    # The old sample had GTR1/GTR2/MIC/AUX and a strip literally called "MPC"
+    # long after the desk became LOOP1..LOOP5 + DELAY/REVERB/MASTER, so every
+    # design snapshot showed a mixer nobody owned.
     st = {"page": page, "playing": True, "bpm": 86.0, "position": "005.3",
-          "recording": 1, "xruns": 0, "mode": "DAW",
-          "message": "GTR2 LEVEL  -6.0 DB",
+          "recording": 1, "xruns": 0, "mode": "",
+          "message": "LOOP2 LEVEL  -6.0 DB",
           "buttons_active": ()}
+    _loops = [n for n in control_map.STRIPS if n.startswith("LOOP")]
+    _states = ("play", "rec", "dub", "play", "armed")
+    _bars = ((4, 3, 1, 0.4), (4, 2, 2, 0.2), (2, 1, 1, 0.7),
+             (8, 5, 3, 0.1), (4, 0, None, 0.0))
     st["lanes"] = [
-        {"name": "GTR1", "state": "play", "bars": 4, "bar": 3,
-         "bars_remaining": 1, "phase": 0.4, "level": 0.55},
-        {"name": "GTR2", "state": "rec", "bars": 4, "bar": 2,
-         "bars_remaining": 2, "phase": 0.2, "level": 0.82},
-        {"name": "MIC", "state": "dub", "bars": 2, "bar": 1,
-         "bars_remaining": 1, "phase": 0.7, "level": 0.30},
-        {"name": "AUX", "state": "play", "bars": 8, "bar": 5,
-         "bars_remaining": 3, "phase": 0.1, "level": 0.12},
-        {"name": "L5", "state": "armed", "bars": 4, "bar": 0,
-         "level": 0.0},
-        {"name": "L6", "state": "empty"},
-        {"name": "L7", "state": "empty"},
-        {"name": "L8", "state": "empty"},
+        {"name": n, "state": _states[i % len(_states)],
+         "bars": _bars[i % len(_bars)][0], "bar": _bars[i % len(_bars)][1],
+         "bars_remaining": _bars[i % len(_bars)][2],
+         "phase": _bars[i % len(_bars)][3], "level": 0.55 - i * 0.1}
+        for i, n in enumerate(_loops)
     ]
-    st["banks"] = 2
-    st["bank"] = 0
     st["pads"] = {
         "mode": "LOOP - COLUMN IS LANE",
         "rows": ("REC", "PLAY", "STOP", "CLEAR"),
@@ -1110,20 +1131,23 @@ def sample_state(page):
             ]},
         ],
     }
-    st["master"] = {"name": "MSTR", "db": "0.0", "gain": 0.85,
-                    "level_l": 0.72, "level_r": 0.66,
-                    "peak_l": 0.81, "peak_r": 0.74}
+    # No separate master entry: the master IS strips[7]. There used to be a
+    # ninth column drawing st["master"] as "MSTR" beside a strip already called
+    # MASTER - the same bus twice, costing 3px off every other column.
+    _demo = [
+        ("-3.5", 0.80, 0.62, 0.71, 0.15, 0.30, {}),
+        ("-8.0", 0.65, 0.44, 0.52, 0.45, 0.10, {}),
+        ("-6.5", 0.70, 0.05, 0.30, 0.35, 0.20, {}),
+        ("-12.0", 0.55, 0.88, 0.96, 0.60, 0.25, {"solo": True}),
+        ("-5.0", 0.75, 0.33, 0.40, 0.20, 0.40, {}),
+        ("-18.0", 0.40, 0.20, 0.25, 0.0, 0.0, {}),
+        ("-20.0", 0.35, 0.10, 0.18, 0.0, 0.0, {"mute": True}),
+        ("0.0", 0.85, 0.72, 0.81, 0.0, 0.0, {}),
+    ]
     st["mixer"] = [
-        {"db": "-3.5", "send_a": 0.15, "send_b": 0.3, "name": "MPC", "gain": 0.80, "level": 0.62, "peak": 0.71},
-        {"db": "-8.0", "send_a": 0.45, "send_b": 0.1, "name": "GTR1", "gain": 0.65, "level": 0.44, "peak": 0.52},
-        {"db": "-6.5", "send_a": 0.35, "send_b": 0.2, "name": "GTR2", "gain": 0.70, "level": 0.05, "peak": 0.30},
-        {"db": "-12.0", "send_a": 0.6, "send_b": 0.25, "name": "MIC", "gain": 0.55, "level": 0.88, "peak": 0.96,
-         "solo": True},
-        {"db": "-5.0", "send_a": 0.2, "send_b": 0.4, "name": "LOOP", "gain": 0.75, "level": 0.33, "peak": 0.40},
-        {"db": "-18.0", "send_a": 0.0, "send_b": 0.0, "name": "VERB", "gain": 0.40, "level": 0.20, "peak": 0.25},
-        {"db": "-20.0", "send_a": 0.0, "send_b": 0.0, "name": "DLY", "gain": 0.35, "level": 0.10, "peak": 0.18,
-         "mute": True},
-        {"db": "-9.0", "send_a": 0.1, "send_b": 0.35, "name": "AUX", "gain": 0.6, "level": 0.25, "peak": 0.33},
+        dict({"name": n, "db": d[0], "gain": d[1], "level": d[2],
+              "peak": d[3], "send_a": d[4], "send_b": d[5]}, **d[6])
+        for n, d in zip(control_map.STRIPS, _demo)
     ]
     st["fx"] = {
         "track": "GTR1", "kind": "eq", "slot": 0, "focus": 1,

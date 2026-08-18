@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which Ardour operation every DAW-side control actually performs.
 
-`control_map.py` says what a control *means* ("daw:page:MIX", "lane
+`control_map.py` says what a control *means* ("daw:page:LOOP", "lane
 level"). This file says what daw-ctl *does* about it: the OSC path or Lua
 call, and its argument. Keeping the two apart matters because the meaning
 is a design decision and the binding is an interface detail - Ardour can

@@ -421,6 +421,23 @@ class Router:
             self.pinned = None if self.pinned == self.held else self.held
             return [("cmd", "mode %s" % self.mode)]
 
+        # While MUTE or SOLO is held, display 1-7 ARE the strips - the seven
+        # that can meaningfully be muted, master excluded. This is the mixer
+        # gesture Maschine itself uses (hold the mode, tap the target), moved
+        # off the pads so the pads can stay the instrument.
+        #
+        # Only display5-8 sit under this screen; 1-4 are under the LEFT one,
+        # which is showing the MPC, so four of these seven have no on-screen
+        # label. Their order is the mixer's own - LOOP1..LOOP5, DELAY, REVERB -
+        # which is the same order as the knobs above them.
+        if (self.surface == "DAW" and name.startswith("display")
+                and self.mode in ("MUTE", "SOLO")):
+            idx = int(name[len("display"):]) - 1
+            if 0 <= idx < len(control_map.MUTE_STRIPS):
+                return [("cmd", "%s %s" % (self.mode.lower(),
+                                           control_map.MUTE_STRIPS[idx]))]
+            return []
+
         # In DAW mode the display buttons follow whatever the page shows.
         if self.surface == "DAW" and name.startswith("display"):
             idx = int(name[-1]) - 1
@@ -441,23 +458,13 @@ class Router:
                 return [(kind, target if kind == "midi"
                          else "action %s" % target.split(":", 1)[1])]
             return []
-        mode = self.mode
-        if mode == "MPC":
-            return [("midi", "pad:%d:%d" % (index, velocity))]
-        if not velocity:
-            return []
-        # The grid reads as four columns of four: column = lane.
-        col, row = index % 4, index // 4
-        lane = self.lanes[col] if col < len(self.lanes) else None
-        if lane is None:
-            return []
-        if mode == "LOOP":
-            verb = control_map.LOOP_PAD_ROWS[min(row, 3)].lower()
-            return [("cmd", "%s %s" % (verb, lane))]
-        if mode in ("MUTE", "SOLO"):
-            name = self.strips[index] if index < len(self.strips) else None
-            return [("cmd", "%s %s" % (mode.lower(), name))] if name else []
-        return []
+        # THE PADS ARE ALWAYS THE MPC'S. On both surfaces, in every mode.
+        #
+        # They used to be re-targeted by mode - hold MUTE and the grid became a
+        # strip selector, hold PAD MODE and it became loop transport - so
+        # reaching for the mixer took the drums away mid-phrase. The strips
+        # live on the display buttons now, which nothing was playing.
+        return [("midi", "pad:%d:%d" % (index, velocity))]
 
     # --- encoders ---
 
@@ -539,6 +546,12 @@ class Router:
         return [("cmd", "knob %s %d %+d" % (self.page, index, delta))]
 
 
+def daw_pages():
+    """Which DAW pages exist, from the page bindings themselves."""
+    return {v.split(":")[-1] for v in control_map.DAW_BUTTONS.values()
+            if v.startswith("daw:page:")}
+
+
 def self_test():
     r = Router()
 
@@ -608,11 +621,38 @@ def self_test():
 
     # The surface toggle isolates the two instruments.
     assert r.surface == "MPC"
+    # THE PADS STAY THE MPC'S, whatever mode is held and whichever surface is
+    # up. This is the property the whole mixer redesign exists to protect.
+    _rm = Router()
+    for _surface in ("MPC", "DAW"):
+        _rm.surface = _surface
+        for _held in (None, "MUTE", "SOLO"):
+            _rm.held = _held
+            assert _rm.pad(5, 100) == [("midi", "pad:5:100")], \
+                "pads must reach the MPC in %s/%s" % (_surface, _held)
+    _rm.held = None
+
+    # Hold MUTE, tap a display button, that strip mutes.
+    _rm.surface = "DAW"
+    _rm.held = "MUTE"
+    assert _rm.button("display1", True) == [("cmd", "mute LOOP1")]
+    assert _rm.button("display7", True) == [("cmd", "mute REVERB")]
+    _rm.held = "SOLO"
+    assert _rm.button("display3", True) == [("cmd", "solo LOOP3")]
+    # display8 is the surface toggle and must NOT become a strip - and the
+    # master has no button at all, which is why there are seven and not eight.
+    assert "MASTER" not in control_map.MUTE_STRIPS
+    assert len(control_map.MUTE_STRIPS) == 7, "seven strips, seven free buttons"
+    _rm.held = None
+    _rm.surface = "MPC"
+
     assert r.button(control_map.SURFACE_TOGGLE, True) == [("surface", "DAW")]
     assert r.button("play", True) == []                 # MPC unreachable now
     r.button("play", False)
-    assert r.button("group_f", True) == [("cmd", "page MIX")]
-    r.button("group_f", False)
+    # group_f used to open a MIX page. There is one strips page now, so the
+    # button is free rather than opening a duplicate of the page already shown.
+    assert "group_f" not in control_map.DAW_BUTTONS
+    assert "MIX" not in daw_pages(), "the MIX page was merged into LOOP"
     assert r.button(control_map.SURFACE_TOGGLE, True) == [("surface", "MPC")]
     assert sent(r.button("play", True)) == "mpc:play"
     r.button("play", False)
