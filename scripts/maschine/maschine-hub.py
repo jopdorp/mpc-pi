@@ -153,6 +153,47 @@ def _pad_neighbours(pad):
 
 PAD_NEIGHBOURS = {p: _pad_neighbours(p) for p in range(16)}
 
+
+_MK1_BUTTON_NAMES = []
+try:
+    import importlib.util as _iu
+    _sp = _iu.spec_from_file_location(
+        "mk1in_names", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "mpc-mk1-input.py"))
+    _mod = _iu.module_from_spec(_sp)
+    _sp.loader.exec_module(_mod)
+    _MK1_BUTTON_NAMES = list(_mod.MK1_BUTTONS) + ["pad_mode"]
+except Exception:
+    pass
+
+
+# --- press feedback ---------------------------------------------------------
+#
+# Light a pad or button while it is being played. The hard rule is that this
+# must never touch an LED the MACHINE owns: the lamp mirror drives Play, Rec,
+# Grid, F7, the four banks, Mute and NoteRepeat from the MPC's own outputs, and
+# a press overwriting one would replace real state with a guess - the exact
+# failure the lamp export was built to avoid.
+#
+# LAMP_OWNED is computed from LAMP_TO_LED rather than listed, so adding a lamp
+# later cannot silently hand its LED to the press feedback.
+def _led_for_button(name):
+    if name.startswith("display"):
+        return "DisplayButton%s" % name[-1]
+    if name == "pad_mode":
+        return "Keyboard"           # what cabl calls the 1st-gen PAD MODE key
+    return "".join(part.capitalize() for part in name.split("_"))
+
+
+BUTTON_LEDS = {}
+for _b in [b for b in _MK1_BUTTON_NAMES if b]:
+    _led = _led_for_button(_b)
+    if _led in mk1_leds.LED_INDEX:
+        BUTTON_LEDS[_b] = _led
+
+# Pads and buttons are lit while HELD, not flashed - a light that goes out
+# while your finger is still down reads as a dropped hit.
+
 # MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
 # else is a light that reports something you press somewhere else, which is
 # worse than no light: FULL LEVEL moved from GRID to SELECT to F7 during this
@@ -169,6 +210,13 @@ LAMP_TO_LED = {
     "bank_d":         "GroupD",
     "track_mute":     "Mute",
 }
+
+# LEDs the MACHINE owns. Press feedback must never write these: they carry the
+# MPC's real state, and a press overwriting one would put a guess where the
+# truth belongs. Derived from the table rather than listed, so adding a lamp
+# cannot silently hand its LED to the press feedback.
+LAMP_OWNED = set(LAMP_TO_LED.values())
+
 
 
 # Set MPCPI_HUB_TRACE=1 to log every dispatched event to stderr, which under
@@ -601,6 +649,34 @@ def self_test():
     # The SWING knob is what turns the wheel.
     assert control_map.MASTER_KNOBS["swing"] == "mpc:data_wheel"
 
+    # Pad LEDs are numbered 1..16, our pad index is 0..15. Passing the index
+    # straight through lights the wrong pad AND raises on pad 0 - and poll()
+    # catches everything, so the exception silently dropped the whole report
+    # and pad 1 stopped working entirely.
+    _lb = mk1_leds.LedBank()
+    for _p in range(16):
+        _lb.set_pad(_p + 1, mk1_leds.BRIGHT)
+        assert _lb.get("Pad%d" % (_p + 1)) == mk1_leds.BRIGHT, \
+            "pad index %d lit the wrong LED" % _p
+    try:
+        _lb.set_pad(0, mk1_leds.BRIGHT)
+        raise AssertionError("pad_led(0) should raise - it is 1-based")
+    except ValueError:
+        pass
+
+    # Press feedback must never write a machine-owned LED.
+    for _b, _led in BUTTON_LEDS.items():
+        if _led in LAMP_OWNED:
+            assert _led not in [l for l in BUTTON_LEDS.values()
+                                if l not in LAMP_OWNED], "overlap"
+    _m = Mk1.__new__(Mk1)
+    _m.leds = mk1_leds.LedBank()
+    for _led in LAMP_OWNED:
+        assert _m.press_light(_led, True) is False, \
+            "a press wrote %s, which the machine owns" % _led
+        assert _m.leds.get(_led) == mk1_leds.OFF
+    assert _m.press_light("Solo", True) is True, "a free LED must light"
+
     # One lamp, one meaning - and on the button that actually sends the key.
     assert len(set(LAMP_TO_LED.values())) == len(LAMP_TO_LED)
     _led_of = {"display7": "DisplayButton7", "grid": "Grid", "play": "Play",
@@ -678,12 +754,16 @@ class Mk1:
     # which is a legitimate pair of crossings and therefore not something the
     # latch can reject - only the DEPTH it has to fall to can.
     #
-    # 25, not 60. At 60 a hard hit could still ring down through it and back
-    # up through the on-threshold inside one stroke - reported as double hits -
-    # and lowering the ON threshold to 250 narrowed the gap further. 25 is
-    # close to rest, so a pad must genuinely be released. On a one-shot sampler
-    # the later note-off costs nothing.
-    PAD_OFF_THRESHOLD = int(os.environ.get("MPCPI_PAD_OFF", "25"))
+    # ZERO. The pad must return all the way to rest before it can fire again.
+    #
+    # That is only safe because the idle floor was measured and it really is 0
+    # on all sixteen pads - so "back to rest" is a state the hardware actually
+    # reaches, not an unreachable ideal that would leave a pad latched forever.
+    # It gives the widest possible separation from a re-trigger: a hit that
+    # rings down through any positive value and back up cannot fire twice.
+    #
+    # On a one-shot sampler a late note-off costs nothing.
+    PAD_OFF_THRESHOLD = int(os.environ.get("MPCPI_PAD_OFF", "0"))
     # Fraction of the NEXT-SCANNED channel subtracted from each pad, to cancel
     # the sample-and-hold bleed described above. MPCPI_PAD_BLEED overrides it.
     #
@@ -795,6 +875,8 @@ class Mk1:
         self.pad_last_on = [0.0] * 16
         self.pad_last_force = [0] * 16
         self.pad_crosstalk = 0
+        self._watch = None
+        self._leds_dirty = False
         self._ctrl_tick = 0
         self._pad_read_at = 0.0
         self._pad_gaps = []
@@ -916,6 +998,19 @@ class Mk1:
         self.leds.all(mk1_leds.OFF)
         self.leds.backlight(mk1_leds.BACKLIGHT_DEFAULT)
         return self.flush_leds(force=True)
+
+    def press_light(self, led, on):
+        """Light an LED for a press, unless the MACHINE owns it.
+
+        The refusal is the point. LAMP_TO_LED's values are driven from the
+        MPC's own outputs, and letting a press write one would put a guess
+        where real state belongs - PLAY would light because you pressed it
+        rather than because the sequencer is running, which is the failure the
+        lamp export exists to prevent.
+        """
+        if not led or led in LAMP_OWNED:
+            return False
+        return self.leds.set(led, mk1_leds.BRIGHT if on else mk1_leds.OFF)
 
     def show_lamps(self, path=LAMPS):
         """Mirror the MPC's panel lamps onto the controller.
@@ -1066,6 +1161,21 @@ class Mk1:
             if POLL_STATS and value > self._pad_seen_max[raw]:
                 self._pad_seen_max[raw] = value
             seen.append(raw)
+        # Sample the watched neighbour before deciding anything this pass.
+        if self._watch is not None:
+            w_raw, w_pad, w_force, w_t0, w_samples = self._watch
+            nb_raw = (w_raw - 1) % 16
+            w_samples.append((int((time.monotonic() - w_t0) * 1000),
+                              self.pad_raw[nb_raw]))
+            if len(w_samples) >= 24:
+                peak = max(v for _, v in w_samples)
+                at = [ms for ms, v in w_samples if v == peak][0]
+                _trace("lag", "p%d hit %d -> neighbour p%d peaks %d at %dms"
+                       % (w_pad + 1, w_force,
+                          Mk1._pad_index(nb_raw) + 1, peak, at),
+                       " ".join("%d:%d" % (ms, v) for ms, v in w_samples))
+                self._watch = None
+
         for raw in seen:
             # Channel k carries a fraction of channel k+1, wrapping at 15->0.
             #
@@ -1126,6 +1236,12 @@ class Mk1:
             # decaying through it - or scan bleed from the neighbouring
             # channel touching it - is a fresh note-on every time it crosses.
             if not self.pad_on[pad] and pressure > self.PAD_ON_THRESHOLD:
+                if TRACE and self._watch is None:
+                    # Follow the scan neighbour for the next few milliseconds.
+                    # The snapshot below shows ONE instant; whether the leak
+                    # lags needs its shape over time, which is the claim two
+                    # deleted corrections rested on and nobody had measured.
+                    self._watch = [raw, pad, own, time.monotonic(), []]
                 if TRACE:
                     # The whole grid at the moment of the hit, laid out as the
                     # pads sit, so physical crosstalk is visible as a shape
@@ -1151,11 +1267,18 @@ class Mk1:
                     continue
                 self.pad_last_on[pad] = now
                 self.pad_last_force[pad] = pressure
+                if self.leds.set_pad(pad + 1, mk1_leds.BRIGHT):
+                    self._leds_dirty = True
                 # Velocity from the leading edge: the stream is pressure,
                 # not note-on, so the first crossing is the hit.
                 out += router.pad(pad, self.velocity(pressure))
             elif self.pad_on[pad] and pressure <= self.PAD_OFF_THRESHOLD:
                 self.pad_on[pad] = False
+                # Lit while HELD, not flashed. The MIDI is tapped - press and
+                # release go together so the firmware cannot auto-repeat - but
+                # the pad is physically still down, and pad_on tracks that.
+                if self.leds.set_pad(pad + 1, mk1_leds.OFF):
+                    self._leds_dirty = True
                 out += router.pad(pad, 0)
         return out
 
@@ -1213,7 +1336,10 @@ class Mk1:
                        " ".join(moved))
             for pos, name in enumerate(control_map_buttons()):
                 if name and (changed >> pos) & 1:
-                    out += router.button(name, bool((bits >> pos) & 1))
+                    down = bool((bits >> pos) & 1)
+                    if self.press_light(BUTTON_LEDS.get(name), down):
+                        self._leds_dirty = True
+                    out += router.button(name, down)
         elif kind == 0x02:
             # Eleven endless pots. NOT counters: each knob is a pair of
             # analog channels that must be interpolated into an absolute
@@ -1494,6 +1620,9 @@ def main():
                 # exported line and flush_leds only writes dirty groups - so a
                 # settled instrument costs one file read per frame.
                 if mk1.show_lamps():
+                    mk1._leds_dirty = True
+                if mk1._leds_dirty:
+                    mk1._leds_dirty = False
                     mk1.flush_leds()
                 frame_fails = 0
             except _FrameFailed as e:
