@@ -21,6 +21,24 @@
 # booted without one.
 set -eu
 
+# PERSISTED SETTINGS, read before anything else.
+#
+# Everything below defaults from the environment, which made every setting
+# evaporate on reboot: mpc-usb-width.sh set a width with an env var, the
+# board came back at the compiled-in default, and the machine silently
+# stopped being in the state it was left in. A setting that does not
+# survive a power cycle is not a setting, it is a temporary override that
+# looks like one - and this port IS the Pi's power input, so power cycles
+# are routine here rather than rare.
+#
+# The environment still wins over the file, so a deliberate one-shot
+# override is still possible - it just has to be asked for explicitly.
+MPCPI_GADGET_CONF=${MPCPI_GADGET_CONF:-/etc/default/mpcpi-usb-gadget}
+if [ -f "$MPCPI_GADGET_CONF" ]; then
+	# shellcheck disable=SC1090
+	. "$MPCPI_GADGET_CONF"
+fi
+
 G=/sys/kernel/config/usb_gadget/mpc
 UAC=$G/functions/uac2.usb0
 MIDI=$G/functions/midi.usb0

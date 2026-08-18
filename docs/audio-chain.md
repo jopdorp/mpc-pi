@@ -568,3 +568,39 @@ name - so pw-link needs a different separator to avoid colliding with that.
 number above is the appliance idling with the gadget bound and routed; that
 is necessary and not sufficient, the same rule as everywhere else in this
 project. The next real test needs a human with a laptop.
+
+### The gadget's capture side: it was never the channel count
+
+The host could see the gadget's playback (2ch) but not its capture (22ch,
+later 26ch). Three theories were entertained and two of them were mine and
+wrong:
+
+  * **Full-speed descriptors.** 26ch needs 3444 bytes in a 1ms full-speed
+    frame against a 1023-byte ISOC limit, and f_uac2 warns then clamps
+    wMaxPacketSize. The arithmetic is right and the warning is real, but it
+    is not the cause: 26 channels enumerate and work. A kernel patch to omit
+    the oversized full-speed alternate was written and then deleted, because
+    it fixed a problem that does not exist.
+  * **Descriptor caching on the host.** Also wrong, and disproved cheaply:
+    rebinding the UDC gives the device a NEW USB address every time
+    (21 -> 22 -> 23 across three binds), so the host had been re-enumerating
+    all along. The advice to replug that came with this theory was actively
+    harmful - the USB-C port is the Pi 5's power input, so replugging
+    reboots the board.
+  * **A real 27-channel ceiling.** This one holds: f_uac2 caps a UAC2 gadget
+    at 27 channels (UAC2_CHANNEL_MASK 0x07FFFFFF) and returns -EINVAL past
+    it. Asking for 28 failed to bind at all, which is a different symptom
+    from "binds but the host shows nothing".
+
+Confirmed working, measured from the host rather than the appliance:
+
+    arecord -l          card 0: MPC2000XL Audio Interface
+    hw params           CHANNELS: 26  RATE: 44100  FORMAT: S24_3LE
+    pipewire node       alsa_input...multichannel-input  audio.channels: 26
+
+The lesson worth keeping is about where the evidence came from. Every check
+that said "working" for the first several rounds was run on the APPLIANCE -
+it binds, it enumerates at high speed, it exposes both PCM directions, it
+routes 20 links - and none of those touch the question actually being asked,
+which is what the host parsed. The host is a Linux machine on the same desk
+and `arecord -l` could have been run there at any point.

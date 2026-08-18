@@ -34,9 +34,24 @@ N="${1:?usage: $0 <channels-up>   e.g. 2 for a stereo baseline, 26 for the full 
 	exit 1
 }
 
-MPC_USB_CHANNELS_UP="$N" /usr/bin/mpc-usb-gadget.sh stop >/dev/null 2>&1 || true
-MPC_USB_CHANNELS_UP="$N" /usr/bin/mpc-usb-gadget.sh start
+# PERSIST FIRST, then apply. The width has to survive a reboot - this port
+# is the Pi's power input, so the board WILL be power-cycled routinely, and
+# a width that only lived in an environment variable meant every reboot
+# silently reverted whatever was being tested.
+CONF=${MPCPI_GADGET_CONF:-/etc/default/mpcpi-usb-gadget}
+mkdir -p "$(dirname "$CONF")"
+if [ -f "$CONF" ] && grep -q '^MPC_USB_CHANNELS_UP=' "$CONF"; then
+	sed -i "s/^MPC_USB_CHANNELS_UP=.*/MPC_USB_CHANNELS_UP=$N/" "$CONF"
+else
+	printf '# Written by mpc-usb-width.sh. Read by mpc-usb-gadget.sh at every\n' >> "$CONF"
+	printf '# start, including at boot, so the gadget comes back as it was left.\n' >> "$CONF"
+	printf 'MPC_USB_CHANNELS_UP=%s\n' "$N" >> "$CONF"
+fi
+
+/usr/bin/mpc-usb-gadget.sh stop >/dev/null 2>&1 || true
+/usr/bin/mpc-usb-gadget.sh start
 systemctl restart mpcpi-usb-route >/dev/null 2>&1 || true
+echo "persisted to $CONF - this width now survives a reboot"
 echo
 echo "the host has already re-enumerated - no replug needed (and replugging"
 echo "would reboot the Pi, since USB-C is its power input)."
