@@ -359,6 +359,7 @@ def self_test():
     assert all(flip(i) % 4 == i % 4 for i in range(16)), \
         "pad remap moved a column; only rows should flip"
 
+
     print("maschine-hub self-test PASS: routing verified for buttons, "
           "pads, pad orientation, knobs, shift and hold-modes")
 
@@ -374,7 +375,30 @@ class Mk1:
     """
 
     VENDOR, PRODUCT = 0x17CC, 0x0808
-    PAD_THRESHOLD = 200
+    # Pad on/off thresholds, with hysteresis and a gap wide enough to reject
+    # the controller's own scan bleed.
+    #
+    # There was one threshold, 200, used for both edges. Two things were wrong
+    # with that. Measured with --pad-stats while playing:
+    #
+    #   real hits          768 .. 3072
+    #   bleed onto another  84 .. 224
+    #
+    # and the bleed always lands on the PREVIOUSLY SCANNED pad index - raw N
+    # into raw N-1, including raw 8 into raw 7 and raw 0 into raw 15, which are
+    # opposite corners of the grid. So it is not analog crosstalk between
+    # neighbouring pads; it is the pad ADC's sample-and-hold not settling
+    # between channels, and it is uniform across all sixteen. At a threshold of
+    # 200 a bleed of 224 is a note-on: hitting one pad fires its scan
+    # neighbour, which is what "the hi-hat repeats when I play fast" was.
+    #
+    # ON at 400 clears the worst observed bleed by 176 and still sits far below
+    # the softest real hit. OFF at 150 gives hysteresis, so a pad decaying
+    # through the on-threshold cannot chatter a second note-on.
+    PAD_ON_THRESHOLD = 400
+    PAD_OFF_THRESHOLD = 150
+    # Kept as the name the diagnostic reports against.
+    PAD_THRESHOLD = PAD_ON_THRESHOLD
 
     def __init__(self):
         import usb.core                                   # noqa: F401
@@ -435,6 +459,7 @@ class Mk1:
                 "cannot select altsetting %d: %s - unplug and replug the "
                 "controller" % (mk1_leds.ALTSETTING, last))
         self.pad_state = [0] * 16
+        self.pad_on = [False] * 16
         self.buttons = 0
         self.encoders = mk1_encoders.EncoderTracker()
         self.frames = {}
@@ -591,6 +616,7 @@ class Mk1:
             pass
         return events
 
+
     @staticmethod
     def _pad_index(raw):
         """Hardware pad number to MPC pad number.
@@ -616,13 +642,18 @@ class Mk1:
             if raw > 15:
                 continue
             pad = self._pad_index(raw)
-            was = self.pad_state[pad]
             self.pad_state[pad] = pressure
-            if pressure > self.PAD_THRESHOLD and was <= self.PAD_THRESHOLD:
+            # Two thresholds, and a latched per-pad state rather than a
+            # comparison of the last two samples. With one threshold, a pad
+            # decaying through it - or scan bleed from the neighbouring
+            # channel touching it - is a fresh note-on every time it crosses.
+            if not self.pad_on[pad] and pressure > self.PAD_ON_THRESHOLD:
+                self.pad_on[pad] = True
                 # Velocity from the leading edge: the stream is pressure,
                 # not note-on, so the first crossing is the hit.
                 out += router.pad(pad, min(127, pressure >> 5))
-            elif pressure <= self.PAD_THRESHOLD and was > self.PAD_THRESHOLD:
+            elif self.pad_on[pad] and pressure <= self.PAD_OFF_THRESHOLD:
+                self.pad_on[pad] = False
                 out += router.pad(pad, 0)
         return out
 
@@ -716,6 +747,12 @@ def main():
     ap.add_argument("--left", default=LCD_L)
     ap.add_argument("--right", default=LCD_R)
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--pad-stats", type=float, default=None, metavar="SECONDS",
+                    help="diagnostic: read raw pad pressures for SECONDS and "
+                         "print a grid of resting/peak values and threshold "
+                         "crossings, to see whether a chattering pad is sitting "
+                         "on PAD_THRESHOLD. Stop mpcpi-maschine first: the hub "
+                         "claims the controller exclusively")
     ap.add_argument("--no-usb", action="store_true",
                     help="route only, do not open the controller")
     args = ap.parse_args()
@@ -724,6 +761,9 @@ def main():
     if args.no_usb:
         print("routing only; no controller opened")
         return 0
+
+    if args.pad_stats is not None:
+        return pad_stats(args.pad_stats)
 
     router = Router()
     try:
@@ -916,6 +956,103 @@ def main():
             deliver(out)
             del out[:]
         time.sleep(0.002)
+
+
+def pad_stats(seconds):
+    """Print what the pad sensors are actually reporting.
+
+    A pad that retriggers at high speed is usually not a mapping fault - it is
+    a sensor whose resting pressure sits near PAD_THRESHOLD, crossing it on
+    noise alone. _pads() uses ONE threshold with no hysteresis:
+
+        if pressure > PAD_THRESHOLD and was <= PAD_THRESHOLD:   note on
+        elif pressure <= PAD_THRESHOLD and was > PAD_THRESHOLD: note off
+
+    so every noise excursion across 200 is a fresh note. This shows, per pad,
+    the resting floor, the peak, and how many times it crossed while untouched.
+    Leave your hands OFF the controller for the first half.
+    """
+    import collections
+    mk1 = Mk1()
+    lo = [4096] * 16
+    hi = [0] * 16
+    crossings = [0] * 16
+    last = [0] * 16
+    samples = collections.Counter()
+    end = time.monotonic() + seconds
+    live_at = [0.0]
+    reads = 0
+    errors = collections.Counter()
+    first = None
+    print("reading raw pad pressures for %.0fs - PRESS THE SUSPECT PAD "
+          "repeatedly" % seconds)
+    while time.monotonic() < end:
+        try:
+            data = mk1.dev.read(EP_PADS, 64, timeout=100)
+        except Exception as e:
+            errors[type(e).__name__ + ": " + str(e)[:40]] += 1
+            continue
+        reads += 1
+        if first is None:
+            first = bytes(data)
+        # Live view, so a press can be SEEN rather than only summarised. This
+        # is what shows crosstalk: press one pad and watch whether a neighbour
+        # rises with it.
+        live = {}
+        for i in range(1, len(data) - 1, 2):
+            raw = (data[i] & 0xF0) >> 4
+            pressure = ((data[i] & 0x0F) << 8) | data[i + 1]
+            if raw > 15:
+                continue
+            pad = Mk1._pad_index(raw)
+            lo[pad] = min(lo[pad], pressure)
+            hi[pad] = max(hi[pad], pressure)
+            samples[pad] += 1
+            if (pressure > Mk1.PAD_THRESHOLD) != (last[pad] > Mk1.PAD_THRESHOLD):
+                crossings[pad] += 1
+            last[pad] = pressure
+            if pressure > 20:
+                live[pad] = pressure
+        if live and (time.monotonic() - live_at[0]) > 0.05:
+            live_at[0] = time.monotonic()
+            peak = max(live, key=live.get)
+            print("  pressed p%-2d(c%d) = %-5d | also: %s"
+                  % (peak, peak % 4 + 1, live[peak],
+                     ", ".join("p%d(c%d)=%d" % (p, p % 4 + 1, v)
+                               for p, v in sorted(live.items(),
+                                                  key=lambda kv: -kv[1])
+                               if p != peak) or "-"))
+
+    print("\nreads=%d  total pad samples=%d" % (reads, sum(samples.values())))
+    if errors:
+        for msg, n in errors.most_common(3):
+            print("  read error x%d: %s" % (n, msg))
+    if first is not None:
+        print("  first report: %s" % first[:16].hex(" "))
+    if not reads:
+        print("NO PAD REPORTS. The endpoint produced nothing - the device is "
+              "not streaming, so nothing below is measured.")
+        return 1
+
+    print("\nthreshold = %d. Grid is laid out as the pads are, top row first."
+          % Mk1.PAD_THRESHOLD)
+    for row in range(3, -1, -1):
+        cells = []
+        for col in range(4):
+            pad = row * 4 + col
+            n = samples[pad]
+            mark = "!" if crossings[pad] else " "
+            cells.append("p%-2d %4d-%-4d x%-3d%s"
+                         % (pad, lo[pad] if n else 0, hi[pad], crossings[pad], mark))
+        print("  " + " | ".join(cells))
+    print("\ncolumns are left to right; 'x' is threshold crossings while idle.")
+    bad = [p for p in range(16) if crossings[p]]
+    if bad:
+        print("CHATTERING UNTOUCHED: pads %s - these cross %d on noise alone."
+              % (", ".join(str(p) for p in bad), Mk1.PAD_THRESHOLD))
+    else:
+        print("no pad crossed the threshold untouched.")
+    return 0
 
 
 def encode_midi(target):
