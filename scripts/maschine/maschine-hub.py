@@ -70,6 +70,28 @@ MK1_VENDOR = 0x17CC
 LCD_L = "/dev/shm/mpc-lcd"
 LCD_R = "/dev/shm/daw-ui"
 FIFO = "/run/daw-ctl.fifo"
+# The MPC's own panel lamps, exported by mpcpi-autoplay.lua from the outputs
+# akai/mpc2000.cpp already drives. Machine state, not our guess at it.
+LAMPS = os.environ.get("MPCPI_LAMP_PATH", "/dev/shm/mpc-lamps")
+
+# MPC lamp -> Maschine LED. Only where the Maschine has a button that means the
+# same thing; the MPC has lamps this controller has nowhere to put.
+LAMP_TO_LED = {
+    "after":          "NoteRepeat",
+    "record":         "Rec",
+    "play":           "Play",
+    "bank_a":         "GroupA",
+    "bank_b":         "GroupB",
+    "bank_c":         "GroupC",
+    "bank_d":         "GroupD",
+    "track_mute":     "Mute",
+}
+
+# GRID carries BOTH of the MPC's pad-level toggles - unshifted is 16 LEVELS,
+# shifted is FULL LEVEL - so one lamp has to show two states. Brightness
+# separates them rather than lighting the same LED for either, which would be
+# a lamp that tells you something is on without telling you what.
+GRID_LAMPS = ("sixteen_levels", "full_level")
 
 # Set MPCPI_HUB_TRACE=1 to log every dispatched event to stderr, which under
 # systemd means the journal. Added because "the buttons do nothing" was
@@ -142,6 +164,11 @@ class Router:
                 "expected 8 mixer strips to match the 8 display knobs, got %d"
                 % len(self.strips))
         self.shift = False
+        # What each button sent on its press edge, so the RELEASE can send the
+        # matching note-off. Keyed by button name, not by target: shift can be
+        # let go between press and release, and the key that must be released
+        # is the one that was actually pressed.
+        self.pressed = {}
         self.held = None          # a mode button currently held
         self.pinned = None        # a latched mode
         self.page = "LOOP"
@@ -179,7 +206,17 @@ class Router:
             return [("cmd", "mode %s" % self.mode)]
 
         if not down:
-            return []
+            # RELEASE the panel key this button pressed.
+            #
+            # This returned [] unconditionally, and encode_midi only ever
+            # emitted note-on, so every panel key the hub sent was pressed and
+            # never let go. On a momentary key that is merely untidy; on the
+            # MPC's held functions it is a stuck instrument - AFTER latches
+            # NOTE REPEAT down, and then every pad hit repeats at the tempo
+            # forever, which is invisible to the controller and looks exactly
+            # like the pads double-triggering.
+            target = self.pressed.pop(name, None)
+            return [("midi_up", target)] if target else []
 
         # Page selection: Group E-H.
         target = control_map.GROUPS.get(name)
@@ -187,6 +224,7 @@ class Router:
             self.page = target.split(":")[-1]
             return [("cmd", "page %s" % self.page)]
         if target and target.startswith("mpc:"):
+            self.pressed[name] = target
             return [("midi", target)]
 
         # Screen R's four buttons are contextual.
@@ -196,19 +234,26 @@ class Router:
                 left = control_map.BUTTONS_LEFT.get(name)
                 if left:
                     key = left[1] if self.shift else left[0]
-                    return [("midi", key)] if key else []
+                    if not key:
+                        return []
+                    self.pressed[name] = key
+                    return [("midi", key)]
             labels = control_map.BUTTONS_RIGHT_BY_PAGE.get(
                 self.page, ("", "", "", ""))
             label = labels[idx - 4]
             return [("cmd", "button %s %s" % (self.page, label))]
 
         # Transport and the pad-section buttons.
-        tr = control_map.TRANSPORT.get(name)
+        tr = control_map.TRANSPORT.get(name) or control_map.PANEL.get(name)
         if tr:
             key = tr[1] if self.shift else tr[0]
-            return [("midi", key)] if key and key != "modifier" else []
+            if not key or key == "modifier":
+                return []
+            self.pressed[name] = key
+            return [("midi", key)]
         sec = control_map.PAD_SECTION.get(name)
         if sec and sec.startswith("mpc:"):
+            self.pressed[name] = sec
             return [("midi", sec)]
         return []
 
@@ -296,12 +341,23 @@ def self_test():
     assert r.button("group_f", True) == [("cmd", "page MIX")]
     assert r.page == "MIX"
 
-    # Transport goes to the MPC, not to Ardour, and SHIFT reaches the
-    # bar-level move the MPC prints on the same key.
+    # Transport goes to the MPC, not to Ardour.
     assert r.button("play", True) == [("midi", "mpc:play")]
     r.button("shift", True)
-    assert r.button("play", True) == [("midi", "mpc:play_start")]
+    # SHIFT+PLAY must be STOP. The controller had no stop at all, and a
+    # sequence that cannot be stopped from the instrument is not playable.
+    assert r.button("play", True) == [("midi", "mpc:stop")]
     r.button("shift", False)
+    # PLAY START is still reachable, on the button the panel prints RESTART.
+    # cabl's enum calls it "loop", and the decoder emits that name - control_map
+    # keyed it as "restart", which no decoder ever sends, so the binding was
+    # dead and PLAY START could not be pressed at all.
+    assert r.button("loop", True) == [("midi", "mpc:play_start")]
+    assert r.button("loop", False) == [("midi_up", "mpc:play_start")]
+    # NOTE REPEAT reaches the MPC's AFTER key, and releases it again - held,
+    # not toggled, which is how the 2000XL works.
+    assert r.button("note_repeat", True) == [("midi", "mpc:after")]
+    assert r.button("note_repeat", False) == [("midi_up", "mpc:after")]
 
     # Holding PAD MODE is the mode; releasing returns to MPC pads.
     assert r.mode == "MPC"
@@ -360,8 +416,45 @@ def self_test():
         "pad remap moved a column; only rows should flip"
 
 
+    # Every panel key the hub presses must also be released. It was press-only,
+    # which latches the MPC's held functions - AFTER leaves NOTE REPEAT on and
+    # every pad then repeats at the tempo forever.
+    r2 = Router()
+    assert r2.button("play", True) == [("midi", "mpc:play")]
+    assert r2.button("play", False) == [("midi_up", "mpc:play")]
+    # Shift released mid-press must not change WHICH key gets released.
+    r2.button("shift", True)
+    assert r2.button("play", True) == [("midi", "mpc:stop")]
+    r2.button("shift", False)
+    assert r2.button("play", False) == [("midi_up", "mpc:stop")]
+    # A release with no matching press emits nothing.
+    assert r2.button("play", False) == []
+    assert encode_midi("mpc:play", True)[0] == 0x90
+    assert encode_midi("mpc:play", False)[0] == 0x80
+
+    # Every mapped button name must be one the DECODER can send. "restart" was
+    # mapped and never sent, so PLAY START was unreachable and nothing said so.
+    import importlib.util as _u
+    _s = _u.spec_from_file_location("mk1in", os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "mpc-mk1-input.py"))
+    _m = _u.module_from_spec(_s); _s.loader.exec_module(_m)
+    known = {b for b in _m.MK1_BUTTONS if b} | {"pad_mode"}
+    mapped = (set(control_map.TRANSPORT) | set(control_map.PANEL)
+              | set(control_map.PAD_SECTION) | set(control_map.GROUPS))
+    unknown = {n for n in mapped if n not in known}
+    assert not unknown, "mapped buttons the decoder never sends: %s" % sorted(unknown)
+
+    # The cursor must be reachable - the MPC's UI cannot be driven without it.
+    r3 = Router()
+    assert r3.button("browse_left", True) == [("midi", "mpc:left")]
+    r3.button("browse_left", False)
+    r3.button("shift", True)
+    assert r3.button("browse_right", True) == [("midi", "mpc:down")]
+    r3.button("shift", False)
+    r3.button("browse_right", False)
+
     print("maschine-hub self-test PASS: routing verified for buttons, "
-          "pads, pad orientation, knobs, shift and hold-modes")
+          "pads, pad orientation, key release, knobs, shift and hold-modes")
 
 
 class Mk1:
@@ -395,8 +488,35 @@ class Mk1:
     # ON at 400 clears the worst observed bleed by 176 and still sits far below
     # the softest real hit. OFF at 150 gives hysteresis, so a pad decaying
     # through the on-threshold cannot chatter a second note-on.
-    PAD_ON_THRESHOLD = 400
-    PAD_OFF_THRESHOLD = 150
+    PAD_ON_THRESHOLD = 300
+    PAD_OFF_THRESHOLD = 120
+    # Fraction of the NEXT-SCANNED channel subtracted from each pad, to cancel
+    # the sample-and-hold bleed described above. MPCPI_PAD_BLEED overrides it.
+    #
+    # The bleed is proportional to the source, not a fixed offset - measured
+    # source -> bleed pairs ran 256->34 and 2304->197, a ratio of 0.034..0.292
+    # with a median of 0.108. So a flat subtraction cannot work: 150 would erase
+    # a soft real hit and still leave ~750 of a hard hit's bleed, which is why
+    # raising the threshold alone stopped the quiet false triggers and not the
+    # loud ones. 0.20 cancels every pair captured with 70 counts to spare.
+    #
+    # The cost, stated plainly: scan-adjacent pads are usually also physically
+    # adjacent within a row, so hitting two neighbours together subtracts real
+    # signal from the softer one. At 0.20 a 768 hit alongside a 3072 hit lands
+    # at 154 and is dropped. Lower MPCPI_PAD_BLEED if rolls lose notes; raise it
+    # if hard hits still double-trigger their neighbour.
+    PAD_BLEED = float(os.environ.get("MPCPI_PAD_BLEED", "0.20"))
+    # Minimum time between note-ons on the SAME pad, seconds.
+    #
+    # Bleed cancellation and hysteresis both address one pad being fired by
+    # ANOTHER pad's signal. Neither can stop a pad retriggering itself: a hit
+    # decays, the sensor rings, and the pressure crosses the on-threshold a
+    # second time. That is a real crossing, so no threshold arrangement rejects
+    # it - only time does. This is what a drum pad calls retrigger lockout.
+    #
+    # 30ms still allows 33 hits a second on one pad, which is faster than the
+    # grid can be played. MPCPI_PAD_RETRIGGER_MS overrides it.
+    PAD_RETRIGGER_S = float(os.environ.get("MPCPI_PAD_RETRIGGER_MS", "30")) / 1000.0
     # Kept as the name the diagnostic reports against.
     PAD_THRESHOLD = PAD_ON_THRESHOLD
 
@@ -460,10 +580,14 @@ class Mk1:
                 "controller" % (mk1_leds.ALTSETTING, last))
         self.pad_state = [0] * 16
         self.pad_on = [False] * 16
+        self.pad_raw = [0] * 16
+        self.pad_last_on = [0.0] * 16
+        self.pad_suppressed = 0
         self.buttons = 0
         self.encoders = mk1_encoders.EncoderTracker()
         self.frames = {}
         self.leds = mk1_leds.LedBank()
+        self._lamp_line = None
         self.init_panel()
 
     def release(self):
@@ -573,6 +697,50 @@ class Mk1:
         self.leds.backlight(mk1_leds.BACKLIGHT_DEFAULT)
         return self.flush_leds(force=True)
 
+    def show_lamps(self, path=LAMPS):
+        """Mirror the MPC's panel lamps onto the controller.
+
+        Reads the export written by mpcpi-autoplay.lua rather than tracking
+        what we sent: FULL LEVEL and NOTE REPEAT are toggles inside the MPC,
+        and a lamp driven from the hub's own guess drifts the moment the state
+        changes any other way - a project load, the machine's own panel, a
+        reset. A lamp that lies is worse than one that is dark.
+
+        Returns True if anything changed, so the caller can skip the USB write.
+        """
+        try:
+            with open(path, "r") as f:
+                line = f.read()
+        except OSError:
+            return False
+        if line == self._lamp_line:
+            return False
+        self._lamp_line = line
+        state = {}
+        for pair in line.split():
+            name, _, value = pair.partition("=")
+            state[name] = value == "1"
+
+        changed = False
+        for name, led in LAMP_TO_LED.items():
+            want = mk1_leds.BRIGHT if state.get(name) else mk1_leds.OFF
+            if self.leds.get(led) != want:
+                self.leds.set(led, want)
+                changed = True
+
+        # 16 LEVELS wins the Grid lamp when both are on: it is the more
+        # invasive mode, remapping the whole grid to one sound.
+        if state.get(GRID_LAMPS[0]):
+            want = mk1_leds.BRIGHT
+        elif state.get(GRID_LAMPS[1]):
+            want = mk1_leds.DIM
+        else:
+            want = mk1_leds.OFF
+        if self.leds.get("Grid") != want:
+            self.leds.set("Grid", want)
+            changed = True
+        return changed
+
     def flush_leds(self, force=False):
         """Push dirty LED groups. Cheap when nothing changed."""
         return self.leds.flush(
@@ -635,12 +803,36 @@ class Mk1:
 
     def _pads(self, data, router):
         out = []
+        # Take the whole report in first. The bleed correction needs the
+        # NEIGHBOURING channel's value from this same scan, so a pad cannot be
+        # decided until its neighbour has been read.
+        seen = []
         for i in range(1, len(data) - 1, 2):
             hi, lo = data[i], data[i + 1]
             raw = (hi & 0xF0) >> 4
-            pressure = ((hi & 0x0F) << 8) | lo
             if raw > 15:
                 continue
+            self.pad_raw[raw] = ((hi & 0x0F) << 8) | lo
+            seen.append(raw)
+        for raw in seen:
+            # Channel k carries a fraction of channel k+1, wrapping at 15->0.
+            #
+            # Subtract only when this pad's own reading is SMALL relative to its
+            # neighbour's. Unconditional subtraction landed real hits right on
+            # the threshold - a 600 hit beside a ringing 1500 became 300, so it
+            # crossed, fell back under the off-threshold and crossed again, and
+            # the retrigger lockout then ate the genuine notes. The journal was
+            # full of "p1 retrigger suppressed" while the pad felt dead.
+            #
+            # Measured bleed never exceeded 29% of its source, so anything above
+            # half the neighbour's value is this pad being played, not bleed.
+            own = self.pad_raw[raw]
+            neighbour = self.pad_raw[(raw + 1) % 16]
+            pressure = own
+            if neighbour > own * 2:
+                pressure = own - int(neighbour * self.PAD_BLEED)
+            if pressure < 0:
+                pressure = 0
             pad = self._pad_index(raw)
             self.pad_state[pad] = pressure
             # Two thresholds, and a latched per-pad state rather than a
@@ -649,6 +841,12 @@ class Mk1:
             # channel touching it - is a fresh note-on every time it crosses.
             if not self.pad_on[pad] and pressure > self.PAD_ON_THRESHOLD:
                 self.pad_on[pad] = True
+                now = time.monotonic()
+                if (now - self.pad_last_on[pad]) < self.PAD_RETRIGGER_S:
+                    self.pad_suppressed += 1
+                    _trace("pad", "p%d retrigger suppressed" % pad, "dropped")
+                    continue
+                self.pad_last_on[pad] = now
                 # Velocity from the leading edge: the stream is pressure,
                 # not note-on, so the first crossing is the hit.
                 out += router.pad(pad, min(127, pressure >> 5))
@@ -905,17 +1103,18 @@ def main():
         for kind, payload in events:
             if kind == "cmd":
                 _deliver_cmd(sinks, args.fifo, payload)
-            elif kind == "midi":
+            elif kind in ("midi", "midi_up"):
+                down = kind == "midi"
                 if sinks["midi"] is not None:
-                    sinks["midi"].write(encode_midi(payload))
-                    _trace("midi", payload, args.midi)
+                    sinks["midi"].write(encode_midi(payload, down))
+                    _trace(kind, payload, args.midi)
                 else:
                     _trace("midi", payload, "dropped (no MIDI port)")
                 # Same bytes the rig hears: pads with real velocity, panel
                 # keys as notes. A DAW maps them like any pad controller.
                 if sinks["pc"] is not None:
                     try:
-                        sinks["pc"].write(encode_midi(payload))
+                        sinks["pc"].write(encode_midi(payload, down))
                     except OSError:
                         sinks["pc"] = None
             else:
@@ -941,6 +1140,12 @@ def main():
             try:
                 mk1.push_screen(0, args.left, packer)
                 mk1.push_screen(1, args.right, packer)
+                # The MPC's panel lamps ride the same budget as the screens.
+                # Both are cheap when nothing changed - show_lamps compares the
+                # exported line and flush_leds only writes dirty groups - so a
+                # settled instrument costs one file read per frame.
+                if mk1.show_lamps():
+                    mk1.flush_leds()
                 frame_fails = 0
             except _FrameFailed as e:
                 frame_fails += 1
@@ -1055,7 +1260,7 @@ def pad_stats(seconds):
     return 0
 
 
-def encode_midi(target):
+def encode_midi(target, down=True):
     """Turn a routed MIDI target into bytes for the emulator's port."""
     if target.startswith("pad:"):
         _, pad, vel = target.split(":")
@@ -1068,7 +1273,7 @@ def encode_midi(target):
     code = codes.get(name)
     if code is None:
         return b""
-    return bytes([0x90, 52 + code - 1, 100])
+    return bytes([0x90 if down else 0x80, 52 + code - 1, 100 if down else 0])
 
 
 def control_map_keycodes():

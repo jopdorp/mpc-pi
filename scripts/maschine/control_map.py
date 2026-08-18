@@ -114,14 +114,51 @@ BUTTONS_RIGHT_BY_PAGE = {
 # memory most worth preserving. SHIFT reaches the bar-level moves, which
 # is also where the MPC puts them.
 TRANSPORT = {
-    "play":            ("mpc:play", "mpc:play_start"),
+    # SHIFT+PLAY is STOP, not PLAY START. There was no stop anywhere on the
+    # controller - the MK1 has no dedicated stop button, and the MPC's STOP key
+    # was reachable from nothing, so a running sequence could only be stopped
+    # from the emulator itself. PLAY START is not lost: RESTART already sends
+    # it, which is what that button is for.
+    "play":            ("mpc:play", "mpc:stop"),
     "rec":             ("mpc:record", "mpc:over_dub"),
     "erase":           ("mpc:erase", "mpc:undo"),
-    "restart":         ("mpc:play_start", "mpc:go_to"),
+    # LOOP, not "restart": there is no button called restart on an MK1 - it is
+    # not in MK1_BUTTONS - so this entry was unreachable and PLAY START could
+    # not be pressed at all. LOOP is the natural home for "start from the top".
+    "loop":            ("mpc:play_start", "mpc:go_to"),
     "transport_left":  ("mpc:step_left", "mpc:bar_left"),
     "transport_right": ("mpc:step_right", "mpc:bar_right"),
     "grid":            ("mpc:sixteen_levels", "mpc:full_level"),
     "shift":           ("modifier", None),
+}
+
+# Everything else the MK1 has. Twelve buttons that did nothing, and with them
+# the MPC keys that had no way of being pressed - including the CURSOR, without
+# which the machine's own UI cannot be navigated from the controller at all.
+#
+# The intent for some of these was already recorded in mpc-mk1-input.py's
+# BUTTON_TO_KEYCODE (browse->main screen, sampling->sample, note repeat->after)
+# but the hub reads THIS file, so that table was never wired to anything.
+#
+# Same (plain, shifted) shape as TRANSPORT.
+PANEL = {
+    # The cursor. BROWSE </> are the only left/right pair left on the panel,
+    # and shift reaches up/down - the MPC's four arrows on two buttons.
+    "browse_left":  ("mpc:left",       "mpc:up"),
+    "browse_right": ("mpc:right",      "mpc:down"),
+    # BROWSE is a file browser on both machines.
+    "browse":       ("mpc:load",       "mpc:misc"),
+    # SAMPLING is the MPC's sampler, and TRIM is where a sample goes next.
+    "sampling":     ("mpc:sample",     "mpc:trim"),
+    # CONTROL reaches the mixer, and the program it is mixing.
+    "control":      ("mpc:mixer",      "mpc:program"),
+    # STEP opens the MPC's WINDOW - the detail dialog for whatever field the
+    # cursor is on - and shift confirms.
+    "step":         ("mpc:window",     "mpc:enter"),
+    # SNAP is timing: tap the tempo, or reach the sync settings.
+    "snap":         ("mpc:tap_tempo",  "mpc:midi_sync"),
+    # AUTO WRITE is performance state: mute a track, queue the next sequence.
+    "auto_write":   ("mpc:track_mute", "mpc:next_seq"),
 }
 
 # Group A-D are the MPC's pad banks - a direct analogue, same letters.
@@ -149,6 +186,10 @@ PAD_SECTION = {
     "navigate": "daw:page:EDIT",
     "pattern": "mpc:main_screen",
     "scene": "mpc:song",
+    # NOTE REPEAT was unmapped, so the button did nothing and the MPC never
+    # saw its AFTER key. On the 2000XL that key IS note repeat, and it is held
+    # rather than toggled - which only works now that the hub sends a release.
+    "note_repeat": "mpc:after",
 }
 
 # The MPC prints a shift function beside every pad. Honouring them costs
