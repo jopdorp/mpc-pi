@@ -51,12 +51,15 @@ the desk from a button beside the loop tracks.
 | gesture | action | status |
 |---|---|---|
 | `Dn` | focus strip *n* | built |
-| `REC` then `Dn` | punch in / out on strip *n* | built (panel side) |
+| `REC` then `Dn` | punch in / out on strip *n* | built |
 | `SHIFT` + `MUTE` + `Dn` | mute strip *n* | built |
 | `SOLO` + `Dn` | solo strip *n* | built |
 
-"Built (panel side)" means the panel emits the command; `daw-ctl` does not yet
-act on `punch_in` / `punch_out` / `focus` / `arm`.
+`daw-ctl` now acts on all four of `focus` / `arm` / `punch_in` / `punch_out`;
+the punches are quantised to the MPC's bar grid by its loop engine. What is
+still missing is downstream of the punch: `finalize` and `repeat` are emitted
+for the Lua side, which owns the playlist, and nothing consumes them yet, so a
+take is captured but does not yet become a region that loops.
 
 D1–D4 sit under the *left* screen, which shows the MPC, so four of the
 seven have no on-screen label. Their order is the mixer's own, and the same
@@ -81,6 +84,20 @@ transport action.
 
 Quantising the punch to the bar is what makes this usable at a keyboard's
 distance, and it is why the countdown gets the largest glyphs on screen.
+
+Which Ardour object carries which half is not arbitrary. `REC` engages the
+**session** record-enable, which is global; `Dn` punches the **strip's**
+rec-enable, which is per strip and therefore the only thing that can carry an
+independent punch. `phase3-poc.lua` proved that shape against real Ardour:
+keep the session record-engaged and rolling, and punch lanes with their
+rec-enable alone. The session record-enable is a *toggle* with no setter
+(`/rec_enable_toggle`, and Lua's `maybe_enable_record`), so `daw-ctl` tracks
+what it sent — sending it blind would disengage recording on every second
+press of `REC`.
+
+The first take fixes the loop's length: punch out three bars after punching
+in and it is a three-bar loop, whatever the lane was created with. A later
+take on the same lane is an overdub layer over that length, not a new loop.
 
 ## Pages
 

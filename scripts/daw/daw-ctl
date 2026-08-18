@@ -67,6 +67,20 @@ class Daw:
         self.gains = {n: 0.0 for n in self.strips}
         self.mutes = {n: False for n in self.strips}
         self.solos = {n: False for n in self.strips}
+        # Loop recording is punch in / punch out against a transport that is
+        # already running - the MPC owns the clock, so REC starts nothing. It
+        # decides what D1-D7 mean, and the punches land on bar lines. See
+        # docs/daw-interaction.md, "Recording a loop".
+        #
+        # So the state is "is the desk arming" plus "which strips are
+        # rolling", the same shape maschine-hub keeps, not a mode.
+        self.focus = self.strips[0]
+        self.armed = False
+        self.rolling = set()
+        # What we believe Ardour's global record-enable is. See
+        # set_session_record: the OSC path is a toggle, and we cannot read it
+        # back, so a belief is the best that exists.
+        self.session_record = False
         self.message = ""
         self.playhead = 0
         self.xruns = 0
@@ -85,14 +99,15 @@ class Daw:
         """Turn one engine action string into Ardour calls."""
         parts = action.split()
         verb = parts[0]
+        punch = ardour_bindings.RECORD["strip_punch"]
         if verb in ("arm", "record-start") and len(parts) > 1:
             lane = parts[1]
             if lane in self.strips:
-                self.osc.send("/strip/recenable", self.ssid(lane),
+                self.osc.send(punch, self.ssid(lane),
                               1 if verb == "record-start" else 0)
         elif verb == "disarm" and len(parts) > 1:
             if parts[1] in self.strips:
-                self.osc.send("/strip/recenable", self.ssid(parts[1]), 0)
+                self.osc.send(punch, self.ssid(parts[1]), 0)
         # "finalize" and "repeat" are region work: they go to the Lua
         # side, which owns the playlist. Queued here, drained by the
         # session governor.
@@ -135,8 +150,26 @@ class Daw:
             page, target, delta = parts[1], parts[2], int(parts[3])
             return self.knob(page, target, delta)
 
+        # LOOP RECORDING. maschine-hub has emitted these four verbs since the
+        # button row was built, and nothing here understood a single one of
+        # them: focus/arm/punch_in/punch_out all fell through to the loop
+        # engine, which answered "unknown-command" to a string nobody read.
+        # The panel's own self-test was green throughout - it proves the hub
+        # SENDS them - so pressing REC and a strip button moved the screen
+        # and recorded nothing. Same failure the knobs had, same lesson: two
+        # green tests either side of a gap do not test the gap.
+        if verb == "focus" and len(parts) > 1:
+            return self.set_focus(parts[1])
+        if verb == "arm" and len(parts) > 1:
+            # "0"/"1" from the hub, which toggles its own copy of the state.
+            return self.set_armed(parts[1] not in ("0", "off", "false"))
+        if verb in ("punch_in", "punch_out") and len(parts) > 1:
+            return self.punch(verb == "punch_in", parts[1])
+
         # anything else is loop-engine vocabulary
-        actions = self.engine.command(line, self.playhead)
+        return self.apply(self.engine.command(line, self.playhead))
+
+    def apply(self, actions):
         out = []
         for a in actions:
             # An engine refusal is information the player needs. "rec"
@@ -148,6 +181,90 @@ class Daw:
                 out.append(a)
             else:
                 out.append(self.perform(a))
+        return out
+
+    # --- loop recording ---
+
+    def set_focus(self, name):
+        """One strip is focused; the page-level verbs act on it."""
+        if name not in self.strips:
+            self.message = "NO STRIP %s" % name
+            return ["error no-strip %s" % name]
+        self.focus = name
+        # Ardour has to agree about what is focused: /select/* - which is what
+        # the FX page edits - addresses "the selected strip". If focus were
+        # only a panel idea, the FX knobs would edit whichever strip was last
+        # clicked in a GUI that, on this appliance, nobody is looking at.
+        #
+        # No deselect for the strip we came from: selection is single-valued,
+        # so the new one replaces it, and an explicit 0 would just leave
+        # /select/* addressing nothing.
+        self.osc.send(ardour_bindings.RECORD["focus"], self.ssid(name), 1)
+        self.message = "FOCUS %s" % name
+        return ["focus %s" % name]
+
+    def set_session_record(self, on):
+        """Ardour's global record-enable, which is a TOGGLE, not a setter.
+
+        /rec_enable_toggle is the whole API - the same one-way door as Lua's
+        maybe_enable_record, which phase3-poc.lua found turns recording back
+        OFF when called a second time. osc.Client is send-only, so the real
+        state cannot be read back; we track what we sent and only send when
+        it differs. A blind send per arm would disengage recording on every
+        second press of REC, which on stage looks exactly like a dead take.
+
+        The assumption this leaves is one line long and worth stating: the
+        session starts with record disengaged, which is how session-template
+        creates it and how Ardour opens one.
+        """
+        if on == self.session_record:
+            return
+        self.session_record = on
+        self.osc.send(ardour_bindings.RECORD["session_arm"])
+
+    def set_armed(self, on):
+        if on == self.armed:
+            return []          # idempotent, because the toggle below is not
+        self.armed = on
+        out = []
+        if not on:
+            # "REC again disarms and clears any rolling state." The hub drops
+            # its own rolling set on that same press, so if we did not close
+            # these here nothing ever would: they would keep writing to disk
+            # with no button left that means stop. Still bar-quantised - one
+            # bar late is a usable take, an off-grid one is not, and a panic
+            # that ruins the take is not much of a rescue.
+            for name in sorted(self.rolling, key=self.strips.index):
+                out.extend(self.apply(self.engine.command(
+                    "punch_out %s" % name, self.playhead)))
+            self.rolling.clear()
+        self.set_session_record(on)
+        self.message = "ARMED" if on else "DISARMED"
+        return out
+
+    def punch(self, into, name):
+        if name not in self.engine.lanes:
+            # D1-D7 covers the sends and, on some desks, the master: strips,
+            # not lanes. Saying so beats a button that reads as broken.
+            self.message = "NO LANE %s" % name
+            return ["error no-lane %s" % name]
+        if not self.armed:
+            # The hub only punches while armed, but the FIFO is a public
+            # protocol that anything can write to. Recording without REC lit
+            # is the one surprise a looper must never spring.
+            self.message = "NOT ARMED"
+            return ["error not-armed %s" % name]
+        # Punch-in IS the engine's "rec": arm now, start on the next bar. It
+        # is reused rather than given a synonym so there is one quantised
+        # path - and one set of tests - behind both the pads and the buttons.
+        out = self.apply(self.engine.command(
+            ("rec %s" if into else "punch_out %s") % name, self.playhead))
+        if not any(a.startswith("error") for a in out):
+            if into:
+                self.rolling.add(name)
+            else:
+                self.rolling.discard(name)
+            self.message = "PUNCH %s %s" % ("IN" if into else "OUT", name)
         return out
 
     # --- encoders ---
@@ -187,10 +304,13 @@ class Daw:
             return ["gain %s %.1f" % (target, db)]
         if page == "FX":
             # Parameter index comes from the focused plugin; the panel
-            # sends the column and daw-ctl holds the focus.
+            # sends the column and daw-ctl holds the focus. That focus was
+            # hardcoded to strips[0] while nothing set it - so every FX knob
+            # edited LOOP1 whatever the player had selected. It is a real
+            # value now that "focus" is a command (see set_focus).
             self.message = "FX %s %+d" % (target, delta)
             self.osc.send("/strip/plugin/parameter",
-                          self.ssid(self.strips[0]), 1, int(target) + 1,
+                          self.ssid(self.focus), 1, int(target) + 1,
                           delta * self.KNOB_FX_STEP)
             return ["fx %s %+d" % (target, delta)]
         if page == "SONG":
@@ -230,6 +350,19 @@ class Daw:
         span = self.GAIN_MAX_DB - self.GAIN_MIN_DB
         return max(0.0, min(1.0, (db - self.GAIN_MIN_DB) / span))
 
+    # The panel's loop vocabulary is not the engine's. daw_ui draws "rec",
+    # "dub", "play" and "armed"; the engine thinks in "recording" and
+    # "looping". The state went out raw, so a recording lane arrived at the
+    # screen as "recording", matched none of the drawing cases and rendered
+    # as an ordinary idle column - at the one moment the screen exists for.
+    # Translating here rather than in daw_ui keeps the engine's words out of
+    # the renderer, which has no business knowing them.
+    LANE_UI_STATE = {"armed": "armed", "recording": "rec", "looping": "play"}
+
+    def lane_ui(self, lane):
+        state = self.LANE_UI_STATE.get(lane.state, lane.state)
+        return "dub" if (state == "rec" and lane.layer) else state
+
     def ui_state(self):
         lanes = []
         for name in self.strips[:8]:
@@ -239,17 +372,34 @@ class Daw:
             spb = self.transport.samples_per_bar() or 1
             played = max(0, self.playhead - (lane.start_sample or 0))
             bar = (played // spb) % max(1, lane.bars)
+            # Bars remaining is the number the design gives the biggest
+            # glyphs on the screen, so it has to be the number the player is
+            # actually waiting on: bars until the punch lands, whichever
+            # punch that is. Only a lane that is looping is counting through
+            # its own length.
+            if lane.state == "armed":
+                remaining = -(-(lane.start_sample - self.playhead) // spb)
+            elif lane.stop_at is not None:
+                remaining = -(-(lane.stop_at - self.playhead) // spb)
+            else:
+                remaining = lane.bars - bar
             lanes.append({
-                "name": name, "state": lane.state, "bars": lane.bars,
+                "name": name, "state": self.lane_ui(lane), "bars": lane.bars,
                 "bar": bar, "phase": (played % spb) / spb,
-                "bars_remaining": lane.bars - bar,
+                "bars_remaining": max(0, int(remaining)),
                 "level": 0.0,
             })
         return {
             "page": self.page, "mode": self.mode,
             "playing": self.transport.playing,
             "recording": sum(1 for l in self.engine.lanes.values()
-                             if l.state in ("recording", "rec", "dub")),
+                             if l.state == "recording"),
+            # What the loop-record panel needs and could not see: which strip
+            # the verbs act on, whether REC is lit, and which strips are
+            # writing. Names, not indices - the same words the commands use,
+            # so a rename cannot make these agree with the wrong column.
+            "focus": self.focus, "armed": self.armed,
+            "rolling": [n for n in self.strips if n in self.rolling],
             "xruns": self.xruns, "message": self.message,
             "lanes": lanes,
             "mixer": [{"name": n,
@@ -323,6 +473,106 @@ def self_test():
     acts = d.tick()
     assert any(a.startswith("record-start") for a in acts), acts
     assert ("/strip/recenable", (d.ssid(LANES[0]), 1)) in o.msgs, o.msgs
+
+    # --- loop recording ----------------------------------------------
+    #
+    # The four verbs maschine-hub emits, asserted against STRIPS/LANES
+    # rather than literal names: the hub's own test proves it sends
+    # "focus LOOP2", and it stayed green while nothing here acted on it.
+    #
+    # LANES[-1] rather than LANES[0], which the block above left recording.
+    lane = LANES[-1]
+    other = [n for n in STRIPS if n not in LANES]
+
+    d.command("focus %s" % STRIPS[1])
+    assert d.focus == STRIPS[1], d.focus
+    assert (ardour_bindings.RECORD["focus"], (d.ssid(STRIPS[1]), 1)) in o.msgs
+    assert d.command("focus NOPE")[0].startswith("error no-strip")
+    assert d.focus == STRIPS[1], "a bad focus must not move the good one"
+
+    # ARM is the desk's global record-enable, and the OSC path is a toggle:
+    # sending it twice for one state would disengage recording.
+    d.command("arm 1")
+    assert d.armed and d.session_record
+    assert (ardour_bindings.RECORD["session_arm"], ()) in o.msgs
+    mark = len(o.msgs)
+    d.command("arm 1")
+    assert o.msgs[mark:] == [], "re-arming must not flip the toggle back off"
+    # Same guard one level down, because the outer one hides it: this is the
+    # call that must never repeat itself, whoever ends up making it.
+    d.set_session_record(d.session_record)
+    assert o.msgs[mark:] == [], "the record toggle must only be sent on change"
+
+    # Punching a strip that is not a loop lane is refused rather than silent.
+    if other:
+        out = d.command("punch_in %s" % other[0])
+        assert out[0].startswith("error no-lane"), out
+
+    # PUNCH IN lands on the next bar line, not now.
+    spb = d.transport.samples_per_bar()
+    d.playhead = spb // 2                       # half a bar in
+    mark = len(o.msgs)
+    d.command("punch_in %s" % lane)
+    assert lane in d.rolling
+    assert (ardour_bindings.RECORD["strip_punch"], (d.ssid(lane), 1)) \
+        not in o.msgs[mark:], "punch-in must wait for the bar line"
+    assert d.tick() == [], "and must not start between bars"
+    d.playhead = spb
+    assert any(a.startswith("record-start %s" % lane) for a in d.tick())
+    assert (ardour_bindings.RECORD["strip_punch"], (d.ssid(lane), 1)) in o.msgs
+
+    # PUNCH OUT closes on a bar line too, and the take's length is what was
+    # played: punched 10 samples into the fourth bar, closed on the fifth.
+    d.playhead = 3 * spb + 10
+    mark = len(o.msgs)
+    d.command("punch_out %s" % lane)
+    assert lane not in d.rolling
+    assert (ardour_bindings.RECORD["strip_punch"], (d.ssid(lane), 0)) \
+        not in o.msgs[mark:], "punch-out must not close where it was asked"
+    # ON a bar line, which is the actual claim - "not immediately" is also
+    # true of any other wrong answer.
+    stop_at = d.engine.lanes[lane].stop_at
+    assert stop_at % spb == 0, stop_at
+    # ...and while it waits, the screen counts the bar down.
+    ln = [l for l in d.ui_state()["lanes"] if l["name"] == lane][0]
+    assert ln["state"] == "rec" and ln["bars_remaining"] == 1, ln
+    d.playhead = 4 * spb
+    acts = d.tick()
+    assert any(a.startswith("finalize %s" % lane) for a in acts), acts
+    assert (ardour_bindings.RECORD["strip_punch"], (d.ssid(lane), 0)) in o.msgs
+    rec = d.engine.lanes[lane]
+    assert rec.state == "looping" and rec.bars == 3, rec.bars
+    assert rec.length_samples == 3 * spb
+
+    # DISARM closes anything still rolling. The hub forgets on the same
+    # press, so if daw-ctl did not do this the strip would record forever.
+    d.playhead = 5 * spb
+    d.command("punch_in %s" % lane)
+    d.playhead = 6 * spb
+    d.tick()
+    assert d.engine.lanes[lane].state == "recording" and d.rolling
+    d.playhead = 6 * spb + 10
+    mark = len(o.msgs)
+    d.command("arm 0")
+    assert not d.armed and not d.rolling and not d.session_record
+    assert (ardour_bindings.RECORD["session_arm"], ()) in o.msgs[mark:]
+    d.playhead = 7 * spb
+    d.tick()
+    assert d.engine.lanes[lane].state == "looping", "disarm closes the take"
+    assert (ardour_bindings.RECORD["strip_punch"], (d.ssid(lane), 0)) \
+        in o.msgs[mark:], "and must rec-disable the strip in Ardour"
+
+    # And once disarmed, the strip buttons cannot record by accident.
+    assert d.command("punch_in %s" % lane)[0].startswith("error not-armed")
+
+    # The panel gets the loop-record state, in the words daw_ui draws with.
+    st = d.ui_state()
+    assert st["focus"] == d.focus and st["armed"] is False
+    assert st["rolling"] == []
+    states = {l["name"]: l["state"] for l in st["lanes"]}
+    assert states[lane] == "play", states
+    assert states[LANES[0]] == "rec", states   # still rolling from above
+    assert set(states.values()) <= {"armed", "rec", "dub", "play"}, states
 
     # the UI state is renderable by the panel code
     st = d.ui_state()

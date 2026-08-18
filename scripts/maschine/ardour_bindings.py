@@ -140,6 +140,38 @@ BUTTONS = {
     ],
 }
 
+# --- loop recording ---------------------------------------------------
+#
+# REC arms the DESK; D1-D7 punch a STRIP. Those are two different Ardour
+# objects, and which one carries which half is not a taste question:
+#
+#   session_arm   GLOBAL, and a TOGGLE with no setter - /rec_enable_toggle
+#                 is the entire API, the same one-way door as Lua's
+#                 maybe_enable_record, which phase3-poc.lua found turns
+#                 recording back OFF on a second call. daw-ctl therefore
+#                 tracks what it sent (Daw.set_session_record).
+#   strip_punch   PER STRIP, and the only per-strip record control there
+#                 is. Several lanes punch in and out independently, so the
+#                 punch cannot live on a global - it has to be this.
+#
+# phase3-poc.lua proved that shape end to end against real Ardour: keep the
+# session record-engaged and rolling, and punch lanes with their rec-enable
+# alone. Binding the punch to the global would record every armed lane at
+# once, on whichever bar the first one hit.
+#
+# focus is here rather than being purely a panel idea because /select/*
+# addresses "the selected strip" - which is what the FX page edits - so
+# Ardour has to agree with the panel about what is focused.
+# Bare paths, not the {ssid} templates the tables above use: daw-ctl SENDS
+# these, so the value has to be the thing that goes on the wire. Arguments:
+# session_arm takes none, strip_punch takes (ssid, 0|1), focus (ssid, 1).
+RECORD = {
+    "session_arm": "/rec_enable_toggle",
+    "strip_punch": "/strip/recenable",
+    "focus": "/strip/select",
+}
+
+
 # --- pads -------------------------------------------------------------
 
 PADS = {
@@ -225,10 +257,18 @@ def self_test():
     for kind, call in SHIFT_PAD_BINDINGS.values():
         if kind == "osc":
             add(call)
+    # RECORD is checked too. It is the newest table and the one whose paths
+    # are hardest to eyeball - a global toggle and a select - so it is
+    # exactly the one that must not be exempt from "verified against the
+    # binary this appliance ships".
+    for call in RECORD.values():
+        add(call)
     known = {"/strip/gain", "/strip/mute", "/strip/solo", "/strip/recenable",
              "/strip/send_gain", "/strip/plugin/parameter",
              "/strip/plugin/activate", "/strip/plugin/deactivate",
-             "/locate", "/access_action"}
+             "/locate", "/access_action",
+             # strings /usr/lib/ardour9/surfaces/libardour_osc.so, 2026-08:
+             "/rec_enable_toggle", "/strip/select"}
     unknown = paths - known
     assert not unknown, "unverified OSC paths: %s" % sorted(unknown)
     print("ardour-bindings self-test PASS: %d pages, %d OSC paths verified"
