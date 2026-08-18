@@ -396,3 +396,40 @@ quantum 64 / 44100 a period is 1451us. Ardour with no plugins measured 231us
 pw-top reads Ardour at 595us BUSY, B/Q 0.41. 16 + 25 = 41.
 
 Codec xruns over 40s with this desk running: **0**.
+
+### Round two: pricing the replacements
+
+Same harness, empty manifest, COPIES 8 instead of 4.
+
+| candidate                  | each  | replaces               | was  |
+|----------------------------|-------|------------------------|------|
+| ardour a-eq                | 0.33 / 0.65 | lsp para_equalizer_x16 | 1.46 |
+| zamaudio ZaMultiCompX2     | 0.65  | lsp mb_compressor      | 5.04 |
+| **dragonfly ROOM**         | 0.15  | **dragonfly HALL**     | 2.75 |
+| ardour a-reverb            | 0.15  |                        |      |
+| zamaudio ZamVerb           | 0.29  |                        |      |
+| guitarix gx_mbcompressor   | 3.65  | (no better)            |      |
+| lsp mb_dyna_processor      | 4.77  | (no better)            |      |
+
+The reverb result is the one worth knowing. The plugin costing 2.75% is
+Dragonfly HALL; Dragonfly ROOM is the same developer and the same family at
+0.15, so this is not the usual trade of character for cycles.
+
+READ THE SMALL NUMBERS AS AN ORDERING, NOT AS MAGNITUDES. a-eq measured 0.33 in
+the first run and 0.65 in the second, gx_reverb_stereo read -0.71, and a
+negative cost is not a thing. The harness accumulates plugins and diffs CPU
+time, so drift lands in whatever is measured next. Anything under about 1% is
+"cheap"; the ordering holds, the digits do not.
+
+Which is why the swap was judged end to end instead. Same desk, same quantum,
+plugins swapped:
+
+    before   595us BUSY   B/Q 0.41   xruns 0 / 40s
+    after    465us BUSY   B/Q 0.32   xruns 0 / 40s
+
+130us, a 22% cut in Ardour's per-period work. The bench predicted about 216us,
+so it over-promised by a third - another reason to trust the graph over the
+harness.
+
+What is left is mostly gx_amp_stereo at 2.29 x2, and that one is the guitar
+sound rather than a tax on it.

@@ -5,7 +5,7 @@
       "kind": "eq",
       "bypass": true,
       "why": "corrective only",
-      "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+      "uri": "urn:ardour:a-eq"
     }
   ],
   "LOOP2": [
@@ -34,7 +34,7 @@
       "name": "EQ",
       "kind": "eq",
       "why": "shapes the finished tone, not the raw pickup",
-      "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+      "uri": "urn:ardour:a-eq"
     },
     {
       "name": "COMP",
@@ -90,7 +90,7 @@
       "name": "EQ",
       "kind": "eq",
       "why": "shapes the finished tone, not the raw pickup",
-      "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+      "uri": "urn:ardour:a-eq"
     },
     {
       "name": "COMP",
@@ -124,8 +124,8 @@
     {
       "name": "EQ",
       "kind": "eq",
-      "why": "hi-pass out the room rumble",
-      "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+      "why": "pull down the room rumble - a-EQ's low band is a shelf, not a true highpass",
+      "uri": "urn:ardour:a-eq"
     },
     {
       "name": "COMP",
@@ -138,15 +138,15 @@
       "kind": "eq",
       "bypass": true,
       "why": "a narrow band on the parametric does the job",
-      "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+      "uri": "urn:ardour:a-eq"
     }
   ],
   "LOOP5": [
     {
       "name": "EQ",
       "kind": "eq",
-      "why": "hi-pass out the room rumble",
-      "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+      "why": "pull down the room rumble - a-EQ's low band is a shelf, not a true highpass",
+      "uri": "urn:ardour:a-eq"
     },
     {
       "name": "COMP",
@@ -159,7 +159,7 @@
       "kind": "eq",
       "bypass": true,
       "why": "a narrow band on the parametric does the job",
-      "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
+      "uri": "urn:ardour:a-eq"
     }
   ],
   "REVERB": [
@@ -167,7 +167,7 @@
       "name": "VERB",
       "kind": "reverb",
       "why": "Dragonfly hall",
-      "uri": "https://github.com/michaelwillis/dragonfly-reverb"
+      "uri": "urn:dragonfly:room"
     }
   ],
   "DELAY": [
@@ -184,7 +184,7 @@
       "kind": "multiband",
       "bypass": true,
       "why": "glue; off by default because it is easy to overdo",
-      "uri": "http://lsp-plug.in/plugins/lv2/mb_compressor_stereo"
+      "uri": "urn:zamaudio:ZaMultiCompX2"
     },
     {
       "name": "LIMIT",
