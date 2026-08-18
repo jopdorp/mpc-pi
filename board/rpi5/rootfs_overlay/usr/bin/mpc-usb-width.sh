@@ -12,9 +12,19 @@
 # that, so the fastest path is to let whoever is at the host change one
 # variable and look, rather than describe the symptom over a wire.
 #
-# After running this, REPLUG THE CABLE. Hosts cache descriptors per
-# VID/PID, and this gadget's ids never change, so a host that already
-# enumerated an older layout may not re-read the new one on its own.
+# DO NOT REPLUG THE CABLE TO APPLY THIS. Two reasons:
+#
+#   1. It is unnecessary. Unbinding and rebinding the UDC is a full USB
+#      disconnect/reconnect as far as the host is concerned - measured, the
+#      device comes back with a NEW USB address every time (21 -> 22 across
+#      one rebind). The host re-reads the descriptors on its own.
+#   2. It power-cycles the board. The USB-C port is the Pi 5's power input,
+#      so pulling it reboots the appliance - and a reboot resets the gadget
+#      to the configured default width, silently undoing whatever this
+#      script was asked to set.
+#
+# An earlier version of this file told the user to replug, which was wrong
+# on both counts.
 set -eu
 N="${1:?usage: $0 <channels-up>   e.g. 2 for a stereo baseline, 26 for the full map}"
 
@@ -28,4 +38,6 @@ MPC_USB_CHANNELS_UP="$N" /usr/bin/mpc-usb-gadget.sh stop >/dev/null 2>&1 || true
 MPC_USB_CHANNELS_UP="$N" /usr/bin/mpc-usb-gadget.sh start
 systemctl restart mpcpi-usb-route >/dev/null 2>&1 || true
 echo
-echo "now REPLUG the USB-C cable, then on the HOST run:  arecord -l"
+echo "the host has already re-enumerated - no replug needed (and replugging"
+echo "would reboot the Pi, since USB-C is its power input)."
+echo "on the HOST now run:  arecord -l"
