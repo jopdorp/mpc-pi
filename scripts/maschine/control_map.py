@@ -133,6 +133,12 @@ BUTTONS_RIGHT_BY_PAGE = {
     # ride the MPC's printed shift-pad functions, which are exactly the
     # editing verbs - the silkscreen stays true.
     "EDIT": ("SPLIT", "PREV", "NEXT", "BACK"),
+    # FILES is an overlay rather than a page in the group row, and it needs
+    # exactly one label: the way out, drawn over the button that does it.
+    # The other three keep whatever the page underneath had - they are the
+    # MPC's soft keys on the MPC surface and the strip row on the DAW's, and
+    # neither stops working because a listing is up.
+    "FILES": ("", "", "", "CLOSE"),
 }
 
 # Transport maps one-for-one onto the MPC's, because that is the muscle
@@ -191,6 +197,48 @@ ALWAYS = {
 
 SURFACE_TOGGLE = "display8"
 SURFACES = ("MPC", "DAW")
+
+
+# --- the file browser ------------------------------------------------
+#
+# A floppy has to be chosen from somewhere. The appliance has no keyboard, the
+# emulator is started with -flop and never asked again, and the MPC's own LOAD
+# screen can only see what is already in the drive - so picking an image is a
+# job for this panel or for nobody.
+#
+# THE SECOND AND LAST SHIFTED BUTTON, and shifted for the same reason SHIFT+pad
+# is: there is no key to spare. Every bare button already carries an MPC key
+# (see MPC_BUTTONS), and "list the host's filesystem" is not an MPC function at
+# all - the machine has no such key - so it cannot take a bare button without
+# making a real key unreachable.
+#
+# NAVIGATE is the button because its bare press is MAIN SCREEN, "show me where
+# I am"; shifted it is "show me where the disks are". The MPC never sees the
+# MAIN SCREEN key when the browser opens - only the SHIFT that was already
+# held, which alone does nothing.
+FILES_BUTTON = "navigate"
+
+# What the four keys mean WHILE the browser is open. They are the MPC's own
+# cursor left/right and ENTER when it is not, which is the same gesture on the
+# same buttons: step through a list, go in, choose. Nothing has to be learnt
+# that the silkscreen does not already say.
+#
+# browse_right is "into" and not "enter" on purpose. It descends into a
+# directory and refuses to load a disk, because a right-arrow that swaps the
+# media under a running instrument is a foot-gun; loading is ENTER's job, and
+# ENTER is the key the MPC prints ENTER on.
+FILES_BUTTONS = {
+    "browse_left":  "files up",
+    "browse_right": "files into",
+    "step":         "files enter",
+}
+
+# Closing is display8 - the same button that toggles the surface. It is the
+# panel's one universal "back out of what is on the right-hand screen", and the
+# browser is the only thing that can sit on top of a page, so the first press
+# closes it and the next toggles the surface as always. SHIFT+NAVIGATE closes
+# it too: the way in is also a way out.
+FILES_CLOSE = SURFACE_TOGGLE
 
 
 # ONE FUNCTION PER BUTTON. No shift layer.
@@ -365,16 +413,22 @@ MASTER_KNOBS = {
 def describe():
     """Human-readable dump, used by the docs and by bring-up."""
     out = []
-    out.append("PAD MODES (hold the button; + Button 1 = PIN to latch):")
+    # MODES retarget the DISPLAY BUTTONS, never the pads, and there is no
+    # PIN latch any more - both are load-bearing enough that the heading
+    # said the opposite for a while and nobody noticed, because this
+    # function crashed before reaching it.
+    out.append("MODES (hold the button; the pads stay the MPC's):")
     for k, v in MODES.items():
         out.append("  %-5s %-9s %s" % (k, v["button"] or "(resting)",
                                        v["help"]))
-    out.append("TRANSPORT:")
-    for name, (plain, shifted) in sorted(TRANSPORT.items()):
-        out.append("  %-16s %-20s shift: %s" % (name, plain, shifted or "-"))
-    out.append("GROUPS:")
-    for name, target in sorted(GROUPS.items()):
-        out.append("  %-10s %s" % (name, target))
+    # TRANSPORT and GROUPS were separate tables once. They were folded into
+    # the flat per-surface maps when the shift layer was removed, and this
+    # dump was never updated - so it raised NameError on the first line of
+    # the transport section and took the whole --self-test down with it.
+    # Read the maps that actually exist instead of tables that do not.
+    out.append("PANEL-WIDE (both surfaces):")
+    for name, target in sorted(ALWAYS.items()):
+        out.append("  %-16s %s" % (name, target))
     out.append("KNOBS 1-4 (MPC side): " + ", ".join(KNOBS_LEFT))
     out.append("KNOBS 5-8 (DAW side): " + ", ".join(
         "%s=%s" % (p, v) for p, v in KNOBS_RIGHT_BY_PAGE.items()))
