@@ -1,0 +1,68 @@
+From: mpc-pi
+Subject: [PATCH] mpc2000xl: the panel injection queue was too small, and dropped in silence
+
+0047 made a key event atomic so it could not be split. It could still be thrown
+away whole, and it was.
+
+The counter 0047 shipped answered this in one line:
+
+    MPC fast-pad input queue overflow; dropping byte 39 (128 dropped)
+
+Byte 0x39 is the '9' of "PAD CPU V1.00 Feb.15,1999" - the power-on banner. The
+queue is 64 bytes and cannot hold the boot handshake and that 26-byte banner
+together, so its tail was dropped on every start.
+
+That is the visible half. panel_hle_emit() drops a whole MESSAGE when the queue
+is full and does it SILENTLY, so a key pressed during any burst simply never
+happened. That is why RESTART still misbehaved after the framing fix: the event
+was not being corrupted any more, it was being discarded - which looks exactly
+like a controller that never sent it, and is where this search wasted its time.
+
+So: 512 bytes, with 16-bit indices because the old ones were uint8_t and would
+wrap, and a warning on the message-drop path so it can never be silent again.
+The queue drains a byte every 4us, so 512 is 2ms of backlog at worst and costs
+half a kilobyte.
+
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -239,8 +239,22 @@
+ 	emu_timer *m_fast_pad_timer;
+ 	bool m_fast_pad_enabled;
+ 	uint8_t m_midi_status, m_midi_data_pos, m_midi_note;
+-	std::array<uint8_t, 64> m_fast_pad_queue;
+-	uint8_t m_fast_pad_head, m_fast_pad_count;
++	// 512, not 64 - and the indices are 16-bit to match, because at 64 they
++	// were uint8_t and would wrap.
++	//
++	// 64 bytes cannot hold the boot handshake and the 26-byte power-on banner
++	// together, so the banner's tail was dropped on every single start: the
++	// counter read 128 drops, all of byte 0x39, which is the '9' of
++	// "Feb.15,1999". That is only the visible half. panel_hle_emit() drops a
++	// whole MESSAGE when the queue is full and does so SILENTLY, so a key press
++	// arriving during any burst simply never happened - which is why RESTART
++	// still misbehaved after the framing fix: the event was not corrupted, it
++	// was discarded.
++	//
++	// The queue drains at a byte every 4us, so 512 bytes is 2ms of backlog at
++	// worst and costs half a kilobyte.
++	std::array<uint8_t, 512> m_fast_pad_queue;
++	uint16_t m_fast_pad_head, m_fast_pad_count;
+ };
+ 
+ void mpc2000_state::machine_start()
+@@ -856,7 +870,14 @@
+ 	// otherwise become a scheduler storm.
+ 	if ((m_fast_pad_count + 2) > m_fast_pad_queue.size())
+ 	{
++		// Say so. This dropped whole key presses in silence, which is
++		// indistinguishable from a controller that never sent them - and that
++		// is exactly where the search went first.
+ 		m_panel_hle_drops++;
++		if (!(m_panel_hle_drops % 16))
++			osd_printf_warning(
++					"MPC panel queue full; dropped message %02x %02x "
++					"(%u dropped)\n", status, data, m_panel_hle_drops);
+ 		return;
+ 	}
+ 	enqueue_fast_pad_byte(status);
