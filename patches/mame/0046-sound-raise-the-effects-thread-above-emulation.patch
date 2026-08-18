@@ -1,0 +1,142 @@
+From: mpc-pi
+Subject: [PATCH] sound: raise the effects thread above the emulation thread
+
+The effects thread is the audio producer. run_effects() is what calls
+osd().sound_stream_sink_update(), so every sample the host ever hears passes
+through this thread and no other. It is created as a plain std::thread, which
+inherits the creating thread's scheduling policy and priority.
+
+That is fine when the process is SCHED_OTHER. It is fatal when the process is
+realtime and pinned. This appliance launches MAME as
+
+    taskset --cpu-list 3 nice -n .. chrt --rr 20 env .. mame ..
+
+so the emulation thread AND the effects thread are both SCHED_RR 20 on one
+core. Under SCHED_RR a thread that wakes at EQUAL priority does not preempt the
+running one - it waits for that thread to block or to exhaust its timeslice, and
+/proc/sys/kernel/sched_rr_timeslice_ms is 100 on this kernel. The emulation
+thread is runnable almost continuously, so the effects thread ran only when
+emulation happened to block. /proc/<tid>/schedstat over 10 seconds:
+
+    emulation thread   ran 1127.5 ms, waited on the runqueue    0.3 ms
+    effects thread     ran   12.2 ms, waited on the runqueue 1013.3 ms
+
+The result is not jitter, it is loss. Each run of run_effects() hands over only
+the samples of the current round; rounds that the thread is not scheduled for
+are never handed over at all. Measured as a fraction of realtime, the producer
+delivered 9.7%. The OSD ring padded the shortfall by repeating the last sample
+and the PipeWire module's prebuffer path memset whole buffers, so a capture of
+what reached the DAC was 84% digital silence - while MAME's own -wavwrite, which
+streams_update() writes on the EMULATION thread upstream of all this, was
+perfectly clean. That divergence is what made the fault so hard to place.
+
+MAME_SOUND_EFFECTS_PRIORITY sets the effects thread's priority. On a realtime
+policy it stays on that policy and takes the given priority; the default is the
+creating thread's priority plus 40, clamped to the policy maximum, which is
+enough to preempt and nowhere near the graph's own threads. Absent or set to 0
+the thread is left exactly as before, so behaviour off this appliance is
+unchanged.
+
+Measured on the Raspberry Pi 5 appliance at a 64-frame quantum, audio produced
+per second of wall clock as a fraction of realtime:
+
+    effects thread at emulation priority     9.7%
+    effects thread raised                   99.8%, underruns 0, overruns 0
+
+This supersedes doing the same thing from outside with chrt after start, which
+has to identify the emulation thread by CPU share and cannot run until the
+threads exist.
+
+diff --git a/src/emu/sound.cpp b/src/emu/sound.cpp
+--- a/src/emu/sound.cpp
++++ b/src/emu/sound.cpp
+@@ -29,6 +29,12 @@
+ 
+ #include <algorithm>
+ #include <cstdlib>
++#include <cstring>
++
++#if defined(__linux__)
++#include <pthread.h>
++#include <sched.h>
++#endif
+ 
+ //**************************************************************************
+ //  DEBUGGING
+@@ -51,6 +57,65 @@
+ 
+ namespace {
+ 
++// Put the effects thread above the thread that created it.
++//
++// run_effects() is the audio producer - it is the only caller of
++// osd().sound_stream_sink_update(), so every sample the host hears passes
++// through this thread and no other. It runs on a std::thread, which inherits
++// the creating thread's policy and priority, so when MAME is started under
++// `chrt --rr N` the producer ends up AT the emulation thread's priority.
++//
++// Under SCHED_RR a thread that wakes at equal priority does not preempt the
++// running one; it waits for that thread to block or to exhaust its timeslice.
++// The emulation thread is runnable almost continuously, so on a pinned core the
++// producer runs only when emulation happens to block - and the audio it did not
++// hand over is not delayed, it is lost, because each round of run_effects()
++// hands over only the samples of that round.
++//
++// Raising it is safe: this thread does a small, bounded amount of work per
++// round and then blocks on a condition variable, so it cannot starve emulation.
++void raise_effects_thread(std::thread &thread)
++{
++#if defined(__linux__)
++	char const *const setting = std::getenv("MAME_SOUND_EFFECTS_PRIORITY");
++	int policy = SCHED_OTHER;
++	sched_param param{};
++	if(pthread_getschedparam(pthread_self(), &policy, &param) != 0)
++		return;
++	if((policy != SCHED_FIFO) && (policy != SCHED_RR))
++		return;  // no realtime policy inherited, so nothing to fix
++
++	int wanted = param.sched_priority + 40;
++	if(setting) {
++		const long requested = std::strtol(setting, nullptr, 10);
++		if(requested <= 0)
++			return;  // explicitly disabled
++		wanted = int(requested);
++	}
++	const int maximum = sched_get_priority_max(policy);
++	if(wanted > maximum)
++		wanted = maximum;
++	if(wanted <= param.sched_priority)
++		return;
++
++	sched_param raised{};
++	raised.sched_priority = wanted;
++	const int error = pthread_setschedparam(thread.native_handle(), policy, &raised);
++	if(error)
++		osd_printf_warning(
++				"Sound: could not raise the effects thread to priority %d: %s\n",
++				wanted,
++				std::strerror(error));
++	else
++		osd_printf_verbose(
++				"Sound: effects thread raised from priority %d to %d\n",
++				param.sched_priority,
++				wanted);
++#else
++	(void)thread;
++#endif
++}
++
+ // Host sound-update cadence.
+ //
+ // STREAMS_UPDATE_FREQUENCY is a fixed rate, so the number of frames carried by
+@@ -311,7 +376,10 @@
+ 	if(m_nosound_mode)
+ 		m_effects_thread = nullptr;
+ 	else
++	{
+ 		m_effects_thread = std::make_unique<std::thread>([this]{ run_effects(); });
++		raise_effects_thread(*m_effects_thread);
++	}
+ #endif
+ }
+ 

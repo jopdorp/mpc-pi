@@ -295,9 +295,19 @@ The emulation thread should be the ONLY `RR 20` row.
 
 ### Still open
 
-- The fix is a post-start `chrt`, which has to identify the emulation thread by
-  CPU share. The durable version is a MAME patch that sets the sound threads'
-  priority at creation, so it works everywhere and needs no guessing.
+- `patches/mame/0046-sound-raise-the-effects-thread-above-emulation.patch` is the
+  durable version - it raises the thread where it is created, so no post-start
+  `chrt` and no guessing which thread is which. **Written and compile-checked in
+  isolation, NOT yet built into the appliance binary.** Until it is, the
+  `ExecStartPost` helper is what does the work, and the two are harmless
+  together (the helper finds the thread already above the emulation thread and
+  leaves it there).
+- MAME **segfaults on exit** (status 139) when `-seconds_to_run` ends a run with
+  `MAME_PIPEWIRE_CAPTURE_WAV` set. `write_capture()` is called from
+  `stream_close()`, so the handover capture is never flushed and that
+  measurement is currently unavailable. It does not affect normal operation -
+  the appliance never exits that way - but it blocks the one control that would
+  settle the residual below.
 - `sched_rr_timeslice_ms=100` remains a loaded gun for anything else that ends
   up sharing a priority on a pinned core.
 - The remaining ~1.3/s of long held runs in the capture have no repeated length
