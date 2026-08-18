@@ -508,3 +508,63 @@ infinity), USB IRQ starvation (irq/136 waits 0.6% of runnable time), thermal
 Worth keeping: Ardour's per-cycle cost is not the median. It peaks at 720-880us
 of a 1451us period in EVERY sample, while its median is 541. Whatever margin
 this system has is set by that peak.
+
+## The USB gadget: reintroduced, and three shell bugs found live
+
+Re-enabled `dtoverlay=dwc2,dr_mode=peripheral` and restored
+`mpc-usb-gadget.sh` / `mpc-usb-route.sh` / `mpc-usb-midi-bridge.sh` from git
+history (`de9326e^`, before the crackle investigation removed them to cut
+variables). Two things updated from that version, everything else kept as
+proven: the channel map now serves LOOP1-5 instead of GTR1/GTR2/MIC/AUX, and
+`99-mpcpi-usb-sched.conf`'s period-size is 64, matching the quantum this
+appliance settled at after the SCHED_RR fix - the old value (32) predates
+that fix and would have been the exact fault class that stopped the Duo's
+driver dead when a mismatched quantum was requested against its period.
+
+Result, measured on hardware: gadget bound (22ch up / 2ch down @ 44100Hz,
+correct on the first attempt), all 14 available links up (MPC master, Ardour
+master, all five loop stems - individual outs correctly idle, gated behind
+`MPC_OUTPUT_MODE=all` which is a separate decision), local monitor path
+undisturbed, 0 codec xruns over 90s idle.
+
+Getting the route script working live surfaced three real bugs, in order,
+each masked by the previous one:
+
+1. **`${1:?usage: $0 {on|off|status}}`** - a literal, unescaped `}` inside a
+   `${...?message}` closes the expansion early. `$1="on"` evaluated to
+   `"on}"`, a stray brace concatenated onto the real value, which matched no
+   `case` branch. `sh -n` cannot catch this - it is syntactically valid
+   shell that computes the wrong string.
+2. **`err=$(pw-link ...)` under `set -e`** - `pw-link` returns nonzero for a
+   link that already exists ("File exists" - the strongest possible
+   evidence the two ports ARE connected), and a bare assignment's nonzero
+   status is NOT exempt from `set -e` the way an `if`/`while` condition is.
+   The script died mid-link on the first already-satisfied connection,
+   which read as a crash rather than as one redundant link.
+3. **A function's own exit status, propagated through an unprotected call
+   site** - `link()`'s last command was a guarded `echo` that is false
+   whenever not in status mode, so `link()` itself returned nonzero even
+   after correctly recording success in `$made`/`$absent`. Every call site
+   was a bare statement in a loop, so `set -e` killed the script on the
+   third link. Fixed with an explicit `return 0` - the counting already
+   happened via side effects, and nothing needs the function's own status.
+
+None of these were guessed - each was found by running the actual script on
+the actual hardware with `sh -x` and reading exactly where it stopped, not by
+reasoning about what `set -e` "should" do. `check-usb-gadget-scripts.py`
+now asserts the specific brace pattern can't recur and round-trips the
+parenthesised replacement through a real shell.
+
+A fourth, separate bug: Ardour's ports (`:Master`, `:LOOP1`..`:LOOP5`) use a
+**slash** between node and port name (`:Master/audio_out 1`), not the colon
+MAME's own nodes use (`:speaker:output_FL`) - confirmed live, every
+colon-separated attempt at an Ardour port failed with "No such file or
+directory" while `pw-link`'s own listing showed the identical port existing
+under the slash form. Likely because Ardour reaches PipeWire through
+pw-jack, and a JACK port name is itself `Client:Port` - colon inside the
+name - so pw-link needs a different separator to avoid colliding with that.
+
+**Not yet measured**: an actual computer plugged in and recording. Every
+number above is the appliance idling with the gadget bound and routed; that
+is necessary and not sufficient, the same rule as everywhere else in this
+project. The next real test needs a human with a laptop.

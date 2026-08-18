@@ -1,0 +1,25 @@
+[Unit]
+Description=Link the emulator and Ardour into the USB gadget's 22 channels
+# Needs the gadget's ALSA node (from mpcpi-usb-gadget) and the emulator's and
+# Ardour's PipeWire nodes (:speaker, :Master, :LOOP1..5) all to exist before a
+# single link can be made.
+#
+# PartOf both audio units so it reruns whenever either restarts: their nodes
+# are recreated with new ids each time, and the old links die with them - the
+# same reason mpcpi-monitor-route.service is PartOf the emulator.
+After=mpcpi-usb-gadget.service mpcpi-emulator.service mpcpi-daw.service
+Requires=mpcpi-usb-gadget.service mpcpi-emulator.service mpcpi-daw.service
+PartOf=mpcpi-emulator.service mpcpi-daw.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The graph needs a moment after every node appears. Retrying is cheaper than
+# guessing a delay - the script is idempotent, and it logs a channel as idle
+# rather than failing outright when only part of the graph (e.g. Ardour) is
+# not up yet, so this loop is really waiting for "as much as will ever link".
+ExecStart=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do /usr/bin/mpc-usb-route.sh on && exit 0; sleep 2; done; exit 1'
+ExecStop=/usr/bin/mpc-usb-route.sh off
+
+[Install]
+WantedBy=multi-user.target

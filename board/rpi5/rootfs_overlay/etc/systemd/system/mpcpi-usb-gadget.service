@@ -1,0 +1,16 @@
+[Unit]
+Description=Build the USB-C port into a class-compliant UAC2 audio interface
+# Independent of the audio stack - this only needs the kernel modules and the
+# UDC the dwc2 overlay creates, which exist (or don't) before PipeWire or the
+# emulator ever start.
+After=systemd-udevd.service
+Before=mpcpi-usb-route.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/mpc-usb-gadget.sh start
+ExecStop=/usr/bin/mpc-usb-gadget.sh stop
+
+[Install]
+WantedBy=multi-user.target

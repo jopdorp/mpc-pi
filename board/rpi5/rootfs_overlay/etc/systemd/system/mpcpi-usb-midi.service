@@ -1,0 +1,14 @@
+[Unit]
+Description=Bridge the USB gadget's MIDI cables to the emulator and the hub
+After=mpcpi-usb-gadget.service mpcpi-emulator.service mpcpi-maschine.service
+Requires=mpcpi-usb-gadget.service mpcpi-emulator.service
+PartOf=mpcpi-emulator.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8; do /usr/bin/mpc-usb-midi-bridge.sh on && exit 0; sleep 2; done; exit 1'
+ExecStop=/usr/bin/mpc-usb-midi-bridge.sh off
+
+[Install]
+WantedBy=multi-user.target

@@ -81,20 +81,31 @@ dtoverlay=vc4-kms-v3d,noaudio
 # ports stay hosts on separate dwc3 controllers, so an external interface
 # still works at the same time. Verified with fdtoverlay against the real
 # bcm2712-rpi-5-b.dtb.
-# dtoverlay=dwc2,dr_mode=peripheral
+dtoverlay=dwc2,dr_mode=peripheral
 #
-# The USB gadget is REMOVED for now. It is commented rather than deleted
-# because the appliance's whole reason for existing is to present itself to a
-# computer as an audio interface, and this line is how the UDC comes into being.
+# RE-ENABLED. It was removed in de9326e "strip to the MPC side" while
+# isolating the crackle to a smaller and smaller set of variables - the
+# monitoring path crackled and this was one of several things that could
+# have been responsible, alongside Ardour. Ardour was later cleared
+# separately by direct A/B (docs/audio-chain.md: 0 xruns with it stopped,
+# nonzero with it running - though see "The observer was the load" in that
+# same file for how unreliable that specific test turned out to be under a
+# heavy diagnostic load). The gadget itself was never independently
+# re-tested after that, and the actual root cause found afterward - SCHED_RR
+# giving the emulation thread no priority margin over equal-priority audio
+# threads - had nothing to do with either of them. So bringing it back is a
+# clean retry, not an assumption that it was innocent.
 #
-# It is off because the monitoring path still crackles and the gadget is one of
-# the things that could be responsible: its ALSA nodes sit in the same graph,
-# and u_audio's MIN_PERIODS is a constraint nothing else in this project has.
-# Removing Ardour and the gadget together took the emulator stream's xruns from
-# 1242 to 384 per 8s, so at least one of the two was contributing.
+# mpc-usb-gadget.sh, mpc-usb-route.sh and mpc-usb-midi-bridge.sh are restored
+# under board/rpi5/rootfs_overlay/usr/bin/, and mpcpi-usb-gadget.service,
+# mpcpi-usb-route.service and mpcpi-usb-midi.service under .../etc/systemd/
+# system/, with the channel map updated for the LOOP1-5 desk and the period
+# size in 99-mpcpi-usb-sched.conf updated for quantum 64 (it was tuned at 32,
+# from before the SCHED_RR fix settled the quantum where it is now).
 #
-# Uncomment to bring the gadget back, and re-add mpcpi-usb-gadget.service plus
-# the mpc-usb-*.sh helpers from git history (removed in this same commit).
+# MUST BE MEASURED after this reboot, the same way everything else on this
+# appliance has been: watch xruns with the gadget connected and idle, then
+# with it connected and a computer actually recording, before trusting it.
 
 # ===== BOOT TIME =====
 # Radios the instrument never uses, and which cost real boot time:

@@ -468,6 +468,16 @@ WPGRP
 #    where a shallower buffer is actually likely to pay. I2S has one
 #    clock and a fixed sample cadence, with none of USB's packetisation
 #    or two-clock reconciliation.
+# DUPLICATED with board/rpi5/rootfs_overlay/etc/wireplumber/wireplumber.conf.d/
+# 99-mpcpi-usb-sched.conf, which is the copy actually worth reading - it
+# carries the full history of why these numbers are what they are. This
+# heredoc exists because tune-realtime.sh runs at provision time and can
+# rewrite live config without a redeploy; keep the two in sync by hand
+# until this is refactored to copy the overlay file instead of
+# re-typing it. period-size WAS 32, matching a quantum-32 investigation
+# that predates the SCHED_RR fix; the graph quantum is 64 now, and
+# disable-tsched requires quantum <= period-size, so 32 here would be
+# the same fault class that stopped the Duo's driver dead.
 cat > /etc/wireplumber/wireplumber.conf.d/99-mpcpi-usb-sched.conf <<'WPUSB'
 monitor.alsa.rules = [
   {
@@ -478,7 +488,7 @@ monitor.alsa.rules = [
     actions = {
       update-props = {
         api.alsa.disable-tsched = true
-        api.alsa.period-size = 32
+        api.alsa.period-size = 64
         api.alsa.period-num = 4
         api.alsa.headroom = 0
         node.pause-on-idle = false
@@ -513,5 +523,5 @@ WPSUS
 rm -f /home/mpc/.local/state/wireplumber/default-nodes
 echo "  cleared wireplumber's remembered default sink"
 
-echo "  graph: timer clock drives, gadget follows at 32-frame periods"
+echo "  graph: timer clock drives, gadget follows at 64-frame periods"
 echo "  wireplumber rules: PCMs direct, no suspend, DAC drives the graph"
