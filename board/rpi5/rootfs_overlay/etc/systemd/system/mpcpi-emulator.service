@@ -72,7 +72,7 @@ Environment=MPC_PIPEWIRE_FRAMES=64
 # One host sound update per graph quantum, so a callback consumes a whole number
 # of producer updates.
 Environment=MPC_SOUND_UPDATES_PER_QUANTUM=1
-# Output cushion, in QUANTA. Two, so 128 frames at a 64-frame quantum - 2.9ms.
+# Output cushion, in QUANTA. ONE - 64 frames at a 64-frame quantum, 1.45ms.
 #
 # This was 32 quanta, which is a leftover from when the cushion was mitigation:
 # the producer was starved of 90% of its audio (docs/audio-chain.md) and depth
@@ -84,7 +84,7 @@ Environment=MPC_SOUND_UPDATES_PER_QUANTUM=1
 # With the producer delivering full rate the ring does not need a cushion to
 # survive. If one quantum is not enough, the answer is to find what is late,
 # not to buy time in front of the DAC.
-Environment=MAME_PIPEWIRE_PREBUFFER_QUANTA=2
+Environment=MAME_PIPEWIRE_PREBUFFER_QUANTA=1
 Environment=MAME_PIPEWIRE_BUFFERS=16
 # Stereo, as the host runs it - the machine has several speaker devices and
 # only :speaker carries the program's audio.

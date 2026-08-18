@@ -119,6 +119,11 @@ POLL_STATS = bool(os.environ.get("MPCPI_HUB_POLL_STATS"))
 # played in time, and giving both the same attention cost the pads 4ms a hit.
 BUTTON_POLL_EVERY = int(os.environ.get("MPCPI_BUTTON_POLL_EVERY", "4"))
 
+# How fast a pad's remembered peak fades, per report. Reports arrive about
+# every 1.4ms, so 0.88 leaves roughly a tenth after 20ms - long enough to still
+# recognise a lagging bleed, short enough not to suppress a genuine second hit.
+PAD_PEAK_DECAY = float(os.environ.get("MPCPI_PAD_PEAK_DECAY", "0.88"))
+
 # MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
 # else is a light that reports something you press somewhere else, which is
 # worse than no light: FULL LEVEL moved from GRID to SELECT to F7 during this
@@ -610,10 +615,16 @@ class Mk1:
     # 200 a bleed of 224 is a note-on: hitting one pad fires its scan
     # neighbour, which is what "the hi-hat repeats when I play fast" was.
     #
-    # ON was raised to 400 when bleed was only being AVOIDED by threshold.
-    # It is now SUBTRACTED - a pad's reading has 20% of its scan neighbour
-    # removed when that neighbour dominates - so the threshold no longer has to
-    # clear the worst bleed on its own, and 250 lets a softer hit register.
+    # 250, and the idle floor is what decides whether that is safe.
+    #
+    # It measured 0 on all sixteen pads at the device's normal report rate, so
+    # 250 has the whole range to itself. It is NOT unconditionally safe: asking
+    # the analog channels to report at rate 1 instead of 10 - sampling the ADC
+    # faster than it settles - lifted the floor to ~256, and every pad then
+    # free-ran on its own noise. That was mistaken for crosstalk for a while.
+    #
+    # So if the report rate is ever changed, measure the floor again first.
+    # POLL_STATS prints it per pad.
     PAD_ON_THRESHOLD = int(os.environ.get("MPCPI_PAD_ON", "250"))
     # OFF is deliberately far below ON, not just a little below.
     #
@@ -624,9 +635,12 @@ class Mk1:
     # which is a legitimate pair of crossings and therefore not something the
     # latch can reject - only the DEPTH it has to fall to can.
     #
-    # 60 means the pad has to come most of the way back to rest. On a one-shot
-    # sampler the later note-off costs nothing.
-    PAD_OFF_THRESHOLD = int(os.environ.get("MPCPI_PAD_OFF", "60"))
+    # 25, not 60. At 60 a hard hit could still ring down through it and back
+    # up through the on-threshold inside one stroke - reported as double hits -
+    # and lowering the ON threshold to 250 narrowed the gap further. 25 is
+    # close to rest, so a pad must genuinely be released. On a one-shot sampler
+    # the later note-off costs nothing.
+    PAD_OFF_THRESHOLD = int(os.environ.get("MPCPI_PAD_OFF", "25"))
     # Fraction of the NEXT-SCANNED channel subtracted from each pad, to cancel
     # the sample-and-hold bleed described above. MPCPI_PAD_BLEED overrides it.
     #
@@ -642,7 +656,7 @@ class Mk1:
     # signal from the softer one. At 0.20 a 768 hit alongside a 3072 hit lands
     # at 154 and is dropped. Lower MPCPI_PAD_BLEED if rolls lose notes; raise it
     # if hard hits still double-trigger their neighbour.
-    PAD_BLEED = float(os.environ.get("MPCPI_PAD_BLEED", "0.20"))
+    PAD_BLEED = float(os.environ.get("MPCPI_PAD_BLEED", "0.35"))
     # Minimum time between note-ons on the SAME pad, seconds.
     #
     # Bleed cancellation and hysteresis both address one pad being fired by
@@ -734,10 +748,13 @@ class Mk1:
         self.pad_state = [0] * 16
         self.pad_on = [False] * 16
         self.pad_raw = [0] * 16
+        self.pad_peak = [0] * 16
         self.pad_last_on = [0.0] * 16
         self._ctrl_tick = 0
         self._pad_read_at = 0.0
         self._pad_gaps = []
+        self._read_waits = []
+        self._pad_seen_max = [0] * 16
         self.pad_suppressed = 0
         self.buttons = 0
         self.button_changed_at = [0.0] * 48
@@ -930,9 +947,11 @@ class Mk1:
         """
         events = []
         try:
+            _t0 = time.monotonic() if POLL_STATS else 0.0
             data = self.dev.read(EP_PADS, 64, timeout=timeout)
             if POLL_STATS:
                 now = time.monotonic()
+                self._read_waits.append(now - _t0)
                 if self._pad_read_at:
                     self._pad_gaps.append(now - self._pad_read_at)
                 self._pad_read_at = now
@@ -976,7 +995,14 @@ class Mk1:
             raw = (hi & 0xF0) >> 4
             if raw > 15:
                 continue
-            self.pad_raw[raw] = ((hi & 0x0F) << 8) | lo
+            value = ((hi & 0x0F) << 8) | lo
+            self.pad_raw[raw] = value
+            # A decaying peak per channel, so a hit still counts as a bleed
+            # source for a few milliseconds after its own reading has fallen.
+            self.pad_peak[raw] = max(value,
+                                     int(self.pad_peak[raw] * PAD_PEAK_DECAY))
+            if POLL_STATS and value > self._pad_seen_max[raw]:
+                self._pad_seen_max[raw] = value
             seen.append(raw)
         for raw in seen:
             # Channel k carries a fraction of channel k+1, wrapping at 15->0.
@@ -991,7 +1017,15 @@ class Mk1:
             # Measured bleed never exceeded 29% of its source, so anything above
             # half the neighbour's value is this pad being played, not bleed.
             own = self.pad_raw[raw]
-            neighbour = self.pad_raw[(raw + 1) % 16]
+            # Compare against the neighbour's recent PEAK, not its value right
+            # now. The bleed LAGS its source: by the time the neighbour's
+            # crosstalk peaks on this channel, the pad that caused it has
+            # already decayed, so an instantaneous comparison stops recognising
+            # it as bleed and lets the raw value through. That is the ghost
+            # that survived the first correction - and lowering the on
+            # threshold to 250 made it easier to reach.
+            neighbour = max(self.pad_raw[(raw + 1) % 16],
+                            self.pad_peak[(raw + 1) % 16])
             pressure = own
             if neighbour > own * 2:
                 pressure = own - int(neighbour * self.PAD_BLEED)
@@ -1004,6 +1038,13 @@ class Mk1:
             # decaying through it - or scan bleed from the neighbouring
             # channel touching it - is a fresh note-on every time it crosses.
             if not self.pad_on[pad] and pressure > self.PAD_ON_THRESHOLD:
+                if TRACE:
+                    _trace("padraw",
+                           "pad%-2d raw=%-5d nb(raw%d)=%-5d peak=%-5d -> %d"
+                           % (pad + 1, own, (raw + 1) % 16,
+                              self.pad_raw[(raw + 1) % 16],
+                              self.pad_peak[(raw + 1) % 16], pressure),
+                           "ON")
                 self.pad_on[pad] = True
                 now = time.monotonic()
                 if (now - self.pad_last_on[pad]) < self.PAD_RETRIGGER_S:
@@ -1372,10 +1413,24 @@ def main():
         if POLL_STATS and len(mk1._pad_gaps) >= 400:
             g = sorted(mk1._pad_gaps)
             mk1._pad_gaps = []
-            print("hub: pad sampling ms  med=%.2f p90=%.2f p99=%.2f max=%.2f"
-                  % (g[len(g)//2]*1000, g[int(len(g)*0.9)]*1000,
-                     g[int(len(g)*0.99)]*1000, g[-1]*1000),
+            w = sorted(mk1._read_waits) or [0.0]
+            mk1._read_waits = []
+            # Split the cycle: time WAITING for the device against time we
+            # spend before asking it again. Only one of those can be fixed here.
+            print("hub: pad cycle ms med=%.2f p99=%.2f max=%.2f | "
+                  "usb wait med=%.2f | our work med=%.2f"
+                  % (g[len(g)//2]*1000, g[int(len(g)*0.99)]*1000, g[-1]*1000,
+                     w[len(w)//2]*1000,
+                     (g[len(g)//2] - w[len(w)//2])*1000),
                   file=sys.stderr, flush=True)
+            # The idle floor, per pad, in the units PAD_ON is compared against.
+            # It is NOT zero, and PAD_ON has to clear it - lowering the
+            # threshold under it made every pad free-run.
+            print("hub: pad max since last report: %s"
+                  % " ".join("p%d=%d" % (Mk1._pad_index(i) + 1, v)
+                             for i, v in enumerate(mk1._pad_seen_max)),
+                  file=sys.stderr, flush=True)
+            mk1._pad_seen_max = [0] * 16
         # No sleep. The pad read blocks for up to its timeout, which paces the
         # loop against the device rather than against a fixed delay added on
         # top of it - the 2ms that used to be here was pure added latency.

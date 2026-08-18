@@ -29,6 +29,9 @@ can rely on a given control's colour being constant and meaningful
 (blue always means a group), and must never try to choose one.
 """
 
+import os
+
+
 # Endpoint. NOT the display endpoint (0x08) - LEDs, MIDI out and the init
 # handshake all share the generic OUT endpoint. Confirmed on hardware:
 # writing the LED block here lights pads, buttons and the screen
@@ -143,7 +146,24 @@ OFF = 0x00
 # Both were verified to start the stream on hardware, and the kernel's
 # values are used here because they are the ones chosen for this device
 # rather than shared across a family.
-AUTO_MSG = (0x0B, 0x01, 0x0A, 0x05)
+# The three payload bytes are REPORT RATES: (digital, analog, erp), and lower
+# is faster. This sent the kernel driver's (1, 10, 5), and the pads are the
+# ANALOG one - so the device was being asked to report pad pressure at rate 10
+# while buttons ran at 1. Measured, that put a floor of ~1.4ms under the pad
+# sampling no matter how tight the read loop got, because the data simply was
+# not there yet.
+#
+# Back to the kernel's (1, 10, 5) after trying analog rate 1. It did NOT make
+# the pads arrive sooner - the cycle stayed at 1.36ms - and the pads' idle
+# floor came back reading ~256 instead of 0, which is a worse trade than no
+# change at all. The floor matters: PAD_ON has to sit above it, and an ADC
+# sampled faster than it settles reports its own noise.
+#
+# MPCPI_MK1_RATES overrides all three if this is worth revisiting with the
+# idle floor measured at each rate.
+AUTO_RATES = tuple(int(x) for x in
+                   os.environ.get("MPCPI_MK1_RATES", "1,10,5").split(","))
+AUTO_MSG = (0x0B,) + AUTO_RATES
 
 # Kept as an alias: this was called INIT_HANDSHAKE while its purpose was
 # unknown.
