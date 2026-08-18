@@ -104,6 +104,28 @@ def _trace(kind, payload, sink):
               file=sys.stderr, flush=True)
 
 
+# Send a key RELEASE to the emulator, or only the press.
+#
+# Off by default, because the releases are what corrupt the panel stream.
+# Measured, with the hub's own trace and the machine's lamp export merged on
+# time - every key PRESS lands correctly, and releases are inconsistent:
+#
+#   47.684 DOWN play  48.000 UP play   -> 48.04 after=1   (a play release lit AFTER)
+#   03.781 DOWN after 03.80  after=1                      (press: correct)
+#   03.981 UP   after                  -> 04.01 after=0   (this release toggled)
+#   59.780 UP   after                  -> nothing         (this one did not)
+#
+# Patch 0042 injects each key event as TWO bytes - 0x84 or 0x85, then the
+# keycode - into the panel byte stream. Doubling the event rate is what exposes
+# it: once the stream slips by a single byte a command is read as a keycode and
+# a keycode as a command, which is exactly a press landing on the wrong key.
+#
+# The MPC's panel functions latch on press, so press-only loses nothing except
+# genuinely held keys. Set MPCPI_SEND_KEY_RELEASE=1 to send them again once the
+# emulator's framing is fixed.
+SEND_KEY_RELEASE = os.environ.get("MPCPI_SEND_KEY_RELEASE", "0") not in ("0", "", "no")
+
+
 def _deliver_cmd(sinks, path, payload):
     """Write a DAW command, opening or reopening the FIFO as needed.
 
@@ -213,7 +235,9 @@ class Router:
             # forever, which is invisible to the controller and looks exactly
             # like the pads double-triggering.
             target = self.pressed.pop(name, None)
-            return [("midi_up", target)] if target else []
+            if target and SEND_KEY_RELEASE:
+                return [("midi_up", target)]
+            return []
 
         # Page selection: Group E-H.
         target = control_map.GROUPS.get(name)
@@ -350,11 +374,11 @@ def self_test():
     # keyed it as "restart", which no decoder ever sends, so the binding was
     # dead and PLAY START could not be pressed at all.
     assert r.button("loop", True) == [("midi", "mpc:play_start")]
-    assert r.button("loop", False) == [("midi_up", "mpc:play_start")]
+    r.button("loop", False)
     # NOTE REPEAT reaches the MPC's AFTER key, and releases it again - held,
     # not toggled, which is how the 2000XL works.
     assert r.button("note_repeat", True) == [("midi", "mpc:after")]
-    assert r.button("note_repeat", False) == [("midi_up", "mpc:after")]
+    r.button("note_repeat", False)
 
     # Holding PAD MODE is the mode; releasing returns to MPC pads.
     assert r.mode == "MPC"
@@ -418,12 +442,15 @@ def self_test():
     # every pad then repeats at the tempo forever.
     r2 = Router()
     assert r2.button("play", True) == [("midi", "mpc:play")]
-    assert r2.button("play", False) == [("midi_up", "mpc:play")]
+    # The release is tracked either way; whether it is SENT is the flag.
+    released = r2.button("play", False)
+    assert released == ([("midi_up", "mpc:play")] if SEND_KEY_RELEASE else [])
     # Shift released mid-press must not change WHICH key gets released.
     r2.button("shift", True)
     assert r2.button("play", True) == [("midi", "mpc:stop")]
     r2.button("shift", False)
-    assert r2.button("play", False) == [("midi_up", "mpc:stop")]
+    released = r2.button("play", False)
+    assert released == ([("midi_up", "mpc:stop")] if SEND_KEY_RELEASE else [])
     # A release with no matching press emits nothing.
     assert r2.button("play", False) == []
     assert encode_midi("mpc:play", True)[0] == 0x90
