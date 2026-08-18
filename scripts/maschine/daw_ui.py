@@ -30,7 +30,11 @@ except ImportError:  # running from the repo root
     from ui import Frame, OFF, DIM, MUTED, NORMAL, BRIGHT, GLYPH_H
     import control_map
 
-PAGES = ("LOOP", "FX", "SONG")
+# Every page --snapshot renders, which must be every page with a renderer.
+# This drifted: WAVE and EDIT had renderers for months and were absent here, so
+# no design review ever saw them. maschine-hub's self-test asserts the two
+# lists agree rather than trusting this one.
+PAGES = ("LOOP", "FX", "SONG", "WAVE", "EDIT", "FILES")
 
 # Knobs 1-4 and Buttons 1-4 belong to the LEFT display, 5-8 to the RIGHT
 # (NI's manual and the kernel driver's own comments: "4 under the left
@@ -1045,8 +1049,172 @@ def page_edit(f, st):
     ])
 
 
+# --- FILES -----------------------------------------------------------
+#
+# Pick a floppy image with the wheel and four keys. There is no keyboard on
+# this appliance, the emulator is handed -flop once at startup and never asked
+# again, and the MPC's own LOAD screen can only see what is already in the
+# drive - so this page is the only way a different disk gets chosen.
+#
+# Five rows is what is left after the chrome, and all of it is spent on rows:
+# the path rides the status line rather than taking a sixth, and how far down
+# the list you are is a 3px bar rather than a "3/17" that spends 24px of a row
+# saying what the bar says at a glance.
+
+FILES_ROWS = 5              # visible listing rows
+FILES_PITCH = 8             # 7px glyph plus a 1px gap
+FILES_TOP = BODY_Y + 1      # one row of air under the path, so the cursor
+                            # highlight never touches it
+FILES_BAR_X = 250           # scroll indicator, hard against the right edge
+FILES_NAME_X = 12           # names clear the kind marker
+FILES_PATH_X = 40           # the path starts clear of the page badge
+# How much of the status line the path may have. The right end of that row
+# belongs to the transport, the REC badge and the xrun count, which are drawn
+# by the shared chrome and are still true while a listing is up - so the path
+# stops well short of them rather than being drawn over them.
+FILES_PATH_CHARS = 24
+
+
+def short_bytes(n):
+    """A size in at most five characters, so it never crowds the name."""
+    mb = n / (1024.0 * 1024.0)
+    if mb >= 10:
+        return "%dM" % round(mb)
+    if n >= 1024 * 1024:
+        return "%.1fM" % mb
+    if n >= 1024:
+        return "%dK" % (n // 1024)
+    return "%dB" % n
+
+
+def path_tail(s, chars):
+    """Keep the END of a path when it will not fit.
+
+    The deep end is what identifies it: three directories called SAMPLES on
+    three different sticks are told apart by what comes after the mount point,
+    not by the mount point they share.
+    """
+    return s if len(s) <= chars else "<" + s[-(chars - 1):]
+
+
+def files_row(f, y, row, selected, root):
+    """One listing row: what it is, what it is called, what it is worth.
+
+    KIND IS A SHAPE, not only a brightness. A filled block is a disk the drive
+    can take, a hollow one is a disk-shaped file of the wrong size, a wedge is
+    a directory, and a file that is neither gets no marker at all. Shape
+    survives being read out of the corner of an eye, and it survives the cursor
+    row - which inverts every brightness on it, and would otherwise erase the
+    one distinction that matters while you are standing on it.
+    """
+    kind = row.get("kind", "other")
+    exact = bool(row.get("exact"))
+    if selected:
+        # The strongest emphasis the panel has, and the cursor has earned it:
+        # it is the only row the four keys act on. Stops short of the scroll
+        # bar so the bar is never drawn on top of a bright field.
+        f.fill(0, y - 1, FILES_BAR_X - 2, FILES_PITCH, BRIGHT)
+
+    ink = OFF if selected else NORMAL
+    faint = OFF if selected else DIM
+    soft = OFF if selected else MUTED
+
+    if kind == "dir":
+        f.text(2, y, ">", ink)
+    elif kind == "disk" and exact:
+        f.fill(2, y + 1, 5, 5, ink)
+    elif kind == "disk":
+        f.rect(2, y + 1, 5, 5, soft)
+    elif kind == "missing":
+        f.hline(2, y + 3, 5, faint)
+
+    if kind == "missing":
+        right, level = "UNMOUNTED", faint
+    elif root:
+        # At the root every row is a SOURCE, and its "size" is how many
+        # directories and disks are on it - the one number that says whether
+        # it is worth going into.
+        n = row.get("size", 0)
+        right, level = ("%d ITEM%s" % (n, "" if n == 1 else "S"), faint)
+    elif kind == "disk":
+        # An exact image is printed 1.44M - the number on the label and in
+        # every MPC manual - not the 1.41M its bytes come to in mebibytes.
+        # The row is for recognition, not arithmetic.
+        right = "1.44M" if exact else short_bytes(row.get("size", 0))
+        level = ink if exact else soft
+    else:
+        right, level = "", faint
+
+    name = row.get("name", "")
+    if kind == "dir":
+        name += "/"
+    name_level = {"dir": ink, "missing": soft,
+                  "disk": ink if exact else soft}.get(kind, faint)
+    limit = FILES_BAR_X - 4 - f.text_width(right) - 4
+    chars = max(1, (limit - FILES_NAME_X) // 6)
+    f.text(FILES_NAME_X, y, name[:chars], name_level)
+    if right:
+        f.text_right(FILES_BAR_X - 4, y, right, level)
+
+
+def page_files(f, st):
+    """The floppy browser, opened with SHIFT+NAVIGATE and closed with D8.
+
+    An overlay rather than a page in the group row: the pads and the transport
+    keep working underneath it, and closing puts back the page that was there.
+
+    The window is a pure function of the cursor, because this renderer keeps
+    nothing between frames - it draws whatever JSON daw-ctl last wrote - so it
+    centres the cursor rather than remembering where the window was. The cost
+    is that the names move under a nearly fixed cursor in the middle of a long
+    list; the gain is that the screen cannot disagree with the state file about
+    what is on it.
+    """
+    # The shared status line prints st["message"] in its own zone, MUTED and
+    # centred. On this page the message REPLACES THE PATH and is drawn bright
+    # at the head of the row instead - a refusal is the news here, not a
+    # footnote - so the header must be handed a state without it or the same
+    # words appear twice, half a row apart, at two different brightnesses.
+    draw_header(f, dict(st, message=""))
+    files = st.get("files") or {}
+    rows = files.get("rows", [])
+    root = bool(files.get("root"))
+    cursor = max(0, min(files.get("cursor", 0), max(0, len(rows) - 1)))
+
+    # A REFUSAL REPLACES THE PATH. "NOT MOUNTED" is the answer to the key just
+    # pressed; the path is only context, and it comes back on the next move
+    # because daw-ctl clears the message then. Where you are matters less than
+    # why nothing happened.
+    msg = st.get("message")
+    where = msg or files.get("path") or "SOURCES"
+    f.text(FILES_PATH_X, HEADER_Y + 1, path_tail(where, FILES_PATH_CHARS),
+           BRIGHT if msg else MUTED)
+
+    if not rows:
+        # A directory with nothing in it is a legitimate answer and has to
+        # look different from a screen that failed to draw.
+        f.text_center(0, f.w, FILES_TOP + FILES_PITCH, "NOTHING HERE", DIM)
+        return
+
+    first = max(0, min(cursor - FILES_ROWS // 2, len(rows) - FILES_ROWS))
+    for i in range(min(FILES_ROWS, len(rows) - first)):
+        idx = first + i
+        files_row(f, FILES_TOP + i * FILES_PITCH, rows[idx], idx == cursor,
+                  root)
+
+    # More list than screen. A bar rather than a counter, for the same reason
+    # the rows are not numbered: the question is "is there more", not "how
+    # much more".
+    if len(rows) > FILES_ROWS:
+        span = FILES_ROWS * FILES_PITCH
+        h = max(3, span * FILES_ROWS // len(rows))
+        top = FILES_TOP + (span - h) * first // (len(rows) - FILES_ROWS)
+        f.vline(FILES_BAR_X + 1, FILES_TOP, span, DIM)
+        f.fill(FILES_BAR_X, top, 3, h, NORMAL)
+
+
 RENDERERS = {"EDIT": page_edit, "WAVE": page_wave, "LOOP": page_loop, "FX": page_fx,
-             "SONG": page_song}
+             "SONG": page_song, "FILES": page_files}
 
 
 def render(st):
@@ -1168,6 +1336,33 @@ def sample_state(page):
             {"name": "TYPE", "norm": 0.25},
         ],
     }
+    st["files"] = {
+        # A directory listing rather than the sources, because it exercises
+        # every row type at once: a directory, a floppy the drive can take, a
+        # disk-shaped file of the wrong size, and a file that is neither.
+        "path": "/MEDIA/USB0/CRATE 12", "root": False, "cursor": 3,
+        "rows": [
+            {"name": "KITS", "kind": "dir", "size": 0, "exact": False},
+            {"name": "OLD SESSIONS", "kind": "dir", "size": 0, "exact": False},
+            {"name": "BEAT01.IMG", "kind": "disk", "size": 1474560,
+             "exact": True},
+            {"name": "BEAT02.IMG", "kind": "disk", "size": 1474560,
+             "exact": True},
+            {"name": "HALFDUMP.IMG", "kind": "disk", "size": 737280,
+             "exact": False},
+            {"name": "ARCHIVE.ISO", "kind": "disk", "size": 681574400,
+             "exact": False},
+            {"name": "READ ME.TXT", "kind": "other", "size": 812,
+             "exact": False},
+            {"name": "NOTES.TXT", "kind": "other", "size": 2048,
+             "exact": False},
+        ],
+    }
+    if page == "FILES":
+        # The mixer's last message is not news here, and a message REPLACES
+        # the path on this page - see page_files - so leaving it set would
+        # hide the one thing the page exists to show.
+        st["message"] = ""
     st["song"] = {
         "sequence": "LT-BEAT", "bars": 32, "position": 12, "loops": 4,
         "zoom": 0.5,

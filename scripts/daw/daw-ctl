@@ -22,6 +22,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import browser as browserlib                              # noqa: E402
 import daw_ctl                                            # noqa: E402
 import osc as osclib                                      # noqa: E402
 sys.path.insert(0, os.path.join(
@@ -31,6 +32,16 @@ import ardour_bindings                                    # noqa: E402
 TRANSPORT = "/dev/shm/mpc-transport"
 STATE = "/dev/shm/daw-ui-state.json"
 FIFO = "/run/daw-ctl.fifo"
+# Where a floppy chosen on the panel is published for the emulator.
+#
+# NOTHING READS THIS YET, and saying so is the point of the constant. Mounting
+# an image at runtime is MAME's side of the fence - manager.machine.images
+# ":fdc:0" and its load() - and that plugin does not exist; the emulator is
+# still handed -flop once at startup. Writing the request is still the right
+# half to build first: the panel can be finished and tested without it, and
+# when the loader lands it has one file to watch rather than a protocol to
+# invent.
+DISK_REQUEST = os.environ.get("MPCPI_DISK_REQUEST", "/dev/shm/mpc-disk")
 
 # Column order is the contract: strip N on the panel is OSC ssid N+1 and
 # the same column the UI draws. Changing this changes three things at
@@ -81,6 +92,15 @@ class Daw:
         # set_session_record: the OSC path is a toggle, and we cannot read it
         # back, so a belief is the best that exists.
         self.session_record = False
+        # The file browser, opened from the panel with SHIFT+NAVIGATE. This
+        # process owns the cursor and the listing because it owns every other
+        # piece of screen state; two owners of one cursor is how a screen and
+        # a controller end up disagreeing about which row is selected. The hub
+        # keeps one bit - is it open - and that decides where its keys point.
+        self.browser = browserlib.Browser()
+        self.files = False
+        self.files_rows = []
+        self.disk_request = DISK_REQUEST
         self.message = ""
         self.playhead = 0
         self.xruns = 0
@@ -165,6 +185,12 @@ class Daw:
             return self.set_armed(parts[1] not in ("0", "off", "false"))
         if verb in ("punch_in", "punch_out") and len(parts) > 1:
             return self.punch(verb == "punch_in", parts[1])
+
+        # The file browser. One verb with a sub-verb rather than five top-level
+        # words, because everything under it is meaningless unless the browser
+        # is open and grouping says so on the wire.
+        if verb == "files":
+            return self.files_command(parts[1:])
 
         # anything else is loop-engine vocabulary
         return self.apply(self.engine.command(line, self.playhead))
@@ -266,6 +292,79 @@ class Daw:
                 self.rolling.discard(name)
             self.message = "PUNCH %s %s" % ("IN" if into else "OUT", name)
         return out
+
+    # --- the file browser ---
+
+    def files_command(self, args):
+        """The panel's browser gestures. See control_map.FILES_BUTTONS.
+
+        Every one of them clears the message first. A refusal - "NOT MOUNTED",
+        "NOT A DISK" - is about the row you were standing on, and leaving it up
+        after you have moved somewhere else makes it read as a refusal of the
+        new row, which is worse than saying nothing.
+        """
+        verb = args[0] if args else ""
+        self.message = ""
+        if verb == "open":
+            self.files = True
+        elif verb == "close":
+            self.files = False
+        elif verb == "move" and len(args) > 1:
+            self.browser.move(int(args[1]))
+        elif verb == "up":
+            if not self.browser.up():
+                # Already at the sources. Saying so beats a key that does
+                # nothing, which is indistinguishable from a key that broke.
+                self.message = "AT THE TOP"
+        elif verb in ("into", "enter"):
+            row = self.browser.current()
+            # browse_right NAVIGATES and refuses to load; ENTER loads. A
+            # right-arrow that swaps the media under a running instrument is a
+            # foot-gun, and the two keys are one finger apart.
+            if verb == "into" and row is not None and row.kind == "disk":
+                self.message = "ENTER TO LOAD"
+            else:
+                kind, arg = self.browser.enter()
+                if kind == "load":
+                    self.files_rows = self.browser_rows()
+                    return self.load_disk(arg)
+                if kind == "none":
+                    self.message = arg.upper()
+        else:
+            return ["error no-files %s" % verb]
+        self.files_rows = self.browser_rows()
+        return []
+
+    def browser_rows(self):
+        """The listing, flattened into what the renderer draws.
+
+        SNAPSHOTTED, not listed on demand: write_state runs every 10 ms, and
+        walking a directory at 100 Hz to redraw a menu that has not changed
+        would keep a USB stick awake for as long as the browser is open. The
+        rows can only change when a browser command moves, so that is when
+        they are taken.
+        """
+        return [{"name": e.name, "kind": e.kind, "exact": e.exact,
+                 "size": e.size, "present": getattr(e, "present", True)}
+                for e in self.browser.rows()]
+
+    def load_disk(self, path):
+        """Publish the chosen image for the emulator to pick up.
+
+        Write-then-rename, like every other file this process publishes, so a
+        reader can never see half a path. See DISK_REQUEST: nothing consumes
+        this yet, so the screen says LOAD and the drive does not change.
+        """
+        tmp = "%s.%d.tmp" % (self.disk_request, os.getpid())
+        try:
+            with open(tmp, "w") as f:
+                f.write(path + "\n")
+            os.replace(tmp, self.disk_request)
+        except OSError as e:
+            self.message = "CANNOT REQUEST DISK"
+            return ["error disk-request %s" % e]
+        self.message = "LOAD %s" % os.path.basename(path).upper()
+        return ["load %s" % path]
 
     # --- encoders ---
 
@@ -389,7 +488,7 @@ class Daw:
                 "bars_remaining": max(0, int(remaining)),
                 "level": 0.0,
             })
-        return {
+        st = {
             "page": self.page, "mode": self.mode,
             "playing": self.transport.playing,
             "recording": sum(1 for l in self.engine.lanes.values()
@@ -412,6 +511,18 @@ class Daw:
             "master": {"name": "MSTR", "db": "0.0", "gain": 0.85,
                        "level_l": 0.0, "level_r": 0.0},
         }
+        # The browser is an OVERLAY: it reports itself as the page so the
+        # renderer draws it, and self.page is left alone so closing puts back
+        # the page that was underneath rather than a remembered default.
+        if self.files:
+            st["page"] = "FILES"
+            st["files"] = {"rows": self.files_rows,
+                           "cursor": self.browser.cursor,
+                           # At the sources there is no directory to name, and
+                           # "SOURCES" is what that row set is.
+                           "path": self.browser.cwd() or "SOURCES",
+                           "root": self.browser.at_root()}
+        return st
 
     def write_state(self, path=STATE):
         # The temp name carries the pid. With a fixed ".tmp" two instances -
@@ -581,6 +692,89 @@ def self_test():
     import daw_ui
     frame = daw_ui.render(dict(daw_ui.sample_state("LOOP"), **st))
     assert len(frame.px) == 255 * 64
+
+    # THE FILE BROWSER, end to end against a real directory.
+    #
+    # browser.py's own self-test proves the listing and the cursor; the hub's
+    # proves the panel emits these lines. Neither can notice that nothing
+    # joins them - which is exactly how the knobs and then the punch verbs
+    # both shipped dead - so this is the join, on a real tree.
+    import tempfile, shutil
+    tmp = tempfile.mkdtemp()
+    try:
+        os.makedirs(os.path.join(tmp, "KITS"))
+        img = os.path.join(tmp, "BEAT.IMG")
+        with open(img, "wb") as fh:
+            fh.write(b"\0" * browserlib.FLOPPY_BYTES)
+        with open(os.path.join(tmp, "NOTES.TXT"), "w") as fh:
+            fh.write("x")
+        d.browser = browserlib.Browser(
+            roots=[("LIB", tmp), ("USB", os.path.join(tmp, "nope"))])
+        d.disk_request = os.path.join(tmp, "request")
+
+        d.command("files open")
+        assert d.files and d.ui_state()["page"] == "FILES", \
+            "the browser must report itself as the page, or nothing draws it"
+        assert d.page == "LOOP", "the page underneath must survive the overlay"
+        rows = d.ui_state()["files"]["rows"]
+        assert [r["name"] for r in rows] == ["LIB", "USB"], rows
+        assert rows[1]["present"] is False, "a missing source is still a row"
+
+        # The wheel moves the cursor; entering a source that is not mounted
+        # says why rather than doing nothing.
+        d.command("files move +1")
+        assert d.browser.cursor == 1
+        assert d.command("files enter") == []
+        assert d.message == "NOT MOUNTED", d.message
+        d.command("files move -1")
+        assert d.message == "", "a refusal outlived the row it was about"
+
+        d.command("files into")
+        assert not d.browser.at_root()
+        names = [r["name"] for r in d.ui_state()["files"]["rows"]]
+        assert names == ["KITS", "BEAT.IMG", "NOTES.TXT"], names
+        assert d.ui_state()["files"]["path"] == tmp
+
+        # browse_right refuses to load; only ENTER does.
+        d.browser.cursor = names.index("BEAT.IMG")
+        assert d.command("files into") == []
+        assert d.message == "ENTER TO LOAD", d.message
+        assert not os.path.exists(d.disk_request), \
+            "browse_right swapped the disk under a running instrument"
+        out = d.command("files enter")
+        assert out == ["load %s" % img], out
+        with open(d.disk_request) as fh:
+            assert fh.read().strip() == img
+        assert d.message == "LOAD BEAT.IMG", d.message
+
+        # A file that is not a disk says so, and up leaves the tree.
+        d.browser.cursor = names.index("NOTES.TXT")
+        d.command("files enter")
+        assert d.message == "NOT A DISK", d.message
+        d.command("files up")
+        assert d.browser.at_root()
+        d.command("files up")
+        assert d.message == "AT THE TOP", d.message
+
+        # THE VERBS COME FROM THE MAP THE HUB SENDS THEM FROM, not from
+        # strings typed here. A key whose command this process does not parse
+        # is precisely the gap that shipped the knobs dead and then the punch
+        # verbs dead: two green self-tests either side of a rename.
+        d.browser = browserlib.Browser(roots=[("LIB", tmp)])
+        for _line in sorted(control_map.FILES_BUTTONS.values()) + [
+                "files open", "files close", "files move +1"]:
+            assert "error no-files" not in " ".join(d.command(_line)), \
+                "the panel sends %r and daw-ctl does not parse it" % _line
+        d.command("files open")
+
+        # And the panel can draw what all of that produced.
+        frame = daw_ui.render(dict(daw_ui.sample_state("FILES"), **d.ui_state()))
+        assert len(frame.px) == 255 * 64
+        d.command("files close")
+        assert not d.files and d.ui_state()["page"] == "LOOP"
+        assert "files" not in d.ui_state()
+    finally:
+        shutil.rmtree(tmp)
     print("daw-ctl self-test PASS: %d OSC messages, state renders" %
           len(o.msgs))
 

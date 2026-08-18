@@ -344,6 +344,17 @@ class Router:
         self.rolling = set()
         self.focus = 0            # which strip the page-level verbs act on
         self.page = "LOOP"
+        # Is the file browser up? It is an OVERLAY on the right-hand screen
+        # rather than a page: it opens from either surface, the pads and the
+        # transport keep working underneath it, and closing puts back whatever
+        # page was there.
+        #
+        # Only the flag lives here. daw-ctl owns the cursor and the listing,
+        # because it owns every other piece of screen state and two owners of
+        # one cursor is how a screen and a controller end up disagreeing about
+        # what is selected. This flag decides one thing: where the browse keys
+        # and the big knob point.
+        self.files = False
 
     @property
     def mode(self):
@@ -401,6 +412,39 @@ class Router:
                 return [("midi", target), ("midi_up", target)]
             self.pressed[name] = target
             return [("midi", target)]
+
+        # --- the file browser ---------------------------------------------
+        #
+        # Checked after the transport so a browser key can never shadow one -
+        # you must be able to stop the beat with a listing up - and before the
+        # surface toggle so display8 can close the browser first.
+        #
+        # SHIFT+NAVIGATE toggles it, from either surface. Loading a disk feeds
+        # the MPC, but a player on the DAW surface who wants another kit should
+        # not have to change surfaces to ask for one, and NAVIGATE is unbound in
+        # DAW_BUTTONS so nothing is taken away there.
+        if down and name == control_map.FILES_BUTTON and self.shift:
+            self.files = not self.files
+            return [("cmd", "files open" if self.files else "files close")]
+        if self.files:
+            if name == control_map.FILES_CLOSE:
+                if not down:
+                    return []
+                self.files = False
+                return [("cmd", "files close")]
+            verb = control_map.FILES_BUTTONS.get(name)
+            if verb:
+                if not down:
+                    # A key pressed BEFORE the browser opened still has to be
+                    # released. Swallowing the release leaves the emulator
+                    # holding the key down forever, which with
+                    # MPCPI_TAP_KEYS=0 is a cursor key that never stops
+                    # repeating - the same class of bug the tap default exists
+                    # to avoid.
+                    sent = self.pressed.pop(name, None)
+                    return [("midi_up", sent)] if (sent and SEND_KEY_RELEASE) \
+                        else []
+                return [("cmd", verb)]
 
         if name == control_map.SURFACE_TOGGLE:
             if not down:
@@ -524,7 +568,16 @@ class Router:
         beginning "mpc:" is a MIDI target for the emulator; the rest is a DAW
         command.
         """
-        # Surface first: the big knob is the MPC's DATA wheel when the panel
+        # THE BROWSER TAKES THE BIG KNOB WHILE IT IS OPEN, on either surface.
+        # The knob already means "move through the thing"; the thing is the
+        # listing until it closes. Detented through the same accumulator as
+        # the MPC's data wheel, so one detent is one row rather than one row
+        # per report.
+        if self.files and name == "swing":
+            steps = self._wheel_steps(name, delta)
+            return [("cmd", "files move %+d" % steps)] if steps else []
+
+        # Surface next: the big knob is the MPC's DATA wheel when the panel
         # drives the MPC and the DAW's jog when it drives Ardour. Same gesture,
         # different instrument - which is the only way one knob can serve both
         # without a mode to remember.
@@ -533,37 +586,9 @@ class Router:
         if target is None:
             return []
         if target.startswith("mpc:"):
-            # SCALE IT. mk1_encoders reports an absolute angle normalised to
-            # 1000 units per revolution, so passing the raw delta through made
-            # one turn of the knob about a thousand steps of the MPC's data
-            # wheel - the same arithmetic that made the Ardour knobs unusable.
-            #
-            # A real MPC data wheel has coarse detents; WHEEL_UNITS_PER_STEP
-            # sets how far the knob turns for one of them, and the remainder is
-            # carried so a slow turn still moves rather than being rounded to
-            # nothing.
-            # Drop a stale remainder before adding to it.
-            #
-            # These are analog sensors: an untouched knob wanders, and anything
-            # past the tracker's deadband arrives here. Carrying the remainder
-            # forever turns that wander into a random walk that eventually
-            # crosses a step - measured at seven wheel messages in six idle
-            # seconds, nudging whatever field the cursor was on, with nobody
-            # touching the controller.
-            #
-            # A real turn produces a continuous run of deltas; noise arrives in
-            # isolated ticks. Forgetting the remainder after a pause keeps the
-            # carry (so slow turns still register) without letting drift
-            # integrate.
-            now = time.monotonic()
-            if (now - self._wheel_seen.get(name, 0.0)) > WHEEL_CARRY_S:
-                self._wheel_accum[name] = 0
-            self._wheel_seen[name] = now
-            self._wheel_accum[name] = self._wheel_accum.get(name, 0) + delta
-            steps = int(self._wheel_accum[name] / WHEEL_UNITS_PER_STEP)
+            steps = self._wheel_steps(name, delta)
             if not steps:
                 return []
-            self._wheel_accum[name] -= steps * WHEEL_UNITS_PER_STEP
             return [("midi", "%s:%+d" % (target, steps))]
         # "master +4", not "master master +4": the DAW master is not a
         # named strip, it is the one thing a master command can mean.
@@ -571,6 +596,41 @@ class Router:
         # "master" unconditionally, so the moment a second DAW target existed -
         # the jog - it silently moved the master fader instead.
         return [("cmd", "%s %+d" % (target.split(":", 1)[1], delta))]
+
+    def _wheel_steps(self, name, delta):
+        """Encoder units to detents, with the remainder carried.
+
+        SCALE IT. mk1_encoders reports an absolute angle normalised to 1000
+        units per revolution, so passing the raw delta through made one turn of
+        the knob about a thousand steps of the MPC's data wheel - the same
+        arithmetic that made the Ardour knobs unusable. A real MPC data wheel
+        has coarse detents; WHEEL_UNITS_PER_STEP sets how far the knob turns
+        for one of them, and the remainder is carried so a slow turn still
+        moves rather than being rounded away.
+
+        Drop a stale remainder before adding to it. These are analog sensors:
+        an untouched knob wanders, and anything past the tracker's deadband
+        arrives here. Carrying the remainder forever turns that wander into a
+        random walk that eventually crosses a step - measured at seven wheel
+        messages in six idle seconds, nudging whatever field the cursor was on,
+        with nobody touching the controller.
+
+        A real turn produces a continuous run of deltas; noise arrives in
+        isolated ticks. Forgetting the remainder after a pause keeps the carry
+        (so slow turns still register) without letting drift integrate.
+
+        Shared by the MPC's wheel and the file browser's cursor, so the
+        browser cannot quietly get a different feel from the same knob.
+        """
+        now = time.monotonic()
+        if (now - self._wheel_seen.get(name, 0.0)) > WHEEL_CARRY_S:
+            self._wheel_accum[name] = 0
+        self._wheel_seen[name] = now
+        self._wheel_accum[name] = self._wheel_accum.get(name, 0) + delta
+        steps = int(self._wheel_accum[name] / WHEEL_UNITS_PER_STEP)
+        if steps:
+            self._wheel_accum[name] -= steps * WHEEL_UNITS_PER_STEP
+        return steps
 
     def knob(self, index, delta):
         """Eight knobs under the screens: ONE PER MIXER STRIP.
@@ -835,6 +895,99 @@ def self_test():
     for _ in range(30):                       # isolated 4-unit ticks, far apart
         r9._wheel_seen["swing"] = 0.0         # pretend each is long after the last
         assert r9.master("swing", 4) == [], "sensor drift moved the wheel"
+
+    # --- the file browser -------------------------------------------------
+    #
+    # SHIFT+NAVIGATE opens it, the big knob moves the cursor, the two browse
+    # keys go up and in, STEP (which is the MPC's ENTER) loads, and D8 closes.
+    # browser.py's own self-test proves the listing works and proves nothing
+    # about the panel reaching it, so every gesture below is asserted against
+    # what the router actually returns.
+    rb = Router()
+    assert rb.files is False
+    # NAVIGATE alone is still MAIN SCREEN. The browser must not cost an MPC
+    # key - that is the whole reason it is the one shifted button.
+    assert sent(rb.button("navigate", True)) == "mpc:main_screen"
+    rb.button("navigate", False)
+    assert rb.files is False, "an unshifted NAVIGATE opened the browser"
+    assert rb.button("shift", True) == [("midi", "mpc:shift")]
+    assert rb.button("navigate", True) == [("cmd", "files open")], \
+        "SHIFT+NAVIGATE must open the browser"
+    assert rb.files is True
+    rb.button("navigate", False)
+    rb.button("shift", False)
+
+    # The three keys become the listing's, and the MPC sees none of them.
+    assert rb.button("browse_left", True) == [("cmd", "files up")]
+    assert rb.button("browse_left", False) == []
+    assert rb.button("browse_right", True) == [("cmd", "files into")]
+    rb.button("browse_right", False)
+    assert rb.button("step", True) == [("cmd", "files enter")]
+    rb.button("step", False)
+
+    # The wheel moves the cursor on the same detents the MPC's data wheel
+    # uses, so a nudge still moves nothing and one detent is one row.
+    assert rb.master("swing", 5) == [], "a nudge should not move the cursor"
+    ev = rb.master("swing", int(WHEEL_UNITS_PER_STEP))
+    assert ev == [("cmd", "files move +1")], ev
+    ev = rb.master("swing", -2 * int(WHEEL_UNITS_PER_STEP))
+    assert ev == [("cmd", "files move -1")], ev
+
+    # THE PADS ARE STILL THE MPC'S. The browser is a screen, not a mode - the
+    # same rule that took the mixer off the grid. Both pad layers survive it.
+    assert rb.pad(3, 99) == [("midi", "pad:3:99")]
+    rb.button("shift", True)
+    assert sent(rb.pad(0, 100)) == "mpc:song", "SHIFT+pad still types digits"
+    rb.button("shift", False)
+    # And so does the transport: you can stop the beat with a listing up.
+    assert sent(rb.button("play", True)) == "mpc:play"
+    rb.button("play", False)
+
+    # D8 closes rather than toggling the surface, and the NEXT press toggles -
+    # so the way out is in the same place it always is, one press deeper.
+    assert rb.button(control_map.SURFACE_TOGGLE, True) == [("cmd", "files close")]
+    assert rb.files is False
+    assert rb.surface == "MPC", "closing the browser also flipped the surface"
+    assert rb.button(control_map.SURFACE_TOGGLE, True) == [("surface", "DAW")]
+    # Closed, the browse keys are the MPC's cursor keys again.
+    rb.surface = "MPC"
+    assert sent(rb.button("browse_left", True)) == "mpc:left"
+    rb.button("browse_left", False)
+
+    # It opens from the DAW surface too: wanting another kit is not a reason
+    # to change surfaces first. SHIFT sends nothing there but still modifies.
+    rb2 = Router()
+    rb2.surface = "DAW"
+    assert rb2.button("shift", True) == [], "SHIFT is not an MPC key here"
+    assert rb2.button("navigate", True) == [("cmd", "files open")]
+    # ...and SHIFT+NAVIGATE closes it again: the way in is also a way out.
+    assert rb2.button("navigate", True) == [("cmd", "files close")]
+    assert rb2.files is False
+    rb2.button("shift", False)
+
+    # A browser key that was also panel-wide transport would take the
+    # transport away exactly when the player is least able to notice.
+    assert not (set(control_map.FILES_BUTTONS) & set(control_map.ALWAYS)), \
+        "a browser key shadows the transport"
+    # Every browser key must be a key the DECODER can send - the same trap
+    # that made OVER DUB unreachable for months.
+    for _b in list(control_map.FILES_BUTTONS) + [control_map.FILES_BUTTON]:
+        assert _b in known, "%s is not a key this panel can send" % _b
+    # The browser is not a page in the group row, so nothing but the shifted
+    # button and D8 may claim those keys.
+    assert control_map.FILES_BUTTON not in control_map.DAW_BUTTONS
+
+    # A page a button opens must have a renderer, or the gesture opens a hole.
+    import daw_ui as _dui
+    assert "FILES" in _dui.RENDERERS, \
+        "SHIFT+NAVIGATE opens a page nothing knows how to draw"
+    for _p in daw_pages():
+        assert _p in _dui.RENDERERS, "page %s has no renderer" % _p
+    # --snapshot renders PAGES, so a renderer missing from that list is a page
+    # no design review ever sees. WAVE and EDIT were in that hole for months.
+    assert set(_dui.PAGES) == set(_dui.RENDERERS), \
+        "--snapshot draws %s but renderers exist for %s" % (
+            sorted(_dui.PAGES), sorted(_dui.RENDERERS))
 
     # The two continuous controls must produce CONTROL CHANGE, not silence.
     wheel = encode_midi("mpc:data_wheel:+3")

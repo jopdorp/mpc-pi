@@ -199,3 +199,59 @@ again disarms and clears any rolling state.
 
 One row of seven buttons, one modifier-free path for the common case, and the
 instrument still under your hands throughout.
+
+## FILES — loading a floppy
+
+There is no keyboard on this appliance. MAME is handed `-flop` once at startup
+and never asked again, and the MPC's own LOAD screen can only see what is
+already in the drive — so choosing a different disk is a job for this panel or
+for nobody. `scripts/daw/browser.py` finds the images; this is how a finger
+reaches it.
+
+| gesture | action | status |
+|---|---|---|
+| `SHIFT` + `NAVIGATE` | open the browser (and close it again) | built |
+| jog / DATA wheel | move the cursor, one row per detent | built |
+| `browse_left` | up one directory | built |
+| `browse_right` | into the highlighted directory | built |
+| `STEP` (the MPC's ENTER) | load the highlighted image | built (panel side) |
+| `D8` | close | built |
+
+"Built (panel side)" means the whole path works up to the drive: the panel
+routes it, `daw-ctl` walks the tree and publishes the chosen image to
+`/dev/shm/mpc-disk`, and **nothing reads that file yet**. Mounting an image at
+runtime is MAME's side of the fence (`manager.machine.images[":fdc:0"]:load`)
+and that plugin does not exist, so today the screen says `LOAD BEAT02.IMG` and
+the drive does not change.
+
+It opens from **either surface**. Wanting another kit is not a reason to change
+surfaces first, and `NAVIGATE` is unbound in DAW mode, so nothing is taken away
+there.
+
+**Why the one shifted button.** SHIFT+pad types the MPC's digits and was
+supposed to be the only shift layer; this is the second and last. Every bare
+button already carries an MPC key, and "list the host's filesystem" is not an
+MPC function at all — the machine has no such key — so a bare button could only
+be had by making a real key unreachable. `NAVIGATE` is the one to shift because
+its bare press is MAIN SCREEN, "show me where I am"; shifted it is "show me
+where the disks are". The MPC never sees the MAIN SCREEN key when the browser
+opens, only the SHIFT already held, which alone does nothing.
+
+**`browse_right` navigates; `ENTER` loads.** They are one finger apart, and a
+right-arrow that swaps the media under a running instrument is a foot-gun. On a
+disk, `browse_right` answers `ENTER TO LOAD` instead.
+
+**The invariants hold.** The pads are still the MPC's, both layers of them; the
+transport still reaches the MPC, so the beat can be stopped with a listing up;
+and `D8` is still the way back — it closes the browser, and the next press
+toggles the surface as always. The browser is an overlay on the right-hand
+screen, not a page in the group row, so closing it puts back the page that was
+underneath.
+
+**On screen.** Five rows, the path on the status line, and the kind of each row
+carried as a *shape* — a filled block is a disk the drive can take, a hollow
+one is a disk-shaped file of the wrong size, a wedge is a directory, and a file
+that is neither gets no marker. Shape survives the cursor row, which inverts
+every brightness on it. A refusal ("NOT MOUNTED", "NOT A DISK") replaces the
+path in bright text until the next move, because a key that appears to do
+nothing is indistinguishable from a key that has broken.
