@@ -720,8 +720,47 @@ def self_test():
             assert LAMP_TO_LED[_key] == _led, \
                 "%s lamp is on %s but %s sends it" % (_key, LAMP_TO_LED[_key], _btn)
 
+    # A TAP SHORTER THAN THE BOUNCE WINDOW MUST STILL DELIVER BOTH EDGES.
+    #
+    # EP_CTRL is change-only - measured, it sends nothing at all while idle -
+    # so an edge the debounce drops is never offered again. Dropping the
+    # release of a quick tap left the button held forever: its next press was
+    # a silent no-op and its next release fired a bare key-up, which is the
+    # "a previously pressed button goes off by itself" report.
+    _d = Mk1.__new__(Mk1)
+    _d.buttons = 0
+    _d.button_raw = 0
+    _d.button_changed_at = [0.0] * 48
+    _d.button_bounces = 0
+    _d.leds = mk1_leds.LedBank()
+    _d._leds_dirty = False
+    _rd = Router()
+    _pos = control_map_buttons().index("play")
+    _d.button_raw = 1 << _pos
+    assert _d.settle_buttons(_rd), "press must be delivered"
+    assert _d.buttons == (1 << _pos)
+    _d.button_raw = 0                      # released inside the window
+    _d.settle_buttons(_rd)
+    assert _d.buttons == (1 << _pos), "release inside the window must defer"
+    _d.button_changed_at[_pos] -= Mk1.BUTTON_DEBOUNCE_S * 2      # window expires
+    _d.settle_buttons(_rd)
+    assert _d.buttons == 0, "deferred release never arrived - button stuck down"
+    # And a bounce train settles on its final value rather than emitting each
+    # flip - the reason the window exists at all.
+    _d.button_raw = 1 << _pos
+    _d.button_changed_at[_pos] -= Mk1.BUTTON_DEBOUNCE_S * 2
+    assert _d.settle_buttons(_rd)
+    for _ in range(6):                     # contact chatter, all inside 12ms
+        _d.button_raw ^= (1 << _pos)
+        _d.settle_buttons(_rd)
+        assert _d.buttons == (1 << _pos), "a bounce escaped the window"
+    _d.button_raw = 1 << _pos              # chatter settled back where it began
+    _d.button_changed_at[_pos] -= Mk1.BUTTON_DEBOUNCE_S * 2
+    _d.settle_buttons(_rd)
+    assert _d.buttons == (1 << _pos), "settled on the wrong value"
+
     print("maschine-hub self-test PASS: one function per button, every MPC key "
-          "reachable, surfaces isolated, pads upright")
+          "reachable, surfaces isolated, pads upright, taps not swallowed")
 
 
 class Mk1:
@@ -918,6 +957,9 @@ class Mk1:
         self._pad_seen_max = [0] * 16
         self.pad_suppressed = 0
         self.buttons = 0
+        # Last bitfield the HARDWARE reported, which is not what we have acted
+        # on yet. settle_buttons closes the gap when the bounce window allows.
+        self.button_raw = 0
         self.button_changed_at = [0.0] * 48
         self.button_bounces = 0
         self.encoders = mk1_encoders.EncoderTracker()
@@ -1134,11 +1176,28 @@ class Mk1:
             pass
         self._ctrl_tick += 1
         if not (self._ctrl_tick % BUTTON_POLL_EVERY):
-            try:
-                data = self.dev.read(EP_CTRL, 64, timeout=1)
+            # DRAIN it, do not take one report and leave the rest queued.
+            #
+            # EP_CTRL is change-only, so every report queued behind the one we
+            # take is an EDGE - a press or a release that has already happened.
+            # Reading one per four passes while a press and its release both
+            # sit in the FIFO means the release waits four more passes for no
+            # reason, and a burst never catches up.
+            #
+            # Bounded, because the encoders can talk continuously while a knob
+            # is turning and this loop must not become the pad loop's problem.
+            for _ in range(8):
+                try:
+                    data = self.dev.read(EP_CTRL, 64, timeout=1)
+                except Exception:
+                    break
+                if not len(data):
+                    break
                 events += self._ctrl(data, router)
-            except Exception:
-                pass
+        # Every pass, report or not: a transition held back by the bounce
+        # window has to be reconsidered while the endpoint stays silent, and
+        # EP_CTRL stays silent until something else moves.
+        events += self.settle_buttons(router)
         return events
 
 
@@ -1319,6 +1378,69 @@ class Mk1:
                 out += router.pad(pad, 0)
         return out
 
+    def settle_buttons(self, router):
+        """Move the debounced button state toward what the hardware reports.
+
+        THE DEBOUNCE MUST DEFER A TRANSITION, NEVER DISCARD ONE.
+
+        This used to drop any edge that arrived inside the bounce window and
+        then wait for the device to mention it again. The device never does:
+        EP_CTRL is change-only. Measured idle, over five seconds of reading as
+        fast as the endpoint allows, it sends exactly zero reports. There is no
+        periodic state report to correct a wrong guess.
+
+        So a discarded edge was permanent. The consequences, all three of which
+        were reported from the panel:
+
+          * a quick tap - press, then release inside 12ms - kept the button
+            DOWN in our state forever. The MPC got the key-down and never the
+            key-up.
+          * the next press of that button was then a no-op: the bit was already
+            set, so nothing changed and nothing was sent. "Doesn't work
+            reliably."
+          * and its release DID differ, so that press emitted a bare key-up for
+            a button pressed some time ago - a previously-pressed button firing
+            at a moment nothing was pressed. That is the phantom.
+
+        Deferring instead costs nothing: a bounce train still settles to its
+        final state, because the intermediate flips are absorbed and only the
+        value standing when the window expires is applied. A real tap's release
+        lands at the end of the window instead of the middle - 12ms late, once,
+        and it lands.
+
+        Called on EVERY poll pass, not only when a report arrives, which is the
+        half that makes it work. A deferred edge has to be reconsidered while
+        the endpoint stays silent.
+        """
+        diff = self.button_raw ^ self.buttons
+        if not diff:
+            return []
+        now = time.monotonic()
+        bits = self.buttons
+        for pos in range(48):
+            if not (diff >> pos) & 1:
+                continue
+            if (now - self.button_changed_at[pos]) < self.BUTTON_DEBOUNCE_S:
+                self.button_bounces += 1
+                continue
+            self.button_changed_at[pos] = now
+            bits ^= (1 << pos)
+        changed = bits ^ self.buttons
+        if not changed:
+            return []
+        self.buttons = bits
+        out = []
+        names = control_map_buttons()
+        for pos, name in enumerate(names):
+            if name and (changed >> pos) & 1:
+                down = bool((bits >> pos) & 1)
+                if TRACE:
+                    _trace("btn", "%d=%s%s" % (pos, name, "" if down else ":up"))
+                if self.press_light(BUTTON_LEDS.get(name), down):
+                    self._leds_dirty = True
+                out += router.button(name, down)
+        return out
+
     def _ctrl(self, data, router):
         if not data:
             return []
@@ -1344,39 +1466,12 @@ class Mk1:
             # Byte 6 also carries the validity flag at bit 6, which is
             # bit position 46 overall - past the 42 names in the table,
             # so it is never mistaken for a button.
-            raw_bits = int.from_bytes(bytes(data[1:7]), "little")
-            # Debounce per button, against the DEBOUNCED state - not against
-            # the last raw report. Comparing raw to raw lets a bounce through
-            # as soon as it settles differently for one report.
-            now = time.monotonic()
-            bits = self.buttons
-            for pos in range(48):
-                raw = (raw_bits >> pos) & 1
-                if raw == ((bits >> pos) & 1):
-                    continue
-                if (now - self.button_changed_at[pos]) < self.BUTTON_DEBOUNCE_S:
-                    self.button_bounces += 1
-                    continue
-                self.button_changed_at[pos] = now
-                bits ^= (1 << pos)
-            changed = bits ^ self.buttons
-            self.buttons = bits
-            if TRACE and changed:
-                names = control_map_buttons()
-                moved = []
-                for _p in range(48):
-                    if (changed >> _p) & 1:
-                        _n = names[_p] if _p < len(names) else None
-                        moved.append("%d=%s%s" % (_p, _n or "UNNAMED",
-                                                  "" if (bits >> _p) & 1 else ":up"))
-                _trace("btn", "raw=%s" % bytes(data[1:7]).hex(" "),
-                       " ".join(moved))
-            for pos, name in enumerate(control_map_buttons()):
-                if name and (changed >> pos) & 1:
-                    down = bool((bits >> pos) & 1)
-                    if self.press_light(BUTTON_LEDS.get(name), down):
-                        self._leds_dirty = True
-                    out += router.button(name, down)
+            # Record what the hardware says. Deciding what to DO about it is
+            # settle_buttons' job, and it has to be able to run again later.
+            self.button_raw = int.from_bytes(bytes(data[1:7]), "little")
+            if TRACE and self.button_raw != self.buttons:
+                _trace("btn", "raw=%s" % bytes(data[1:7]).hex(" "))
+            out += self.settle_buttons(router)
         elif kind == 0x02:
             # Eleven endless pots. NOT counters: each knob is a pair of
             # analog channels that must be interpolated into an absolute
