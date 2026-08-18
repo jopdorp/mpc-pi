@@ -469,4 +469,8 @@ if __name__ == "__main__":
     args = ap.parse_args()
     base = os.path.abspath(args.out)
     render("MPC", base)
-    render("DAW", base.replace(".png", "-daw.png"))
+    # Named for the thing it maps to, not as a suffix on the other file - the
+    # DAW page was written as "...-mapping-daw.png" and went unnoticed because
+    # nobody looks for the Ardour map under the MPC's name.
+    render("DAW", os.path.join(os.path.dirname(base),
+                               "maschine-ardour-mapping.png"))
