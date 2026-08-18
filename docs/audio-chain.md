@@ -352,3 +352,47 @@ bandwidth or the USB host controller, which no priority change would fix.
 - The remaining ~1.3/s of long held runs in the capture have no repeated length
   and are most likely material, not mechanism - not yet proven against a
   `-wavwrite` control from the same run.
+
+## What each plugin costs
+
+Asked whether lighter or built-in Ardour plugins would buy headroom. Guessing
+had already been wrong twice, so: `scripts/daw/bench-plugins.lua`, one track,
+plugins added four at a time with a noise generator at the head of the chain,
+CPU seconds from `/proc/self/stat` rather than `AudioEngine:get_dsp_load()` -
+which reports 0.00% while the process visibly burns a core, because PipeWire
+drives the graph and not Ardour.
+
+Percent of one core, per instance:
+
+| plugin                     | each  | in the desk | total |
+|----------------------------|-------|-------------|-------|
+| lsp mb_compressor_stereo   | 5.04  | x1          |  5.04 |
+| dragonfly-reverb           | 2.75  | x1          |  2.75 |
+| guitarix gx_amp_stereo     | 2.29  | x2          |  4.58 |
+| lsp para_equalizer_x16     | 1.46  | x7          | 10.22 |
+| lsp limiter_stereo         | 0.46  | x1          |  0.46 |
+| lsp sc_compressor_stereo   | 0.37  | x2          |  0.74 |
+| guitarix gx_cabinet        | 0.33  | x2          |  0.66 |
+| guitarix gxts9             | 0.21  | x2          |  0.42 |
+| ardour a-delay             | 0.17  | x1          |  0.17 |
+|                            |       | **19**      | **25.04** |
+
+Candidates priced but not installed: `a-eq` 0.33, `a-comp#stereo` 0.50,
+`a-reverb` read -0.58, which is not a negative cost - it is below the noise
+floor. Anything under about 0.5 here is "cheap", not a number.
+
+Two results that contradict the reasoning they replaced:
+
+  * **The guitar plugins are not the cheap ones.** gx_amp_stereo is the second
+    most expensive per instance in the whole desk.
+  * **LSP is not uniformly heavy.** sc_compressor_stereo, at 0.37, is cheaper
+    than Ardour's own a-comp. It is the MULTIBAND compressor that costs 5%, and
+    the sixteen-band parametric that costs 1.46 x7. Swapping LSP for a-* as a
+    family would make one strip slower.
+
+The two measurements agree, which is why the model is worth trusting. At
+quantum 64 / 44100 a period is 1451us. Ardour with no plugins measured 231us
+(16% of a period); the bench says these 19 plugins cost 25% of a core; and
+pw-top reads Ardour at 595us BUSY, B/Q 0.41. 16 + 25 = 41.
+
+Codec xruns over 40s with this desk running: **0**.

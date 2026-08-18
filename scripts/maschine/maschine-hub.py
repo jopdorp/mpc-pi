@@ -687,8 +687,10 @@ def self_test():
         with open(_chains) as _f:
             _keys = set(_json.load(_f))
         _orphans = _keys - set(control_map.STRIPS)
-        assert not _orphans, \
-            "chains.json has no strip for: %s" % sorted(_orphans)
+        assert not _orphans, (
+            "chains.json names strips that do not exist: %s. Renaming the desk "
+            "with MPCPI_STRIPS means re-keying chains.json to match - the "
+            "chains are looked up by NAME." % sorted(_orphans))
     assert len(control_map.STRIPS) == 8, "eight knobs, eight strips"
     assert "LOOP" not in control_map.STRIPS, "LOOP is a page, not a strip"
 

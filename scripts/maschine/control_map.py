@@ -19,6 +19,8 @@ Hardware facts this depends on (docs/maschine-mk1-display-protocol.md):
   * The panel shipped in two silkscreen revisions, so cabl's names are
     authoritative and the printed ones are noted where they differ.
 """
+import os
+
 
 # --- modes -----------------------------------------------------------
 #
@@ -124,8 +126,24 @@ BUTTONS_RIGHT_BY_PAGE = {
 # MPCPI_STRIPS/MPCPI_SENDS and must agree with this list - a knob pointed at a
 # strip that does not exist moves nothing and reports nothing, so a rename that
 # only lands on one side fails silently.
-STRIPS = ["LOOP1", "LOOP2", "LOOP3", "LOOP4", "LOOP5",
-          "DELAY", "REVERB", "MASTER"]
+def _names(env, fallback):
+    """Read a comma-separated name list from the environment.
+
+    Same env vars and same defaults as session-template.lua's names_from, so
+    ONE setting renames the desk on both sides at once. Set
+    MPCPI_STRIPS=DRUMS,BASS,KEYS,GTR,VOX in the unit and the panel, the
+    session and daw-ctl all agree without touching source.
+    """
+    v = os.environ.get(env, "").strip()
+    if not v:
+        return list(fallback)
+    return [w.strip() for w in v.split(",") if w.strip()]
+
+
+# Five loop tracks, two sends, master - eight names for eight knobs.
+STRIPS = (_names("MPCPI_STRIPS", ["LOOP1", "LOOP2", "LOOP3", "LOOP4", "LOOP5"])
+          + _names("MPCPI_SENDS", ["DELAY", "REVERB"])
+          + ["MASTER"])
 
 
 SURFACE_TOGGLE = "display8"
