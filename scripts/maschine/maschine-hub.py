@@ -759,6 +759,18 @@ def self_test():
     _d.settle_buttons(_rd)
     assert _d.buttons == (1 << _pos), "settled on the wrong value"
 
+    # TRACE-only code is not exercised by anything above, so a wrong call in it
+    # ships and then crashes the hub the first time someone enables tracing -
+    # which is exactly what happened: _trace takes three arguments and a new
+    # call site passed two, so the service died in the poll loop and the panel
+    # went dead. Check the arity statically instead; it costs one parse.
+    import ast as _ast
+    _src = _ast.parse(open(os.path.abspath(__file__)).read())
+    _bad = [n.lineno for n in _ast.walk(_src)
+            if isinstance(n, _ast.Call)
+            and getattr(n.func, "id", "") == "_trace" and len(n.args) != 3]
+    assert not _bad, "_trace takes (kind, payload, sink); wrong at lines %s" % _bad
+
     print("maschine-hub self-test PASS: one function per button, every MPC key "
           "reachable, surfaces isolated, pads upright, taps not swallowed")
 
@@ -1435,7 +1447,8 @@ class Mk1:
             if name and (changed >> pos) & 1:
                 down = bool((bits >> pos) & 1)
                 if TRACE:
-                    _trace("btn", "%d=%s%s" % (pos, name, "" if down else ":up"))
+                    _trace("btn", "%d=%s" % (pos, name),
+                           "down" if down else "up")
                 if self.press_light(BUTTON_LEDS.get(name), down):
                     self._leds_dirty = True
                 out += router.button(name, down)
@@ -1470,7 +1483,8 @@ class Mk1:
             # settle_buttons' job, and it has to be able to run again later.
             self.button_raw = int.from_bytes(bytes(data[1:7]), "little")
             if TRACE and self.button_raw != self.buttons:
-                _trace("btn", "raw=%s" % bytes(data[1:7]).hex(" "))
+                _trace("btn", "raw=%s" % bytes(data[1:7]).hex(" "),
+                       "pending %012x" % (self.button_raw ^ self.buttons))
             out += self.settle_buttons(router)
         elif kind == 0x02:
             # Eleven endless pots. NOT counters: each knob is a pair of
