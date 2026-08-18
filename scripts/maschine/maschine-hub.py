@@ -82,6 +82,14 @@ CC_NOTE_VARIATION = 2
 # NOTE VARIATION is absolute on the wire, so its position lives here.
 _variation = 64
 
+# Encoder units per one step of an MPC continuous control.
+#
+# mk1_encoders normalises a revolution to 1000 units. 40 gives 25 steps per
+# turn, which is about what the MPC's own detented wheel does; unscaled it was
+# 1000 and a nudge crossed the whole field. MPCPI_WHEEL_UNITS_PER_STEP tunes it
+# - lower is faster.
+WHEEL_UNITS_PER_STEP = float(os.environ.get("MPCPI_WHEEL_UNITS_PER_STEP", "40"))
+
 # MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
 # else is a light that reports something you press somewhere else, which is
 # worse than no light: FULL LEVEL moved from GRID to SELECT to F7 during this
@@ -197,6 +205,8 @@ class Router:
         self.shift = False
         # Which instrument the panel drives. See control_map.SURFACE_TOGGLE.
         self.surface = "MPC"
+        # Carried remainder per master knob, so slow turns are not rounded away.
+        self._wheel_accum = {}
         # What each button sent on its press edge, so the RELEASE can send the
         # matching note-off. Keyed by button name, not by target: shift can be
         # let go between press and release, and the key that must be released
@@ -338,7 +348,21 @@ class Router:
         if target is None:
             return []
         if target.startswith("mpc:"):
-            return [("midi", "%s:%+d" % (target, delta))]
+            # SCALE IT. mk1_encoders reports an absolute angle normalised to
+            # 1000 units per revolution, so passing the raw delta through made
+            # one turn of the knob about a thousand steps of the MPC's data
+            # wheel - the same arithmetic that made the Ardour knobs unusable.
+            #
+            # A real MPC data wheel has coarse detents; WHEEL_UNITS_PER_STEP
+            # sets how far the knob turns for one of them, and the remainder is
+            # carried so a slow turn still moves rather than being rounded to
+            # nothing.
+            self._wheel_accum[name] = self._wheel_accum.get(name, 0) + delta
+            steps = int(self._wheel_accum[name] / WHEEL_UNITS_PER_STEP)
+            if not steps:
+                return []
+            self._wheel_accum[name] -= steps * WHEEL_UNITS_PER_STEP
+            return [("midi", "%s:%+d" % (target, steps))]
         # "master +4", not "master master +4": the DAW master is not a
         # named strip, it is the one thing a master command can mean.
         return [("cmd", "master %+d" % delta)]
@@ -447,6 +471,16 @@ def self_test():
     assert flip(12) == 0 and flip(15) == 3
     assert sorted(flip(i) for i in range(16)) == list(range(16))
     assert all(flip(i) % 4 == i % 4 for i in range(16))
+
+    # The wheel must be SCALED, and the remainder carried rather than dropped.
+    r7 = Router()
+    assert r7.master("swing", 5) == [], "a nudge should not move the wheel"
+    total = 0
+    for _ in range(20):                       # 20 x 5 = 100 units
+        for kind, payload in r7.master("swing", 5):
+            total += int(payload.rsplit(":", 1)[1])
+    assert total == int(100 / WHEEL_UNITS_PER_STEP), \
+        "100 units gave %d steps, expected %d" % (total, 100 / WHEEL_UNITS_PER_STEP)
 
     # The two continuous controls must produce CONTROL CHANGE, not silence.
     wheel = encode_midi("mpc:data_wheel:+3")
