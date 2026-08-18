@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Ardour's user config, present ONLY to switch the OSC surface on.
+
+  Nothing in this project ever enabled it. Control protocols default to
+  inactive, the Lua API of this build exposes no way to activate one - no
+  ARDOUR.ControlProtocolManager - and setting active="1" in the session file
+  does not do it either. luasession never wrote a user config at all, so the
+  directory existed with no config in it and every surface sat at its default.
+
+  The result was a mixer that could not be driven from the panel: Ardour ran,
+  daw-ctl sent, and nothing listened on 3819.
+
+  Schema copied from /etc/ardour8/system_config. Keep the empty Config and
+  Metadata elements - Ardour merges its own defaults into them, and this file
+  must not be mistaken for a full configuration.
+-->
+<Ardour>
+	<Config/>
+	<Metadata/>
+	<ControlProtocols>
+		<Protocol name="Open Sound Control (OSC)" active="1"/>
+	</ControlProtocols>
+</Ardour>

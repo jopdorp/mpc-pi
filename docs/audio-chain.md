@@ -433,3 +433,39 @@ harness.
 
 What is left is mostly gx_amp_stereo at 2.29 x2, and that one is the guitar
 sound rather than a tax on it.
+
+## The mixer was never reachable from the panel
+
+Two faults, both silent, both of which read as "Ardour ignores the knobs".
+
+**1. The OSC surface was never enabled.** Ardour's control protocols default to
+inactive. Nothing in this project turned OSC on, the Lua API of this build
+exposes no way to (`ARDOUR.ControlProtocolManager` does not exist), and setting
+`active="1"` in the session file does not do it either. luasession never writes
+a user config, so `~/.config/ardour8/` existed with no `config` in it and every
+surface stayed at its default. Nothing listened on 3819.
+
+**2. The OSC encoder padded aligned strings by a whole extra word.**
+
+    _pad(b) = b + b"\0" * (4 - len(b) % 4)
+
+When the input is already a multiple of four this adds 4 bytes instead of 0.
+Callers pass the string WITH its mandatory null, so an 11-character address
+arrives as 12 bytes - aligned - and came back 16. A two-argument type tag,
+",if" plus its null, is 4 and came back 8.
+
+`/strip/gain` is eleven characters and takes two arguments, so it was wrong
+twice. liblo, which Ardour parses with, drops a malformed packet without a
+word. The send succeeded, because a UDP send always succeeds.
+
+Only lengths of 3 mod 4 were affected, and the self-test's two vectors - "/x"
+and "/abc" - are not. Worse, the test asserted the bug was correct, with a
+comment explaining that an aligned string "still takes a whole extra pad word".
+The specification had been written from the defect.
+
+Verified end to end after both fixes: `gain LOOP1 -6.5` on the FIFO, then
+`/save_state`, then the session on disk reads
+
+    <Controllable name="gaincontrol" ... value="0.47315126657485962"/>
+
+which is -6.50 dB.
