@@ -1,0 +1,19 @@
+--- a/src/osd/modules/sound/pipewire_sound.cpp
++++ b/src/osd/modules/sound/pipewire_sound.cpp
+@@ -992,7 +992,15 @@
+ 										   &stream);
+ 	stream.m_node = &snode;
+ 
+-	const spa_pod *params;
++	// No `params` here. Patch 0045 replaced this declaration's only use
++	// with connect_params[] and left the declaration behind. Harmless on
++	// the desktop toolchain, fatal on the cross one: the Buildroot aarch64
++	// build compiles with -Werror, so one unused variable stopped the whole
++	// Pi build - and only the Pi build, which is the one that ships.
++	//
++	// The IDENTICAL declaration further down IS used; only this one is
++	// orphaned. Deleting the wrong one compiles and fails later, so check
++	// which before touching either.
+ 	spa_audio_info_raw format = {
+ 		SPA_AUDIO_FORMAT_S16,
+ 		0,
