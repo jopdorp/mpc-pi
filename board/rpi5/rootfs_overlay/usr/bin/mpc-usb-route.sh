@@ -18,19 +18,36 @@
 #
 # The map, as the computer sees it:
 #
-#   ch  1-2    MPC stereo mix              (:speaker)
+#   ch  1-2    MPC stereo master           (:speaker)
 #   ch  3-10   MPC individual outs 1-8     (:outputs, needs MPC_OUTPUT_MODE=all)
 #   ch 11-12   DAW master L/R              (:Master)
 #   ch 13-22   DAW loop stems, stereo      (:LOOP1 .. :LOOP5)
+#   ch 23-24   DAW delay send, stereo      (:DELAY)
+#   ch 25-26   DAW reverb send, stereo     (:REVERB)
 #   stereo IN  computer playback           -> :Master, mixed straight in
 #
-# Twenty-two up costs the ADC-direct tap the earlier version carried on
-# 21-22 (the PCM1808 pair, dry, for later re-amping) - dropped rather
-# than dropping a loop track, because reaching every loop stem from the
-# computer is closer to what this appliance is FOR now than a dry
-# capture feed is. There is also no dedicated AUX strip to land the
-# computer's playback on any more - it predates the LOOP1-5 rename -
-# so it goes straight to the master input as a backing-track mix-in.
+# THE DRY AUDIO-INTERFACE PAIR IS NOT HERE, and it is the one thing from
+# the requested map that had to go. 28 channels does not bind: the kernel
+# caps a UAC2 gadget at 27 (UAC2_CHANNEL_MASK, 27 spatial positions), and
+# asking for 28 fails with -EINVAL rather than degrading. Something had to
+# be dropped, and this pair is the only one whose signal still reaches the
+# computer by another route - it arrives on whichever LOOP track is armed,
+# just after Ardour's input chain rather than before it. Every other source
+# here has no second path.
+#
+# The MPC's individual outs are EIGHT MONO channels, not four stereo
+# pairs - that is what the IB-M208P expansion board gives on the real
+# machine, one jack per out, and the emulator models it the same way
+# (an 8-channel :outputs node, one channel per bus).
+#
+# ch 27-28 are the interface's own inputs before anything in the graph
+# touches them, so a take can be re-amped later from the dry signal. It
+# is a tap of the capture device, NOT of an Ardour track, for exactly
+# that reason - an Ardour input track has already been through its chain.
+#
+# There is no dedicated AUX strip to land the computer's playback on -
+# that predates the LOOP1-5 rename - so it goes straight to the master
+# input as a backing-track mix-in.
 #
 # EVERY LINK HERE IS A TAP. Nothing already routed to the local monitor
 # output is unrouted first - the gadget receives a parallel copy, same
@@ -138,8 +155,10 @@ route() {
 	$op ":Master/audio_out 1" "$node:playback_AUX10"
 	$op ":Master/audio_out 2" "$node:playback_AUX11"
 
+	# ch 13-28: every remaining Ardour stereo bus, in panel order, then
+	# the interface's dry inputs. One loop, one place to add a bus.
 	i=0
-	for strip in LOOP1 LOOP2 LOOP3 LOOP4 LOOP5; do
+	for strip in LOOP1 LOOP2 LOOP3 LOOP4 LOOP5 DELAY REVERB; do
 		base=$((12 + i * 2))
 		$op ":$strip/audio_out 1" "$node:playback_AUX$base"
 		$op ":$strip/audio_out 2" "$node:playback_AUX$((base + 1))"
@@ -156,7 +175,7 @@ route() {
 case "$MODE" in
 on)
 	route link
-	log "$made links up, $absent absent (target: 22 up / 2 down)"
+	log "$made links up, $absent absent (26 up / 2 down configured)"
 	# EXIT NONZERO WHEN NOTHING WORTH HAVING GOT LINKED.
 	#
 	# An earlier version of the sibling script for the local monitor sink
@@ -178,16 +197,25 @@ status)
 		echo "gadget not present"
 		exit 1
 	fi
-	for ch in $(seq 0 21); do
-		# For an INPUT port (our sink's playback_AUXn), pw-link -l prints
-		# the port's own name first and its source(s) on the "|<-" line(s)
-		# immediately AFTER it - not before. This read -B1 originally,
-		# which is backwards, and printed whatever unrelated line happened
-		# to precede the match instead of the actual source.
-		src=$($R pw-link -l 2>/dev/null |
-			grep -A1 "playback_AUX$ch\$" | sed -n '2p' | sed 's/^ *|<- *//')
+	# ANCHOR THE MATCH TO THE START OF THE LINE.
+	#
+	# In pw-link -l a port name appears twice over: once at the left margin
+	# as its own entry, with its sources on the indented "|<-" lines that
+	# follow, and again INSIDE other ports' indented "|->" lines. A grep for
+	# the bare name matches both, and -A1 then reads a line belonging to a
+	# different port - which is how this map reported "(nothing)" for 26
+	# channels that were all correctly linked. The "^" is the whole fix:
+	# an indented reference can never match it.
+	pwl=$(mktemp)
+	$R pw-link -l 2>/dev/null > "$pwl"
+	ch=0
+	while [ "$ch" -lt 26 ]; do
+		src=$(grep -A1 "^$node:playback_AUX$ch\$" "$pwl" |
+			sed -n '2s/^[[:space:]]*|<-[[:space:]]*//p')
 		printf 'ch %-2d  %s\n' "$((ch + 1))" "${src:-(nothing)}"
+		ch=$((ch + 1))
 	done
+	rm -f "$pwl"
 	gin=$(gadget_in_node)
 	[ -n "$gin" ] && echo "down    $gin (capture_FL/FR)"
 	true    # status is a report, not a pass/fail check - always exit 0,

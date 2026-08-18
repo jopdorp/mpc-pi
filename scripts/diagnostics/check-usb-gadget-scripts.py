@@ -25,9 +25,9 @@ def route_channel_map():
     literal = sorted(int(n) for n in re.findall(r'AUX(\d+)"', route))
 
     idx = list(literal)
-    for i in range(8):
+    for i in range(8):                 # MPC individual outs, mono
         idx.append(i + 2)
-    for i in range(5):
+    for i in range(7):                 # LOOP1-5, DELAY, REVERB - stereo each
         base = 12 + i * 2
         idx.append(base)
         idx.append(base + 1)
@@ -41,11 +41,25 @@ def gadget_mask_fn():
 
 def self_test():
     idx, route = route_channel_map()
-    assert idx == list(range(22)), \
-        "mpc-usb-route.sh: channel map is not exactly AUX0..21 once each: %r" % idx
-    assert route.count("capture_FL") == 1 and route.count("capture_FR") == 1, \
-        "mpc-usb-route.sh: the 2-channel return must appear exactly once per side"
-    print("PASS: mpc-usb-route.sh assigns AUX0..21 exactly once, "
+    assert idx == list(range(26)), \
+        "mpc-usb-route.sh: channel map is not exactly AUX0..25 once each: %r" % idx
+    # capture_FL/FR now appears TWICE for a legitimate reason, so counting
+    # the bare string no longer distinguishes them:
+    #   - the ADC tap ($adc:capture_FL -> the gadget), ch 27-28
+    #   - the host's playback return ($gin:capture_FL -> Ardour's master)
+    # They point in opposite directions and confusing them would send the
+    # computer's own audio back to the computer. Check each by its variable.
+    assert route.count('"$gin:capture_FL"') == 1, \
+        "the host return must appear exactly once"
+    assert route.count('"$gin:capture_FR"') == 1
+    # And the two must never be crossed: the ADC feeds the GADGET, the host
+    # return feeds ARDOUR. If either ever pointed at the other, the computer
+    # would be recording its own output.
+    import re as _re
+    for m in _re.finditer(r'\$op "\$gin:capture_F[LR]" "([^"]+)"', route):
+        assert m.group(1).startswith(":Master/"), \
+            "the host return must feed Ardour's master, not %s" % m.group(1)
+    print("PASS: mpc-usb-route.sh assigns AUX0..25 exactly once, "
           "and the 2ch return exactly once per side")
 
     g = gadget_mask_fn()
@@ -56,12 +70,31 @@ def self_test():
     for n in (2, 8, 22):
         want = (1 << n) - 1
         assert want < (1 << 32)
-    assert "CHANNELS_UP=${MPC_USB_CHANNELS_UP:-22}" in g
+    assert "CHANNELS_UP=${MPC_USB_CHANNELS_UP:-26}" in g
     assert "CHANNELS_DOWN=${MPC_USB_CHANNELS_DOWN:-2}" in g
     assert 'RATE=${MPC_USB_RATE:-44100}' in g, \
         "the gadget must default to 44100 - the MPC is 44.1kHz end to end; " \
         "48000 resamples every channel and has silently shipped once already"
-    print("PASS: mpc-usb-gadget.sh defaults to 44100Hz, 22 up / 2 down")
+    print("PASS: mpc-usb-gadget.sh defaults to 44100Hz, 26 up / 2 down")
+
+    # 28ch must fit a HIGH-SPEED microframe, which is the speed every modern
+    # host negotiates. Full speed cannot carry it and f_uac2 clamps that
+    # descriptor - checked here so a future channel-count change cannot
+    # silently cross the limit that actually matters.
+    hs_bytes = 26 * 3 * 44100 / 8000.0
+    assert hs_bytes <= 1024, (
+        "26ch x 24-bit x 44.1k needs %.0f bytes per HS microframe, over the "
+        "1024 limit" % hs_bytes)
+    # THE HARD ONE: a UAC2 gadget cannot exceed 27 channels. The kernel
+    # derives the count from UAC2_CHANNEL_MASK (0x07FFFFFF, 27 spatial
+    # positions) and returns -EINVAL past it - measured: asking for 28 gave
+    # "unsupported playback channels mask" and the gadget refused to bind.
+    m = re.search(r"CHANNELS_UP=\$\{MPC_USB_CHANNELS_UP:-(\d+)\}", g)
+    assert m, "cannot find the channel count in mpc-usb-gadget.sh"
+    assert int(m.group(1)) <= 27, (
+        "%s channels up exceeds the UAC2 ceiling of 27 - the gadget will "
+        "not bind at all" % m.group(1))
+    print("PASS: 26ch needs %.0f bytes per HS microframe (limit 1024)" % hs_bytes)
 
     # The gadget and the WirePlumber scheduling rule must agree on the
     # platform device pattern, or the rule silently never matches anything.

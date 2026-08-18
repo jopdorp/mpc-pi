@@ -28,15 +28,43 @@ CFG=$G/configs/c.1
 
 log() { echo "mpc-usb-gadget: $*"; }
 
-# 22 channels up (the gadget's "p_" - playback - side: what WE play
+# 28 channels up (the gadget's "p_" - playback - side: what WE play
 # locally becomes what the HOST records), 2 down ("c_" - capture: what
 # the host plays becomes what we read locally). Concurrent, not
 # switchable - an earlier version took turns between MPC and DAW on ten
 # channels, which quietly reinvented the chained topology this design
-# forbids. Bandwidth is not the constraint: 22ch of 24-bit 44.1k is
-# 2.9MB/s, 363 bytes per 125us microframe, well inside one high-speed
-# packet.
-CHANNELS_UP=${MPC_USB_CHANNELS_UP:-22}
+# forbids.
+#
+# Bandwidth is not the constraint: 28ch of 24-bit 44.1k is 3.7MB/s, which
+# is 463 bytes per 125us high-speed microframe against a 1024-byte limit.
+#
+# It DOES exceed what a full-speed frame can carry, and f_uac2 warns about
+# that at bind time. It then CLAMPS wMaxPacketSize to 1023, so the
+# full-speed descriptor is structurally valid, merely undersized - which is
+# why this is not treated as a blocker. Every modern host negotiates high
+# speed.
+#
+# TWENTY-SIX, NOT TWENTY-EIGHT. The kernel refuses anything past 27:
+#
+#     f_uac2.c:22   #define UAC2_CHANNEL_MASK 0x07FFFFFF     (27 bits)
+#     f_uac2.c:982  opts->p_chmask & ~UAC2_CHANNEL_MASK
+#                       -> "unsupported playback channels mask", -EINVAL
+#
+# Measured, not guessed: asking for 28 gave "Error: unsupported playback
+# channels mask" / "failed to start mpc: -22" and the gadget did not bind
+# at all.
+#
+# This is a USB Audio Class 2 constraint showing through, not an arbitrary
+# Linux number. The driver derives the channel COUNT from the channel
+# POSITION mask (popcount), and UAC2 defines 27 spatial positions. A stream
+# wider than that is legal in the spec only by declaring channels with no
+# assigned position - which this driver cannot express, because count and
+# position are the same field to it.
+#
+# So the full 28-channel wish list is one channel over a real ceiling. 26
+# is what fits after dropping the pair that costs least: see the map in
+# mpc-usb-route.sh.
+CHANNELS_UP=${MPC_USB_CHANNELS_UP:-26}
 CHANNELS_DOWN=${MPC_USB_CHANNELS_DOWN:-2}
 # 44100, NOT 48000: the MPC is a 44.1kHz machine end to end. A 48k gadget
 # resamples every channel on the way to the computer - measured once
