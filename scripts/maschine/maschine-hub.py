@@ -120,9 +120,16 @@ POLL_STATS = bool(os.environ.get("MPCPI_HUB_POLL_STATS"))
 BUTTON_POLL_EVERY = int(os.environ.get("MPCPI_BUTTON_POLL_EVERY", "4"))
 
 # How fast a pad's remembered peak fades, per report. Reports arrive about
-# every 1.4ms, so 0.88 leaves roughly a tenth after 20ms - long enough to still
-# recognise a lagging bleed, short enough not to suppress a genuine second hit.
-PAD_PEAK_DECAY = float(os.environ.get("MPCPI_PAD_PEAK_DECAY", "0.88"))
+# every 1.4ms, so 0.93 leaves about a third after 20ms - the bleed can arrive
+# that late, and at 0.88 the peak had already decayed below the size of the
+# bleed it was supposed to explain.
+PAD_PEAK_DECAY = float(os.environ.get("MPCPI_PAD_PEAK_DECAY", "0.93"))
+
+# The pressure that means velocity 127. Where a pad tops out is a property of
+# the hardware, so it is a setting rather than a shift - and it should be
+# MEASURED: POLL_STATS prints the peak seen per pad, so play the grid as hard
+# as you ever will and read the number off.
+PAD_FULL_SCALE = int(os.environ.get("MPCPI_PAD_FULL_SCALE", "2600"))
 
 # MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
 # else is a light that reports something you press somewhere else, which is
@@ -984,6 +991,23 @@ class Mk1:
         """
         return (3 - (raw >> 2)) * 4 + (raw & 3)
 
+    def velocity(self, pressure):
+        """Map pad pressure to MIDI velocity 1..127.
+
+        This was `min(127, pressure >> 5)`, a fixed shift, which puts full
+        scale at 4064 counts. The pads do not reach that, so the top of the
+        range was unreachable no matter how hard they were hit - a hard hit
+        landed around 96 and 127 could not be played at all.
+        
+        Now it interpolates between the on-threshold and PAD_FULL_SCALE, so
+        the softest hit that registers is 1 and a hit at full scale is 127.
+        Both ends are settings, because where a pad tops out is a property of
+        the hardware and this one has already been measured wrong once.
+        """
+        span = max(1, PAD_FULL_SCALE - self.PAD_ON_THRESHOLD)
+        v = 1 + int(round((pressure - self.PAD_ON_THRESHOLD) * 126.0 / span))
+        return max(1, min(127, v))
+
     def _pads(self, data, router):
         out = []
         # Take the whole report in first. The bleed correction needs the
@@ -1026,9 +1050,19 @@ class Mk1:
             # threshold to 250 made it easier to reach.
             neighbour = max(self.pad_raw[(raw + 1) % 16],
                             self.pad_peak[(raw + 1) % 16])
-            pressure = own
-            if neighbour > own * 2:
-                pressure = own - int(neighbour * self.PAD_BLEED)
+            # ALWAYS subtract. There used to be a gate - only correct when the
+            # neighbour was more than twice this pad's reading - and it failed
+            # in exactly the case that matters. The bleed lags its source, the
+            # remembered peak decays while it arrives, and once the peak has
+            # fallen near the bleed's own size the gate stops firing and the
+            # raw value passes. Measured: a 2048 hit on pad 3 put 253 on pad 2,
+            # about 12%, and 253 is above the 250 threshold.
+            #
+            # Subtracting unconditionally is safe because the correction is
+            # PROPORTIONAL: a genuine simultaneous hit is far larger than its
+            # neighbour's bleed and survives with most of its velocity, while
+            # bleed is removed entirely.
+            pressure = own - int(neighbour * self.PAD_BLEED)
             if pressure < 0:
                 pressure = 0
             pad = self._pad_index(raw)
@@ -1054,7 +1088,7 @@ class Mk1:
                 self.pad_last_on[pad] = now
                 # Velocity from the leading edge: the stream is pressure,
                 # not note-on, so the first crossing is the hit.
-                out += router.pad(pad, min(127, pressure >> 5))
+                out += router.pad(pad, self.velocity(pressure))
             elif self.pad_on[pad] and pressure <= self.PAD_OFF_THRESHOLD:
                 self.pad_on[pad] = False
                 out += router.pad(pad, 0)
