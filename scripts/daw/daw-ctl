@@ -13,7 +13,7 @@ when a button or pad is pressed. A FIFO rather than a socket because a
 FIFO survives either side restarting without a reconnect dance, which on
 stage is the only property that matters.
 
-    daw-ctl --session-strips MPC,GTR1,...   [--dry-run] [--self-test]
+    daw-ctl --session-strips LOOP1,LOOP2,...  [--dry-run] [--self-test]
 """
 import argparse
 import json
@@ -34,9 +34,18 @@ FIFO = "/run/daw-ctl.fifo"
 
 # Column order is the contract: strip N on the panel is OSC ssid N+1 and
 # the same column the UI draws. Changing this changes three things at
-# once, so it lives in exactly one place.
-STRIPS = ["MPC", "GTR1", "GTR2", "MIC", "LOOP", "VERB", "DLY", "AUX"]
-LANES = ["GTR1", "GTR2", "MIC", "AUX"]
+# once, so it lives in exactly one place - and that place is control_map,
+# which the Maschine panel and the session template already read.
+#
+# It used to be a fourth, independent copy of the list, and it silently kept
+# the old names through a rename: the panel drew LOOP1..LOOP5 while this file
+# still believed in MPC/GTR1/GTR2/MIC, so knob N moved whatever route happened
+# to sit at index N. Indices, not names, go out over OSC, so nothing errored.
+import control_map                                        # noqa: E402
+STRIPS = list(control_map.STRIPS)
+# The recordable lanes are the loop tracks - everything that is not a send or
+# the master. Derived, so adding a sixth loop needs one edit, not two.
+LANES = [n for n in STRIPS if n not in ("DELAY", "REVERB", "MASTER")]
 
 
 class Daw:
@@ -292,27 +301,31 @@ def self_test():
     assert any(p == "/set_surface/bank_size" for p, _ in o.msgs)
 
     # ssid is the panel column + 1, the contract the whole system leans on
-    assert d.ssid("MPC") == 1 and d.ssid("GTR1") == 2
+    # Written against the LIST, not against literal names. Hardcoding "MPC"
+    # and "GTR1" here is what let a rename pass a green self-test while the
+    # knobs addressed the wrong routes.
+    assert d.ssid(STRIPS[0]) == 1 and d.ssid(STRIPS[1]) == 2
+    assert LANES and all(n in STRIPS for n in LANES)
 
     # a mixer move reaches Ardour with the right strip and value
-    d.command("gain GTR2 -6.5")
+    d.command("gain %s -6.5" % STRIPS[2])
     assert ("/strip/gain", (3, -6.5)) in o.msgs, o.msgs
 
     # mute toggles rather than sets, and echoes to Ardour
-    d.command("mute MIC")
+    d.command("mute %s" % STRIPS[3])
     assert ("/strip/mute", (4, 1)) in o.msgs
-    d.command("mute MIC")
+    d.command("mute %s" % STRIPS[3])
     assert ("/strip/mute", (4, 0)) in o.msgs
 
     # transport export drives the bar grid; recording arms at the bar
     d.transport.update_from_export(1, 0, 0)
     d.playhead = 0
-    out = d.command("rec GTR1")
-    assert out and out[0].startswith("arm GTR1"), out
+    out = d.command("rec %s" % LANES[0])
+    assert out and out[0].startswith("arm %s" % LANES[0]), out
     d.playhead = d.transport.samples_per_bar()
     acts = d.tick()
     assert any(a.startswith("record-start") for a in acts), acts
-    assert ("/strip/recenable", (2, 1)) in o.msgs, o.msgs
+    assert ("/strip/recenable", (d.ssid(LANES[0]), 1)) in o.msgs, o.msgs
 
     # the UI state is renderable by the panel code
     st = d.ui_state()

@@ -84,6 +84,19 @@ for uri in text:gmatch('"uri":%s*"([^"]+)"') do
 	end
 end
 
+-- Candidates that are NOT in the manifest, so a replacement can be priced
+-- before it is adopted. Ardour's own a-EQ and a-Compressor are the obvious
+-- alternatives to five copies of a sixteen-band LSP parametric, but "obvious"
+-- has been wrong twice on this appliance and a ranking is cheap.
+-- Counted x0 so they never inflate the manifest total.
+for uri in (os.getenv("BENCH_EXTRA_URIS") or ""):gmatch("[^,]+") do
+	uri = uri:match("^%s*(.-)%s*$")
+	if uri ~= "" and not counts[uri] then
+		counts[uri] = 0
+		order[#order + 1] = uri
+	end
+end
+
 -- CPU seconds burned per wall second, read from /proc, not
 -- AudioEngine:get_dsp_load(). The engine's own figure reported a
 -- perfectly steady 0.00% while the process sat at 70% CPU visibly
@@ -139,8 +152,9 @@ for _, uri in ipairs(order) do
 			uri = uri, each = cost, total = cost * counts[uri],
 			n = counts[uri],
 		}
-		print(string.format("PLUGIN %6.2f each  x%d = %6.2f  %s",
-			cost, counts[uri], cost * counts[uri], uri))
+		print(string.format("PLUGIN %6.2f each  x%d = %6.2f  %s%s",
+			cost, counts[uri], cost * counts[uri], uri,
+			counts[uri] == 0 and "   (candidate, not in the desk)" or ""))
 	else
 		print("MISSING " .. uri)
 	end
