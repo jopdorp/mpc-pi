@@ -74,8 +74,24 @@ end
 --
 -- MAX_PLUGINS_PER_ROUTE is the ceiling that keeps it that way. GTR1 and GTR2
 -- carried eight inserts each, which is where most of the 27 came from.
-local STRIP_NAMES = { "REC1", "REC2", "REC3", "REC4", "REC5" }
-local SEND_NAMES = { "DELAY", "REVERB" }
+-- Five individual LOOP tracks, then the two sends. Renaming them is meant to
+-- be easy: set MPCPI_STRIPS and MPCPI_SENDS, and set the same names in
+-- control_map.STRIPS so the panel addresses the same desk. A knob pointed at
+-- a strip that does not exist moves nothing and reports nothing, which is the
+-- failure mode renaming invites.
+local function names_from(env, fallback)
+	local v = os.getenv(env)
+	if not v or v == "" then return fallback end
+	local out = {}
+	for w in string.gmatch(v, "[^,]+") do
+		out[#out + 1] = (string.gsub(w, "^%s*(.-)%s*$", "%1"))
+	end
+	return out
+end
+
+local STRIP_NAMES = names_from("MPCPI_STRIPS",
+	{ "LOOP1", "LOOP2", "LOOP3", "LOOP4", "LOOP5" })
+local SEND_NAMES = names_from("MPCPI_SENDS", { "DELAY", "REVERB" })
 local MAX_PLUGINS_PER_ROUTE =
 	tonumber(os.getenv("MPCPI_MAX_PLUGINS") or "4")
 

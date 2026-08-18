@@ -1,5 +1,5 @@
 {
-  "REC1": [
+  "LOOP1": [
     {
       "name": "EQ",
       "kind": "eq",
@@ -8,7 +8,7 @@
       "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
     }
   ],
-  "REC2": [
+  "LOOP2": [
     {
       "name": "OD",
       "kind": "drive",
@@ -64,7 +64,7 @@
       "uri": "http://guitarix.sourceforge.net/plugins/gx_switched_tremolo_#_switched_tremolo_"
     }
   ],
-  "REC3": [
+  "LOOP3": [
     {
       "name": "OD",
       "kind": "drive",
@@ -120,7 +120,7 @@
       "uri": "http://guitarix.sourceforge.net/plugins/gx_switched_tremolo_#_switched_tremolo_"
     }
   ],
-  "REC4": [
+  "LOOP4": [
     {
       "name": "EQ",
       "kind": "eq",
@@ -141,7 +141,7 @@
       "uri": "http://lsp-plug.in/plugins/lv2/para_equalizer_x16_stereo"
     }
   ],
-  "REC5": [
+  "LOOP5": [
     {
       "name": "EQ",
       "kind": "eq",

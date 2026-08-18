@@ -315,13 +315,9 @@ class Router:
 
     def __init__(self, lanes=None, strips=None):
         self.lanes = lanes or ["GTR1", "GTR2", "MIC", "AUX"]
-        # Eight knobs, eight strips, in the order the desk is laid out:
-        # 1-5 record tracks, 6 delay, 7 reverb, 8 master. Must match
-        # STRIP_NAMES/SEND_NAMES in scripts/daw/session-template.lua - a knob
-        # addressing a strip that does not exist moves nothing and says
-        # nothing.
-        self.strips = strips or ["REC1", "REC2", "REC3", "REC4", "REC5",
-                                 "DELAY", "REVERB", "MASTER"]
+        # Eight knobs, eight strips. The names live in control_map.STRIPS,
+        # which is the one place to change them.
+        self.strips = strips or control_map.STRIPS
         # One knob per strip is the whole point of the layout: 8 display
         # knobs, 8 strips, 8 channels on the interface. If these ever
         # diverge, some strip silently loses its knob - which is exactly
@@ -680,6 +676,21 @@ def self_test():
         raise AssertionError("pad_led(0) should raise - it is 1-based")
     except ValueError:
         pass
+
+    # The panel and the session must describe the same desk. A rename that
+    # lands on one side leaves knobs addressing strips that do not exist,
+    # which moves nothing and reports nothing.
+    import json as _json
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _chains = os.path.join(_here, "..", "daw", "chains.json")
+    if os.path.exists(_chains):
+        with open(_chains) as _f:
+            _keys = set(_json.load(_f))
+        _orphans = _keys - set(control_map.STRIPS)
+        assert not _orphans, \
+            "chains.json has no strip for: %s" % sorted(_orphans)
+    assert len(control_map.STRIPS) == 8, "eight knobs, eight strips"
+    assert "LOOP" not in control_map.STRIPS, "LOOP is a page, not a strip"
 
     # The mode indicator must survive the press that changes it.
     assert "DisplayButton8" in LAMP_OWNED, \

@@ -118,6 +118,16 @@ BUTTONS_RIGHT_BY_PAGE = {
 # The MPC has six function keys and the MK1 has eight display buttons, so the
 # top-right one is spare on the MPC side and is the obvious home for "what am I
 # controlling". DISPLAY 8 toggles it and lights its own LED in DAW mode.
+# THE DESK, in knob order: five individual loop tracks, delay, reverb, master.
+#
+# One place to rename them. session-template.lua builds the same names from
+# MPCPI_STRIPS/MPCPI_SENDS and must agree with this list - a knob pointed at a
+# strip that does not exist moves nothing and reports nothing, so a rename that
+# only lands on one side fails silently.
+STRIPS = ["LOOP1", "LOOP2", "LOOP3", "LOOP4", "LOOP5",
+          "DELAY", "REVERB", "MASTER"]
+
+
 SURFACE_TOGGLE = "display8"
 SURFACES = ("MPC", "DAW")
 
