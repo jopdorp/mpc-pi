@@ -145,10 +145,26 @@ class Daw:
 
     # --- encoders ---
 
-    # dB per detent. Coarse enough to cross a fader in one sweep, fine
-    # enough to set a level: 8 detents is 4 dB, and the encoders are
-    # endless, so there is no pickup and no jump.
-    KNOB_DB_STEP = 0.5
+    # dB per encoder UNIT - and a unit is not a detent.
+    #
+    # This was 0.5, written as "8 detents is 4 dB", which would be right if the
+    # hardware sent one count per detent. It does not: mk1_encoders decodes an
+    # ABSOLUTE angle normalised to FULL_TURN = 1000 units per revolution, and
+    # the delta is however many of those units the knob moved between reports.
+    # So 0.5 dB/unit meant one revolution swept 500 dB across a fader whose
+    # entire range is 25.3 dB (-19.3 to +6.0) - the whole range crossed in 51
+    # units, five percent of one turn. Unusable, and the reason the knobs felt
+    # like they were on a hair trigger.
+    #
+    # 25.3 dB over two revolutions is 0.0126 dB/unit. Two turns end to end is a
+    # normal feel for an endless encoder on a fader, and with the tracker's
+    # deadband of 3 units the finest step is 0.038 dB.
+    KNOB_DB_STEP = float(os.environ.get("MPCPI_KNOB_DB_STEP", "0.0126"))
+
+    # Same arithmetic for a normalised 0..1 plugin parameter: 0.01 per unit
+    # crossed the whole parameter in a tenth of a turn. 1.0 over two
+    # revolutions is 0.0005.
+    KNOB_FX_STEP = float(os.environ.get("MPCPI_KNOB_FX_STEP", "0.0005"))
 
     def knob(self, page, target, delta):
         if page in ("MIX", "LOOP"):
@@ -168,7 +184,7 @@ class Daw:
             self.message = "FX %s %+d" % (target, delta)
             self.osc.send("/strip/plugin/parameter",
                           self.ssid(self.strips[0]), 1, int(target) + 1,
-                          delta * 0.01)
+                          delta * self.KNOB_FX_STEP)
             return ["fx %s %+d" % (target, delta)]
         if page == "SONG":
             if target == "0":
