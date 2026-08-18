@@ -62,9 +62,13 @@ MODES = {
         "help": "the MPC's own pads, banked by Group A-D",
     },
     "MUTE": {
+        # SHIFT + MUTE. The bare key is STOP on both surfaces now, so the
+        # mixer's mute moves under SHIFT rather than fighting it. SOLO needs
+        # no modifier - nothing else wants that key.
         "button": "mute",
+        "shift": True,
         "pads": "mpc",
-        "help": "hold MUTE: display 1-7 mute LOOP1..REVERB",
+        "help": "hold SHIFT+MUTE: display 1-7 mute LOOP1..REVERB",
     },
     "SOLO": {
         "button": "solo",
@@ -168,6 +172,21 @@ STRIPS = (_names("MPCPI_STRIPS", ["LOOP1", "LOOP2", "LOOP3", "LOOP4", "LOOP5"])
 # see MODES. Derived, so renaming or resizing the desk carries through.
 MUTE_STRIPS = [n for n in STRIPS if n != "MASTER"]
 
+# BUTTONS THAT REACH THE MPC ON BOTH SURFACES.
+#
+# The instrument never goes away. The pads already work like this; transport
+# joins them, because having to leave the mixer to stop the beat is the kind of
+# thing that only reads as reasonable when you are not playing.
+#
+# REC is deliberately NOT here. On the MPC surface it is the MPC's record; on
+# the DAW surface it arms loop recording, which is the verb that button means
+# in both worlds. MPC sequences get recorded from the MPC surface.
+ALWAYS = {
+    "play": "mpc:play",
+    "mute": "mpc:stop",
+    "loop": "mpc:play_start",
+}
+
 SURFACE_TOGGLE = "display8"
 SURFACES = ("MPC", "DAW")
 
@@ -266,6 +285,10 @@ DAW_BUTTONS = {
     "select":         "daw:select",
     "mute":           "mode:MUTE",
     "solo":           "mode:SOLO",
+    # Arms loop recording. While armed, display 1-7 punch in and out on their
+    # strip instead of selecting it - which is why the pads never needed to be
+    # involved in looping at all.
+    "rec":            "daw:arm",
 }
 
 SHIFT_PADS = {

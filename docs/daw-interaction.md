@@ -136,17 +136,45 @@ teaches your hand that it means "move through the thing".
 | `UNDO` | undo |
 | `BACK` | return to the page you came from |
 
-## The unresolved conflict
+## Transport, on both surfaces
 
-`mute` is **STOP** on the MPC surface and the **MUTE modifier** on the DAW
-surface. Both are defensible and they cannot both hold if transport is to
-work on both surfaces.
+Resolved: **the transport is always reachable.** PLAY, STOP and RESTART reach
+the MPC whichever surface the panel is driving, exactly like the pads. Leaving
+the mixer to stop the beat only sounds reasonable when you are not playing.
 
-  * **Keep MUTE where the silkscreen says.** Transport stays MPC-surface
-    only; D8 is one press away. Costs a toggle to stop the beat.
-  * **Reserve transport panel-wide.** PLAY / REC / LOOP / STOP always reach
-    the MPC, and the DAW's mute modifier moves to a free key. Costs the
-    silkscreen matching what the button does.
+That takes the MUTE key, because MUTE *is* STOP. So the mixer's mute moves
+under SHIFT, where nothing else wants it:
 
-This one is a taste call about how you actually play, so it is written down
-rather than decided here.
+| gesture | action | surface |
+|---|---|---|
+| `PLAY` | MPC play | both |
+| `MUTE` | MPC stop | both |
+| `LOOP` | MPC play-from-start | both |
+| `SHIFT` + `MUTE` + `Dn` | mute strip *n* | DAW |
+| `SOLO` + `Dn` | solo strip *n* | DAW — needs no modifier, nothing else wants that key |
+
+`REC` is deliberately not panel-wide: on the MPC surface it is the MPC's
+record, on the DAW surface it arms loop recording. That is the verb the button
+means in both worlds, and MPC sequences get recorded from the MPC surface.
+
+The self-test now asserts that any mode sitting on a panel-wide transport key
+must be shifted, so the transport cannot be quietly stolen back.
+
+## Looping without the pads
+
+The pads are never involved. The row that already names the tracks does the
+recording too:
+
+| state | `Dn` does |
+|---|---|
+| resting | focus strip *n* |
+| `REC` armed | punch in on strip *n* |
+| armed, strip rolling | punch out — the loop closes and plays |
+| `SHIFT`+`MUTE` held | mute strip *n* |
+| `SOLO` held | solo strip *n* |
+
+So a take is: `REC`, `Dn`, play it, `Dn`. Press `Dn` again to overdub. `REC`
+again disarms and clears any rolling state.
+
+One row of seven buttons, one modifier-free path for the common case, and the
+instrument still under your hands throughout.

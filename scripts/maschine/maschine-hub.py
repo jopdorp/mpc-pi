@@ -338,6 +338,11 @@ class Router:
         # is the one that was actually pressed.
         self.pressed = {}
         self.held = None          # a mode button currently held
+        # Loop recording arms globally and punches per strip, so the state is
+        # "are we arming" plus "which strips are rolling", not a mode.
+        self.armed = False
+        self.rolling = set()
+        self.focus = 0            # which strip the page-level verbs act on
         self.pinned = None        # a latched mode
         self.page = "LOOP"
 
@@ -380,6 +385,24 @@ class Router:
             sent = self.pressed.pop(name, None)
             return [("midi_up", sent)] if (sent and SEND_KEY_RELEASE) else []
 
+        # TRANSPORT REACHES THE MPC FROM EITHER SURFACE.
+        #
+        # Checked before the per-surface table so neither table has to carry a
+        # copy, and so a DAW binding can never shadow it. SHIFT+MUTE is the one
+        # exception: the bare key is STOP, and the mixer's mute sits under
+        # SHIFT rather than taking the key away from the transport.
+        if name in control_map.ALWAYS and not (
+                name == "mute" and self.surface == "DAW" and self.shift):
+            target = control_map.ALWAYS[name]
+            if not down:
+                sent = self.pressed.pop(name, None)
+                return [("midi_up", sent)] if (sent and SEND_KEY_RELEASE
+                                               and not TAP_KEYS) else []
+            if TAP_KEYS and SEND_KEY_RELEASE:
+                return [("midi", target), ("midi_up", target)]
+            self.pressed[name] = target
+            return [("midi", target)]
+
         if name == control_map.SURFACE_TOGGLE:
             if not down:
                 return []
@@ -408,12 +431,23 @@ class Router:
                 self.pressed[name] = target
                 return [("midi", target)]
             if target.startswith("mode:"):
-                self.held = target.split(":", 1)[1]
+                _m = target.split(":", 1)[1]
+                # A mode declared shift:True is only entered with SHIFT held.
+                # Without this, SHIFT+MUTE and MUTE are the same press and the
+                # transport key would silently become a mixer modifier.
+                if control_map.MODES.get(_m, {}).get("shift") and not self.shift:
+                    return []
+                self.held = _m
                 return [("cmd", "mode %s" % self.mode)]
             rest = target.split(":", 1)[1]
             if rest.startswith("page:"):
                 self.page = rest.split(":", 1)[1]
                 return [("cmd", "page %s" % self.page)]
+            if rest == "arm":
+                self.armed = not self.armed
+                if not self.armed:
+                    self.rolling.clear()
+                return [("cmd", "arm %d" % int(self.armed))]
             return [("cmd", rest.replace(":", " "))]
 
         # PIN latches whichever mode is held. Controller state, both surfaces.
@@ -430,12 +464,26 @@ class Router:
         # which is showing the MPC, so four of these seven have no on-screen
         # label. Their order is the mixer's own - LOOP1..LOOP5, DELAY, REVERB -
         # which is the same order as the knobs above them.
-        if (self.surface == "DAW" and name.startswith("display")
-                and self.mode in ("MUTE", "SOLO")):
+        if self.surface == "DAW" and name.startswith("display"):
             idx = int(name[len("display"):]) - 1
             if 0 <= idx < len(control_map.MUTE_STRIPS):
-                return [("cmd", "%s %s" % (self.mode.lower(),
-                                           control_map.MUTE_STRIPS[idx]))]
+                strip = control_map.MUTE_STRIPS[idx]
+                # Held modifier wins: reach any strip without moving focus.
+                if self.mode in ("MUTE", "SOLO"):
+                    return [("cmd", "%s %s" % (self.mode.lower(), strip))]
+                # ARMED: the strip buttons punch in and out. This is why the
+                # pads are never needed for looping - the row that already
+                # names the tracks does the recording too.
+                if self.armed:
+                    if strip in self.rolling:
+                        self.rolling.discard(strip)
+                        return [("cmd", "punch_out %s" % strip)]
+                    self.rolling.add(strip)
+                    return [("cmd", "punch_in %s" % strip)]
+                # Otherwise they select. One press, and every page-level verb
+                # then acts on what you just picked.
+                self.focus = idx
+                return [("cmd", "focus %s" % strip)]
             return []
 
         # In DAW mode the display buttons follow whatever the page shows.
@@ -647,6 +695,12 @@ def self_test():
     for _m, _d in control_map.MODES.items():
         assert _d.get("button") or _m == control_map.DEFAULT_MODE, \
             "mode %s has no button and is not the resting state" % _m
+        # A mode whose button is also panel-wide transport MUST be shifted,
+        # or the transport key is quietly stolen by the mixer.
+        if _d.get("button") in control_map.ALWAYS:
+            assert _d.get("shift"), \
+                "mode %s sits on transport key %s without SHIFT" % (
+                    _m, _d["button"])
         assert _d["pads"] == "mpc", \
             "mode %s steals the pads; they belong to the MPC" % _m
 
@@ -676,12 +730,49 @@ def self_test():
     _rm.surface = "MPC"
 
     assert r.button(control_map.SURFACE_TOGGLE, True) == [("surface", "DAW")]
-    assert r.button("play", True) == []                 # MPC unreachable now
-    r.button("play", False)
+
+    # TRANSPORT REACHES THE MPC FROM EITHER SURFACE. This used to assert the
+    # opposite - that play was unreachable in DAW mode - which meant stopping
+    # the beat required leaving the mixer first.
+    for _b, _key in control_map.ALWAYS.items():
+        for _sfc in ("MPC", "DAW"):
+            r.surface = _sfc
+            if _b == "mute" and _sfc == "DAW":
+                continue                 # SHIFT+MUTE is the mixer's; see below
+            assert sent(r.button(_b, True)) == _key, \
+                "%s must reach the MPC on the %s surface" % (_b, _sfc)
+            r.button(_b, False)
+    r.surface = "DAW"
+
+    # Bare MUTE is STOP even here; the mixer's mute needs SHIFT.
+    assert sent(r.button("mute", True)) == "mpc:stop"
+    r.button("mute", False)
+    r.shift = True
+    assert r.button("mute", True) == [("cmd", "mode MUTE")]
+    r.button("mute", False)
+    r.shift = False
+
     # group_f used to open a MIX page. There is one strips page now, so the
     # button is free rather than opening a duplicate of the page already shown.
     assert "group_f" not in control_map.DAW_BUTTONS
     assert "MIX" not in daw_pages(), "the MIX page was merged into LOOP"
+
+    # REC arms; the strip buttons then punch instead of selecting, and punch
+    # again to close. This is the whole reason the pads stay the MPC's.
+    r.armed = False
+    assert r.button("display2", True) == [("cmd", "focus LOOP2")]
+    r.button("display2", False)
+    assert r.button("rec", True) == [("cmd", "arm 1")]
+    r.button("rec", False)
+    assert r.button("display2", True) == [("cmd", "punch_in LOOP2")]
+    r.button("display2", False)
+    assert r.button("display2", True) == [("cmd", "punch_out LOOP2")]
+    r.button("display2", False)
+    assert r.button("rec", True) == [("cmd", "arm 0")]
+    r.button("rec", False)
+    assert r.button("display2", True) == [("cmd", "focus LOOP2")]
+    r.button("display2", False)
+
     assert r.button(control_map.SURFACE_TOGGLE, True) == [("surface", "MPC")]
     assert sent(r.button("play", True)) == "mpc:play"
     r.button("play", False)
