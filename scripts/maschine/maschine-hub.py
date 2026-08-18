@@ -343,12 +343,11 @@ class Router:
         self.armed = False
         self.rolling = set()
         self.focus = 0            # which strip the page-level verbs act on
-        self.pinned = None        # a latched mode
         self.page = "LOOP"
 
     @property
     def mode(self):
-        return self.held or self.pinned or control_map.DEFAULT_MODE
+        return self.held or control_map.DEFAULT_MODE
 
     # --- buttons ---
 
@@ -417,7 +416,7 @@ class Router:
             sent = self.pressed.pop(name, None)
             if sent and SEND_KEY_RELEASE and sent.startswith("mpc:"):
                 return [("midi_up", sent)]
-            if target and target.startswith("mode:") and self.pinned != self.held:
+            if target and target.startswith("mode:"):
                 self.held = None
                 return [("cmd", "mode %s" % self.mode)]
             return []
@@ -450,10 +449,7 @@ class Router:
                 return [("cmd", "arm %d" % int(self.armed))]
             return [("cmd", rest.replace(":", " "))]
 
-        # PIN latches whichever mode is held. Controller state, both surfaces.
-        if name == control_map.PIN_BUTTON and self.held:
-            self.pinned = None if self.pinned == self.held else self.held
-            return [("cmd", "mode %s" % self.mode)]
+        # NO PIN. Modes are held and end when released - see control_map.MODES.
 
         # While MUTE or SOLO is held, display 1-7 ARE the strips - the seven
         # that can meaningfully be muted, master excluded. This is the mixer
@@ -528,7 +524,12 @@ class Router:
         beginning "mpc:" is a MIDI target for the emulator; the rest is a DAW
         command.
         """
-        target = control_map.MASTER_KNOBS.get(name)
+        # Surface first: the big knob is the MPC's DATA wheel when the panel
+        # drives the MPC and the DAW's jog when it drives Ardour. Same gesture,
+        # different instrument - which is the only way one knob can serve both
+        # without a mode to remember.
+        target = control_map.MASTER_KNOBS_BY_SURFACE.get(
+            self.surface, {}).get(name) or control_map.MASTER_KNOBS.get(name)
         if target is None:
             return []
         if target.startswith("mpc:"):
@@ -566,7 +567,10 @@ class Router:
             return [("midi", "%s:%+d" % (target, steps))]
         # "master +4", not "master master +4": the DAW master is not a
         # named strip, it is the one thing a master command can mean.
-        return [("cmd", "master %+d" % delta)]
+        # The verb comes from the TARGET, not from a hardcoded name. This said
+        # "master" unconditionally, so the moment a second DAW target existed -
+        # the jog - it silently moved the master fader instead.
+        return [("cmd", "%s %+d" % (target.split(":", 1)[1], delta))]
 
     def knob(self, index, delta):
         """Eight knobs under the screens: ONE PER MIXER STRIP.
@@ -678,18 +682,17 @@ def self_test():
     # a binding in that table for either one is dead code that looks alive.
     # Nothing checked it, and PIN has already moved once - from display1, when
     # display1 became LOOP1's mute button.
-    assert control_map.PIN_BUTTON not in control_map.DAW_BUTTONS, \
-        "%s is PIN and also bound in DAW_BUTTONS" % control_map.PIN_BUTTON
+    assert control_map.PIN_BUTTON is None, \
+        "PIN is back; modes are held, so a latch is state nobody asked to read"
     assert control_map.SURFACE_TOGGLE not in control_map.DAW_BUTTONS, \
         "%s toggles the surface and is also bound" % control_map.SURFACE_TOGGLE
-    assert control_map.PIN_BUTTON != control_map.SURFACE_TOGGLE
-    # The strip buttons are display1..N; PIN must not be one of them.
+    # The strip buttons are display1..N; the toggle must not be one of them.
     _strip_btns = {"display%d" % (i + 1)
                    for i in range(len(control_map.MUTE_STRIPS))}
-    assert control_map.PIN_BUTTON not in _strip_btns, \
-        "PIN is on a button that mutes a strip"
     assert control_map.SURFACE_TOGGLE not in _strip_btns, \
         "the surface toggle is on a button that mutes a strip"
+    # Every DAW page a button opens must have a renderer, or it opens a hole.
+    assert daw_pages() == {"LOOP", "FX", "SONG", "EDIT"}, daw_pages()
     # Every mode must be reachable: a mode with no button can only be the
     # resting state, or it can never be entered.
     for _m, _d in control_map.MODES.items():
@@ -752,10 +755,16 @@ def self_test():
     r.button("mute", False)
     r.shift = False
 
-    # group_f used to open a MIX page. There is one strips page now, so the
-    # button is free rather than opening a duplicate of the page already shown.
-    assert "group_f" not in control_map.DAW_BUTTONS
+    # The four pages fill the group row in panel order, and MIX is not among
+    # them - it was merged into LOOP when they turned out to be one page.
     assert "MIX" not in daw_pages(), "the MIX page was merged into LOOP"
+    assert [control_map.DAW_BUTTONS.get("group_" + g) for g in "efgh"] == \
+        ["daw:page:LOOP", "daw:page:FX", "daw:page:SONG", "daw:page:EDIT"]
+    # group_a-d stay free on the DAW surface. They are the MPC's pad banks on
+    # the other one, so binding them means the same key does two unrelated
+    # things depending on a mode - possible, but it should be a decision.
+    for _g in "abcd":
+        assert "group_" + _g not in control_map.DAW_BUTTONS
 
     # REC arms; the strip buttons then punch instead of selecting, and punch
     # again to close. This is the whole reason the pads stay the MPC's.
@@ -776,6 +785,21 @@ def self_test():
     assert r.button(control_map.SURFACE_TOGGLE, True) == [("surface", "MPC")]
     assert sent(r.button("play", True)) == "mpc:play"
     r.button("play", False)
+
+    # THE BIG KNOB FOLLOWS THE SURFACE: DATA wheel for the MPC, jog for the DAW.
+    _rj = Router()
+    _rj.surface = "MPC"
+    assert any(t.startswith("mpc:data_wheel") for _, t in _rj.master("swing", 400)), \
+        "swing must be the MPC data wheel on the MPC surface"
+    _rj.surface = "DAW"
+    _ev = _rj.master("swing", 400)
+    assert _ev and _ev[0][0] == "cmd" and "jog" in _ev[0][1], \
+        "swing must be the DAW jog on the DAW surface, got %r" % (_ev,)
+    # VOLUME and TEMPO are NOT gated - the master fader and note variation mean
+    # the same thing wherever you are.
+    for _s in ("MPC", "DAW"):
+        _rj.surface = _s
+        assert _rj.master("tempo", 400), "tempo must work on %s" % _s
 
     # Knobs: one per mixer strip, and the master knobs by name.
     assert r.knob(4, -2)[0][0] == "cmd"

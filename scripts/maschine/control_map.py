@@ -77,10 +77,12 @@ MODES = {
     },
 }
 DEFAULT_MODE = "MPC"
-PIN_BUTTON = "group_f"           # held mode + this = latch, labelled PIN
-                                 # (was display1, which is now LOOP1's
-                                 #  mute button; group_f came free when
-                                 #  the MIX page was merged into LOOP)
+# NO PIN. Modes are held, not latched: SHIFT+MUTE and SOLO do their work while
+# you hold them and end when you let go, which is one less piece of state to
+# read off a panel mid-phrase. PIN was a leftover from when the pads were the
+# strip selector and a chord needed both hands.
+PIN_BUTTON = None
+
 
 # --- pads ------------------------------------------------------------
 #
@@ -278,9 +280,9 @@ MPC_BUTTONS = {
 # does nothing while the toggle is on the DAW, which is the point of the toggle.
 DAW_BUTTONS = {
     "group_e":        "daw:page:LOOP",
-    "group_g":        "daw:page:FX",
-    "group_h":        "daw:page:SONG",
-    "navigate":       "daw:page:EDIT",
+    "group_f":        "daw:page:FX",
+    "group_g":        "daw:page:SONG",
+    "group_h":        "daw:page:EDIT",
     "duplicate":      "daw:duplicate",
     "select":         "daw:select",
     "mute":           "mode:MUTE",
@@ -345,6 +347,15 @@ KNOBS_RIGHT_BY_PAGE = {
 #
 # With DATA on its own knob, all eight under-screen knobs are free to be the
 # eight DAW tracks, one each, and SHIFT is left unspent.
+# On the DAW surface these override MASTER_KNOBS. Only the big knob changes:
+# it is the MPC's DATA wheel when driving the MPC and the DAW's jog when
+# driving Ardour - the same gesture, "move through the thing", pointed at
+# whichever thing is under the hand. VOLUME is the DAW master on both surfaces
+# and TEMPO is the MPC's note variation on both, so neither is listed.
+MASTER_KNOBS_BY_SURFACE = {
+    "DAW": {"swing": "daw:jog"},
+}
+
 MASTER_KNOBS = {
     "volume": "daw:master",
     "tempo": "mpc:note_variation",
