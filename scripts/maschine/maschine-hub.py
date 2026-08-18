@@ -136,26 +136,12 @@ PAD_PEAK_DECAY = float(os.environ.get("MPCPI_PAD_PEAK_DECAY", "0.96"))
 # POLL_STATS prints the peak seen per pad if it needs measuring again.
 PAD_FULL_SCALE = int(os.environ.get("MPCPI_PAD_FULL_SCALE", "2300"))
 
-# PHYSICAL crosstalk: pressing one pad flexes the rubber sheet and lifts its
-# neighbours' sensors too. That is a different fault from the scan bleed the
-# subtraction handles, and it needs a different rule:
-#
-#   * it follows PHYSICAL adjacency - left, right, above, below - not the scan
-#     order, so it can appear on either side.
-#   * the sensor really is being pressed, so there is nothing to subtract. The
-#     only thing that separates it from a deliberate hit is that it is weaker
-#     and arrives at the same moment as a much harder one nearby.
-#
-# So: within CROSSTALK_WINDOW, a pad is suppressed if a physical neighbour was
-# struck harder. Requiring the other pad to be clearly harder is what keeps a
-# deliberate two-finger hit intact - two pads played together land at similar
-# strengths, while a knock-on is a fraction of what caused it.
-CROSSTALK_WINDOW_S = float(os.environ.get("MPCPI_CROSSTALK_MS", "20")) / 1000.0
-CROSSTALK_RATIO = float(os.environ.get("MPCPI_CROSSTALK_RATIO", "1.8"))
-
-
+# Physical neighbours of each pad - left, right, above, below. Kept for the
+# crosstalk MEASUREMENT below; the suppression rule that used to be here is
+# gone, because it ate real playing: alternating two adjacent pads quickly is
+# two neighbours within its window at different strengths, so the softer hit
+# was suppressed and simply did not sound.
 def _pad_neighbours(pad):
-    """Pads physically touching this one: left, right, above, below."""
     row, col = divmod(pad, 4)
     out = []
     if col > 0: out.append(pad - 1)
@@ -713,7 +699,7 @@ class Mk1:
     # signal from the softer one. At 0.20 a 768 hit alongside a 3072 hit lands
     # at 154 and is dropped. Lower MPCPI_PAD_BLEED if rolls lose notes; raise it
     # if hard hits still double-trigger their neighbour.
-    PAD_BLEED = float(os.environ.get("MPCPI_PAD_BLEED", "0.35"))
+    PAD_BLEED = float(os.environ.get("MPCPI_PAD_BLEED", "0"))
     # Minimum time between note-ons on the SAME pad, seconds.
     #
     # Bleed cancellation and hysteresis both address one pad being fired by
@@ -1102,6 +1088,22 @@ class Mk1:
             # threshold to 250 made it easier to reach.
             neighbour = max(self.pad_raw[(raw + 1) % 16],
                             self.pad_peak[(raw + 1) % 16])
+            # OFF BY DEFAULT (PAD_BLEED=0).
+            #
+            # This and the crosstalk rule were both built on the belief that
+            # the ghosting LAGGED its source. That was never demonstrated: the
+            # trace it came from showed the ghosting pad's neighbour reading 0
+            # with a remembered peak of 0, which does not mean "the peak
+            # decayed" - it means there was no neighbour signal at all. The
+            # ghost was the on-threshold sitting under the pad's 256-count
+            # minimum step, and raising it to 300 is what actually fixed it.
+            #
+            # Subtracting 0.35 of a neighbour's peak from every hit costs real
+            # playing: a 600-count snare after a 2048-count hihat loses ~500
+            # and falls under the threshold, which is the disappearing hit that
+            # was reported. Set MPCPI_PAD_BLEED to re-enable it if a ghost ever
+            # returns that the threshold cannot explain.
+            #
             # ALWAYS subtract. There used to be a gate - only correct when the
             # neighbour was more than twice this pad's reading - and it failed
             # in exactly the case that matters. The bleed lags its source, the
@@ -1124,24 +1126,17 @@ class Mk1:
             # decaying through it - or scan bleed from the neighbouring
             # channel touching it - is a fresh note-on every time it crosses.
             if not self.pad_on[pad] and pressure > self.PAD_ON_THRESHOLD:
-                # Was a PHYSICAL neighbour struck much harder, just now?
-                now_t = time.monotonic()
-                knocked = None
-                for nb in PAD_NEIGHBOURS[pad]:
-                    if (now_t - self.pad_last_on[nb]) > CROSSTALK_WINDOW_S:
-                        continue
-                    if self.pad_last_force[nb] >= pressure * CROSSTALK_RATIO:
-                        knocked = nb
-                        break
-                if knocked is not None:
-                    self.pad_on[pad] = True      # latch, so it cannot re-fire
-                    self.pad_crosstalk += 1
-                    _trace("pad", "p%d suppressed: p%d hit %dx harder"
-                           % (pad + 1, knocked + 1,
-                              self.pad_last_force[knocked] // max(1, pressure)),
-                           "dropped")
-                    continue
                 if TRACE:
+                    # The whole grid at the moment of the hit, laid out as the
+                    # pads sit, so physical crosstalk is visible as a shape
+                    # rather than inferred from one neighbour.
+                    rows = []
+                    for r in range(3, -1, -1):
+                        rows.append(" ".join(
+                            "p%-2d=%-5d" % (r * 4 + c + 1,
+                                            self.pad_raw[Mk1._pad_index(r * 4 + c)])
+                            for c in range(4)))
+                    _trace("grid", "hit p%d" % (pad + 1), " | ".join(rows))
                     _trace("padraw",
                            "pad%-2d raw=%-5d nb(raw%d)=%-5d peak=%-5d -> %d"
                            % (pad + 1, own, (raw + 1) % 16,
