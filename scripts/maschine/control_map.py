@@ -159,6 +159,15 @@ PANEL = {
     "snap":         ("mpc:tap_tempo",  "mpc:midi_sync"),
     # AUTO WRITE is performance state: mute a track, queue the next sequence.
     "auto_write":   ("mpc:track_mute", "mpc:next_seq"),
+    # FULL LEVEL gets its OWN button, so it can have its own lamp.
+    #
+    # It used to live only on SHIFT+GRID, sharing the Grid button with
+    # 16 LEVELS - and therefore sharing one LED between two independent
+    # toggles. That was shown as bright-for-one and dim-for-the-other, which
+    # reads on the hardware as "the light is half on" and tells you something
+    # is engaged without telling you what. SELECT is in the pad column, next
+    # to the pads the toggle affects, and its DAW use moves to SHIFT.
+    "select":       ("mpc:full_level", "daw:select"),
 }
 
 # Group A-D are the MPC's pad banks - a direct analogue, same letters.
@@ -179,7 +188,7 @@ PAD_SECTION = {
     "pad_mode": "mode:LOOP",        # 1st-gen panels print this KEYBOARD
     "mute": "mode:MUTE",
     "solo": "mode:SOLO",
-    "select": "daw:select",         # select without triggering
+
     "duplicate": "daw:duplicate",
     # NAVIGATE opens the track editor; from there SELECT+pad drills into
     # a single take's WAVE view.

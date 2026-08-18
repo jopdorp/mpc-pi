@@ -78,6 +78,8 @@ LAMPS = os.environ.get("MPCPI_LAMP_PATH", "/dev/shm/mpc-lamps")
 # same thing; the MPC has lamps this controller has nowhere to put.
 LAMP_TO_LED = {
     "after":          "NoteRepeat",
+    "full_level":     "Select",
+    "sixteen_levels": "Grid",
     "record":         "Rec",
     "play":           "Play",
     "bank_a":         "GroupA",
@@ -87,11 +89,6 @@ LAMP_TO_LED = {
     "track_mute":     "Mute",
 }
 
-# GRID carries BOTH of the MPC's pad-level toggles - unshifted is 16 LEVELS,
-# shifted is FULL LEVEL - so one lamp has to show two states. Brightness
-# separates them rather than lighting the same LED for either, which would be
-# a lamp that tells you something is on without telling you what.
-GRID_LAMPS = ("sixteen_levels", "full_level")
 
 # Set MPCPI_HUB_TRACE=1 to log every dispatched event to stderr, which under
 # systemd means the journal. Added because "the buttons do nothing" was
@@ -453,6 +450,17 @@ def self_test():
     r3.button("shift", False)
     r3.button("browse_right", False)
 
+    # One lamp, one meaning. FULL LEVEL and 16 LEVELS are independent toggles
+    # and must not share an LED - shown as two brightnesses of one light, the
+    # panel just reads as "half on".
+    assert len(set(LAMP_TO_LED.values())) == len(LAMP_TO_LED), \
+        "two MPC lamps are mapped to the same controller LED"
+    r4 = Router()
+    assert r4.button("select", True) == [("midi", "mpc:full_level")]
+    r4.button("select", False)
+    assert LAMP_TO_LED["full_level"] == "Select"
+    assert LAMP_TO_LED["sixteen_levels"] == "Grid"
+
     print("maschine-hub self-test PASS: routing verified for buttons, "
           "pads, pad orientation, key release, knobs, shift and hold-modes")
 
@@ -728,17 +736,6 @@ class Mk1:
                 self.leds.set(led, want)
                 changed = True
 
-        # 16 LEVELS wins the Grid lamp when both are on: it is the more
-        # invasive mode, remapping the whole grid to one sound.
-        if state.get(GRID_LAMPS[0]):
-            want = mk1_leds.BRIGHT
-        elif state.get(GRID_LAMPS[1]):
-            want = mk1_leds.DIM
-        else:
-            want = mk1_leds.OFF
-        if self.leds.get("Grid") != want:
-            self.leds.set("Grid", want)
-            changed = True
         return changed
 
     def flush_leds(self, force=False):
