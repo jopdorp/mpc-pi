@@ -469,3 +469,42 @@ Verified end to end after both fixes: `gain LOOP1 -6.5` on the FIFO, then
     <Controllable name="gaincontrol" ... value="0.47315126657485962"/>
 
 which is -6.50 dB.
+
+## The observer was the load
+
+A crackle hunt produced, in this order: 27 codec xruns/minute with Ardour and 0
+without; then 58; then 0, 0, 0, 0 across a headroom sweep of the SAME setting
+that had just measured 27.
+
+Nothing in the appliance changed between those runs. What changed was how much
+the person measuring was doing to the machine. The high readings were taken
+while a continuous pw-top, several Python parsers, rsync, repeated service
+restarts and multiple SSH sessions were running - and, earlier, a SECOND Ardour
+with a noise generator through fifteen plugins for the plugin benchmark. On four
+cores, that is not a negligible observer.
+
+So the conclusion "Ardour causes the xruns" was drawn from two single runs taken
+while the measurer was the loudest thing on the box, and it does not survive.
+
+RULES FOR THE NEXT ONE:
+
+  * Measure the appliance IDLE of diagnostics, or count the diagnostics as part
+    of the configuration under test. One pw-top is not free.
+  * A/B needs several paired runs, not one each. This fault is intermittent -
+    the same configuration gave 27, 58 and 0 within an hour, so any single 60s
+    window can land inside a good spell or a bad one and "prove" anything.
+  * Verify the control is actually present. A headroom sweep read 0/0/0 because
+    restarting WirePlumber drops Ardour from the graph and it does not rejoin;
+    the no-Ardour case was being measured and nearly reported as a fix.
+  * stdbuf -oL on pw-top. Block-buffered into a pipe, a whole block of samples
+    arrives at one instant and invents a periodicity that is not there - this
+    produced a convincing "every 8 seconds" that was purely an artifact.
+
+Ruled out, with numbers, and all of it still true: CPU (Ardour uses 33% of its
+own core, nothing saturated), page faults (0 in 15s, MEMLOCK already
+infinity), USB IRQ starvation (irq/136 waits 0.6% of runnable time), thermal
+(52-54C, throttled=0x0), and api.alsa.headroom (0/64/128/256 all zero xruns).
+
+Worth keeping: Ardour's per-cycle cost is not the median. It peaks at 720-880us
+of a 1451us period in EVERY sample, while its median is 541. Whatever margin
+this system has is set by that peak.
