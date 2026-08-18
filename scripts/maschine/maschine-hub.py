@@ -880,6 +880,16 @@ class Mk1:
             bits = int.from_bytes(bytes(data[1:7]), "little")
             changed = bits ^ self.buttons
             self.buttons = bits
+            if TRACE and changed:
+                names = control_map_buttons()
+                moved = []
+                for _p in range(48):
+                    if (changed >> _p) & 1:
+                        _n = names[_p] if _p < len(names) else None
+                        moved.append("%d=%s%s" % (_p, _n or "UNNAMED",
+                                                  "" if (bits >> _p) & 1 else ":up"))
+                _trace("btn", "raw=%s" % bytes(data[1:7]).hex(" "),
+                       " ".join(moved))
             for pos, name in enumerate(control_map_buttons()):
                 if name and (changed >> pos) & 1:
                     out += router.button(name, bool((bits >> pos) & 1))

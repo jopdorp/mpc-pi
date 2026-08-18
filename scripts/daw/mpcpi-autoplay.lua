@@ -113,7 +113,15 @@ table.sort(lamp_order)
 
 local last_lamps = nil
 local lamp_frames = 0
-local outputs = manager.machine.output
+
+-- Resolve each lamp to an output PROXY once, at startup.
+--
+-- output:get_value(name) is deprecated and MAME warns on every single call.
+-- At thirteen lamps per frame that was ~1000 warnings a second into the
+-- journal - it buried everything else and wrote the SD card continuously for
+-- no benefit. device.outputs[name] hands back an output_proxy, and :get() on
+-- it is the supported path.
+local lamp_proxy = {}
 
 -- Prove the exporter is RUNNING, separately from whether the values move.
 -- Without this a frozen file cannot be told from a notifier that fired once:
@@ -122,7 +130,11 @@ local outputs = manager.machine.output
 local function export_lamps()
     local parts = {}
     for _, name in ipairs(lamp_order) do
-        local ok, v = pcall(function() return outputs:get_value(LAMPS[name]) end)
+        local p = lamp_proxy[name]
+        local ok, v = false, nil
+        if p then
+            ok, v = pcall(function() return p:get() end)
+        end
         parts[#parts + 1] = name .. "=" .. ((ok and v and v ~= 0) and "1" or "0")
     end
     lamp_frames = lamp_frames + 1
@@ -148,6 +160,19 @@ end
 -- exported line carries a frame counter now.
 --
 -- Global on purpose: a local would go out of scope at the end of this script.
+do
+    local root = manager.machine.devices[":"]
+    local resolved = 0
+    for name, out in pairs(LAMPS) do
+        local ok, proxy = pcall(function() return root.outputs[out] end)
+        if ok and proxy then
+            lamp_proxy[name] = proxy
+            resolved = resolved + 1
+        end
+    end
+    print("MPCPI_LAMP_PROXIES " .. resolved .. "/" .. #lamp_order)
+end
+
 mpcpi_lamp_notifier = emu.add_machine_frame_notifier(function()
     pcall(export_lamps)
 end)
