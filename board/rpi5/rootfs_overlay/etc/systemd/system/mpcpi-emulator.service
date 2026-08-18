@@ -60,39 +60,38 @@ Environment=SDL_VIDEODRIVER=dummy
 # device: 76 xruns per 16s at 32 against 2 at 64, measured on this board. This
 # must stay equal to default.clock.quantum in
 # pipewire.conf.d/95-mpcpi.conf - run-mpc.sh derives the sound cadence from it.
-# 1024 is a RETREAT to the only setting that is free of dropouts today, at an
-# unusable 23ms. The target is 32-64. See 95-mpcpi.conf and
-# docs/mpc2000xl-audio-frame-burst.md - the blocker is that MAME emits a whole
-# frame's audio in one burst every 10.9ms, so any quantum smaller than a frame
-# starves between bursts.
-Environment=MPC_PIPEWIRE_FRAMES=1024
+# 64 works now. It did not while MAME's audio threads sat at the emulation
+# thread's SCHED_RR priority - see the ExecStartPost below and docs/audio-chain.md.
+# The "MAME emits a frame's audio in one burst every 10.9ms" reading was of the
+# CONSUMER being gated by the scheduler, not of the producer bursting.
+Environment=MPC_PIPEWIRE_FRAMES=64
+# One host sound update per graph quantum, so a callback consumes a whole number
+# of producer updates.
+Environment=MPC_SOUND_UPDATES_PER_QUANTUM=1
+# Output cushion and buffer pool. 32 quanta is 46ms; with the producer no longer
+# starved the ring holds ~2112 frames in steady state and never empties.
+Environment=MAME_PIPEWIRE_PREBUFFER_QUANTA=32
+Environment=MAME_PIPEWIRE_BUFFERS=16
 # Stereo, as the host runs it - the machine has several speaker devices and
 # only :speaker carries the program's audio.
 Environment=MPC_OUTPUT_MODE=stereo
-# MAME_TIMING_MASTER=video, which also selects -throttle.
+# The audio clock is the timing master, which also selects -nothrottle: MAME
+# free-runs and the PipeWire backend paces it by the buffer it has queued.
 #
-# NOT audio, despite that being the turbo default and correct on the host. With
-# the audio clock as timing master, MAME's emulation loop is gated on the audio
-# callback, and at q256 on this board the gate stopped opening: the machine
-# froze outright - LCD export stalled, 6% CPU, stuck on the boot screen - while
-# the service still reported "active".
-Environment=MAME_TIMING_MASTER=video
-
-# The one measured deviation from the turbo preset.
+# This was set to video/-throttle for a long time on the strength of PipeWire's
+# ERR column on the emulator's node - 9556 unthrottled against 259 throttled.
+# That column does not count dropouts; docs/system-placement.md had already
+# recorded as much after it cost days elsewhere. Measured properly, once the
+# audio threads can actually run (ExecStartPost below), over 25s each:
 #
-# MAME_TIMING_MASTER=audio implies -nothrottle in run-mpc.sh, on the premise
-# that the PipeWire backend paces the emulator by blocking when its buffer is
-# full. True on the development host; not here. Unthrottled, MAME free-runs at
-# 100% of core 3 and floods its own stream. PipeWire's error counter on the
-# emulator's node, three consecutive 6s samples:
+#     audio clock + -throttle     underruns 1.7/s
+#     audio clock + -nothrottle   underruns 0.0/s, 99.8% of realtime
 #
-#     nothrottle (turbo default):  9556, 9550, 9617
-#     throttle (this):              259 per 8s
-#
-# The audio clock is still the timing master; only MAME's own speed throttle is
-# put back. Why the backpressure never arrives on this board is still open, and
-# it is the last thing between this appliance and clean audio.
-Environment=MPC_THROTTLE_MODE=throttle
+# -throttle caps the emulator at 100% against the HOST clock, so it can never
+# build a cushion against the codec's own clock; the buffer is the only thing
+# that can pace it correctly.
+Environment=MAME_TIMING_MASTER=audio
+Environment=MPC_THROTTLE_MODE=nothrottle
 Environment=MPCPI_PROJECT=/opt/mpc-media/mpc-tutor-logic-mpc2000xl.img
 Environment=MPCPI_AUTOPLAY=1
 Environment=XDG_RUNTIME_DIR=/run/user/1001
@@ -124,6 +123,15 @@ ExecStart=/opt/mpc-pi-src/scripts/run-mpc2000xl-turbo.sh \
 # the instrument fails to start - and the loop waits for the node rather than
 # guessing how long the graph takes to publish it.
 ExecStartPost=+/bin/sh -c 'for i in $(seq 1 20); do /usr/bin/mpc-monitor-route.sh link >/dev/null 2>&1 && exit 0; sleep 2; done; true'
+
+# Put MAME's audio threads above its emulation thread. THIS is what fixed the
+# crackle: chrt --rr 20 in run-mpc.sh applies to the process, so the sound
+# effects thread and PipeWire's client loop inherit the emulation thread's
+# priority, and SCHED_RR does not preempt at equal priority. The audio producer
+# delivered 9.7% of realtime; with this it delivers 99.8%, underruns 0. The
+# script explains the measurement in full. '+' for root: chrt on another user's
+# threads needs it. `|| true` so a scheduling tweak can never fail the boot.
+ExecStartPost=+/bin/sh -c '/usr/bin/mpc-audio-thread-priority.sh || true'
 
 # PAM limits in /etc/security/limits.d never reach a systemd service.
 LimitRTPRIO=95

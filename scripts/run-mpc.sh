@@ -601,8 +601,16 @@ latency_ms=$(LC_NUMERIC=C awk -v frames="$pipewire_frames" -v rate="$pipewire_ra
     'BEGIN { printf "%.2f", frames * 1000 / rate }')
 printf 'Starting %s BIOS %s with native PipeWire; quantum=%s, latency=%s (~%s ms requested)\n' \
     "$system_name" "$bios_name" "$pipewire_quantum" "$pipewire_latency" "$latency_ms"
-printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s (PipeWire runs above it at RR 90)\n' \
+# chrt below applies to the PROCESS, so every thread MAME creates inherits this
+# priority - including its sound effects thread, which is the audio producer,
+# and PipeWire's client thread-loop, which fills the buffers. SCHED_RR does not
+# preempt at equal priority, so on a single pinned core those two only run when
+# the emulation thread blocks, and the audio producer delivered 9.7% of realtime.
+# Raise them afterwards with mpc-audio-thread-priority.sh; see docs/audio-chain.md.
+printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s\n' \
     "$mame_cpuset" "$mame_nice" "$mame_rt_priority"
+printf '  NOTE: MAME'\''s audio threads inherit this priority. Run\n'
+printf '        mpc-audio-thread-priority.sh after start or they will be starved.\n'
 printf 'Timing master: %s (%s)\n' "$timing_master" "${throttle_option#-}"
 if [[ -n "$sound_updates_per_quantum" ]]; then
     printf 'Sound update cadence: %s frames (%s per %s-frame quantum at %s Hz)\n' \

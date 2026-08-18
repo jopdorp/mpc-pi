@@ -203,17 +203,103 @@ throttled case, and something else is wrong when the emulator free-runs.
 called from `stream_close()`. MAME ignores SIGTERM, so `systemctl stop` never
 produces the file. Use `-seconds_to_run N`, which exits cleanly on its own.
 
-## Where it stands
+## THE ROOT CAUSE: MAME's audio threads run at the emulation thread's priority
 
-Stage 6a is closed (dropped cycles now 0). 6b and 6c are mitigated and
-configurable. The emulator (stage 1) is clean, the device (stages 10-12) reports
-zero xruns, and holes were still reaching the DAC at ~20/s of sounding audio
-with every MAME zero-writing path disabled - which places what remains between
-stage 8 and stage 10, in the server's mixing of a late stream.
+Everything above is a symptom. The cause is in the scheduler, and it is one
+line in the launcher.
 
-The next measurement is the one this document was written to make possible: a
-single run capturing `MAME_PIPEWIRE_CAPTURE_WAV` and the sink monitor together,
-with the sequencer playing so there is continuous audio to compare. If the two
-differ, the loss is in the server; if they match, MAME is queueing late and the
-mixer is substituting silence, which is visible as a gap between the callback
-timestamp and the graph cycle it belongs to.
+`scripts/run-mpc.sh` starts MAME as
+
+    exec taskset --cpu-list 3 nice -n .. chrt --rr 20 env .. mpc ..
+
+`chrt` sets the policy of the PROCESS, so every thread MAME creates inherits
+SCHED_RR 20, and `taskset` pins them all to one core. Three of those threads
+matter:
+
+| thread | what it does |
+|--------|--------------|
+| emulation thread | runs the machine, ~17% of core 3, runnable almost always |
+| effects thread | `sound_manager::run_effects()` - **this** calls `sound_stream_sink_update()`, so it is the audio producer |
+| `thread-loop` | PipeWire's client loop - fills and queues the buffers |
+
+**Under SCHED_RR a thread that wakes at EQUAL priority does not preempt the
+running one.** It goes to the tail of that priority's runqueue and waits for the
+running thread to block or to exhaust its timeslice, and
+`/proc/sys/kernel/sched_rr_timeslice_ms` is **100** on this kernel. The
+emulation thread almost never blocks, so both audio threads ran only when it
+happened to.
+
+`/proc/<tid>/schedstat`, deltas over 10 seconds, all three on core 3 at RR 20:
+
+    tid   comm           ran      waited on runqueue
+    873   mpc (emu)   1127.5 ms        0.3 ms
+    876   thread-loop   50.9 ms      532.5 ms
+    878   mpc (fx)      12.2 ms     1013.3 ms
+
+The consequence is not jitter. It is **loss**: the effects thread handed over
+about a tenth of the audio the machine generated, and the rest was never handed
+over at all.
+
+### The fix, and what it moved
+
+`board/rpi5/rootfs_overlay/usr/bin/mpc-audio-thread-priority.sh` raises every
+MAME thread except the emulation thread to SCHED_FIFO 60, from the unit's
+`ExecStartPost`. Audio produced per wall second, as a fraction of realtime,
+measured from MAME's own update counters (`mpcpi-realtime-ratio.sh`):
+
+| configuration | realtime | underruns |
+|---------------|----------|-----------|
+| all threads SCHED_RR 20 | **9.7%** | hundreds/s |
+| audio threads SCHED_FIFO 60 | **101.6%** | - |
+| settled, audio clock + `-nothrottle` | **99.8%** | **0**, overruns 0, cushion 2112 frames |
+
+At a **64-frame quantum**. And in the codec monitor capture, the defect
+signature disappears - held non-zero runs of 513, 449 and 385 frames (one
+emulated frame each, 16/14/5 occurrences) become fifteen runs of unrelated
+lengths, 5.08% of the stream down to 0.64%:
+
+    before   57 held runs >=48 frames   lengths 513x16, 449x14, 385x5
+    after    15 held runs >=48 frames   no repeated length
+
+Responsiveness moved with it: pads driven at a fixed 125 ms interval came back
+at a 423 ms median interval before, 106 ms after.
+
+### Why this hid for so long
+
+- **`-wavwrite` was always clean.** It is written by `streams_update()` on the
+  EMULATION thread, upstream of the effects thread, so it never saw the loss.
+  Every "the emulator's own mix is clean" result above is true and irrelevant.
+- **`pw-play` next to MAME was clean.** Of course - `pw-play`'s threads are not
+  pinned behind a SCHED_RR emulation thread. That experiment correctly exonerated
+  the graph, the sink, the device and the quantum, and pointed inside MAME. It
+  just could not point at *which thread*.
+- **Every buffer knob half-worked.** Deeper cushions delay the first shortfall,
+  which is why each doubling roughly halved the count, and why nothing ever
+  reached zero.
+- **Underrun counts undercounted.** Once the prebuffer path re-arms it emits
+  `memset(0)` buffers, which are not counted as underruns. A monitor capture of
+  the broken state was 84% digital silence with the underrun counter reporting a
+  few dozen per second.
+
+### The measurement to use
+
+    mpcpi-realtime-ratio.sh 30      # % of realtime the producer actually delivers
+
+Anything below ~99% means audio is being dropped before it ever reaches
+PipeWire, and no amount of buffer tuning will help. Check thread priorities
+first:
+
+    ps -L -o tid,comm,cls,rtprio,psr,pcpu -p $(pgrep -x mpc)
+
+The emulation thread should be the ONLY `RR 20` row.
+
+### Still open
+
+- The fix is a post-start `chrt`, which has to identify the emulation thread by
+  CPU share. The durable version is a MAME patch that sets the sound threads'
+  priority at creation, so it works everywhere and needs no guessing.
+- `sched_rr_timeslice_ms=100` remains a loaded gun for anything else that ends
+  up sharing a priority on a pinned core.
+- The remaining ~1.3/s of long held runs in the capture have no repeated length
+  and are most likely material, not mechanism - not yet proven against a
+  `-wavwrite` control from the same run.
