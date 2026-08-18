@@ -604,3 +604,40 @@ it binds, it enumerates at high speed, it exposes both PCM directions, it
 routes 20 links - and none of those touch the question actually being asked,
 which is what the host parsed. The host is a Linux machine on the same desk
 and `arecord -l` could have been run there at any point.
+
+### Gadget transport: PipeWire writes one quantum and stops
+
+Established by watching the Pi's own ALSA pointers while the host recorded:
+
+    /proc/asound/card2/pcm0p/sub0/status
+        state    RUNNING
+        hw_ptr   1075  ->  744   (went BACKWARDS: the stream restarts when
+                                  the host opens the capture)
+        appl_ptr 1139            (only 64 frames - one quantum - ahead)
+
+Three seconds of host recording at 44100 should advance hw_ptr by ~132,000
+frames. It advanced by nothing. The host duly received 26 channels of
+digital silence, because the Pi never put anything there to send.
+
+So the fault is not the link, the source port, the driver group, the channel
+count or the descriptors - all of which were checked and are correct. It is
+that PipeWire fills one period and then stops, and does not resume when the
+host starts draining.
+
+Ruled out by measurement, so they are not re-tried:
+
+  * duplicate :speaker nodes - the gadget is fed by port 157, the SAME port
+    that feeds the working monitor path
+  * full-speed descriptors - 26ch enumerates and negotiates fine on the host
+  * driver groups - all five nodes are already in mpcpi-audio
+  * channel count - 2ch is just as silent as 26ch, with a hand-verified link
+
+One thing did improve: the gadget carried api.alsa.disable-tsched = true,
+inherited from an older graph. That is right for a codec with its own
+crystal and wrong for a gadget, whose endpoint only advances when a host
+streams. Setting it false took the node's error counter from 3034 and
+climbing to 1 and steady. It did not fix transport.
+
+Next: api.alsa.headroom is 0 on this device. A device that will not start
+until it has more than one period buffered would behave exactly like this,
+and headroom is what pre-fills it.
