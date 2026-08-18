@@ -110,6 +110,15 @@ WHEEL_CARRY_S = float(os.environ.get("MPCPI_WHEEL_CARRY_MS", "250")) / 1000.0
 # is not a modifier.
 TAP_KEYS = os.environ.get("MPCPI_TAP_KEYS", "1") not in ("0", "", "no")
 
+# Measure how often the pad endpoint is actually sampled. The loop reads pads,
+# then buttons, then sleeps, so a hit can wait behind the button read - and how
+# long that is worth knowing before anyone argues about buffer sizes.
+POLL_STATS = bool(os.environ.get("MPCPI_HUB_POLL_STATS"))
+
+# Poll the button endpoint every Nth pass. Buttons choose modes; pads are
+# played in time, and giving both the same attention cost the pads 4ms a hit.
+BUTTON_POLL_EVERY = int(os.environ.get("MPCPI_BUTTON_POLL_EVERY", "4"))
+
 # MPC lamp -> Maschine LED, on the button that SENDS that key. A lamp anywhere
 # else is a light that reports something you press somewhere else, which is
 # worse than no light: FULL LEVEL moved from GRID to SELECT to F7 during this
@@ -601,10 +610,11 @@ class Mk1:
     # 200 a bleed of 224 is a note-on: hitting one pad fires its scan
     # neighbour, which is what "the hi-hat repeats when I play fast" was.
     #
-    # ON at 400 clears the worst observed bleed by 176 and still sits far below
-    # the softest real hit. OFF at 150 gives hysteresis, so a pad decaying
-    # through the on-threshold cannot chatter a second note-on.
-    PAD_ON_THRESHOLD = int(os.environ.get("MPCPI_PAD_ON", "300"))
+    # ON was raised to 400 when bleed was only being AVOIDED by threshold.
+    # It is now SUBTRACTED - a pad's reading has 20% of its scan neighbour
+    # removed when that neighbour dominates - so the threshold no longer has to
+    # clear the worst bleed on its own, and 250 lets a softer hit register.
+    PAD_ON_THRESHOLD = int(os.environ.get("MPCPI_PAD_ON", "250"))
     # OFF is deliberately far below ON, not just a little below.
     #
     # The three guards are all here and all necessary: a note-on threshold
@@ -725,6 +735,9 @@ class Mk1:
         self.pad_on = [False] * 16
         self.pad_raw = [0] * 16
         self.pad_last_on = [0.0] * 16
+        self._ctrl_tick = 0
+        self._pad_read_at = 0.0
+        self._pad_gaps = []
         self.pad_suppressed = 0
         self.buttons = 0
         self.button_changed_at = [0.0] * 48
@@ -903,19 +916,36 @@ class Mk1:
 
     # --- input ---
 
-    def poll(self, router, timeout=4):
-        """Read whatever is pending and return routed events."""
+    def poll(self, router, timeout=2):
+        """Read whatever is pending and return routed events.
+
+        PADS FIRST AND OFTEN. This read pads and buttons with the same 4ms
+        timeout and then slept 2ms, so a pad hit waited behind a button
+        endpoint that usually has nothing to say: measured, the pads were
+        sampled every 6.25ms with a tail to 16ms. That is several times the
+        entire audio path, and no buffer size can win it back.
+
+        Buttons are polled every BUTTON_POLL_EVERY passes instead. A button is
+        a mode change; a pad is a note, and only one of them is played in time.
+        """
         events = []
         try:
             data = self.dev.read(EP_PADS, 64, timeout=timeout)
+            if POLL_STATS:
+                now = time.monotonic()
+                if self._pad_read_at:
+                    self._pad_gaps.append(now - self._pad_read_at)
+                self._pad_read_at = now
             events += self._pads(data, router)
         except Exception:
             pass
-        try:
-            data = self.dev.read(EP_CTRL, 64, timeout=timeout)
-            events += self._ctrl(data, router)
-        except Exception:
-            pass
+        self._ctrl_tick += 1
+        if not (self._ctrl_tick % BUTTON_POLL_EVERY):
+            try:
+                data = self.dev.read(EP_CTRL, 64, timeout=1)
+                events += self._ctrl(data, router)
+            except Exception:
+                pass
         return events
 
 
@@ -1339,7 +1369,16 @@ def main():
         if out:
             deliver(out)
             del out[:]
-        time.sleep(0.002)
+        if POLL_STATS and len(mk1._pad_gaps) >= 400:
+            g = sorted(mk1._pad_gaps)
+            mk1._pad_gaps = []
+            print("hub: pad sampling ms  med=%.2f p90=%.2f p99=%.2f max=%.2f"
+                  % (g[len(g)//2]*1000, g[int(len(g)*0.9)]*1000,
+                     g[int(len(g)*0.99)]*1000, g[-1]*1000),
+                  file=sys.stderr, flush=True)
+        # No sleep. The pad read blocks for up to its timeout, which paces the
+        # loop against the device rather than against a fixed delay added on
+        # top of it - the 2ms that used to be here was pure added latency.
 
 
 def led_probe(only, walk):
