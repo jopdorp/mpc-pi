@@ -14,9 +14,10 @@ exists — the "Status" column at the end of each table says which is which.
 | Display buttons | 8 | D1–D8, D8 is the surface toggle |
 | Other buttons | 33 | 24 unbound in DAW mode |
 
-**24 free buttons.** There is no shortage, and therefore no reason for a
-PIN latch or a SHIFT layer in the DAW. SHIFT stays what it is on the MPC:
-the MPC's own SHIFT key.
+**24 free buttons.** There is no shortage, and therefore no PIN latch. SHIFT
+appears exactly once, on MUTE, and only because the bare MUTE key is the
+transport's STOP on both surfaces — see "Transport, on both surfaces". On the
+MPC surface SHIFT remains what it always was: the MPC's own SHIFT key.
 
 ## Three invariants
 
@@ -38,8 +39,8 @@ moving focus — the modifier is a shortcut over the focus model, not a
 replacement for it, and every verb works both ways.
 
     D3                 focus LOOP3
-    ARM                arm the focused track
-    MUTE + D5          mute LOOP5, focus unchanged
+    REC                arm loop recording
+    SHIFT+MUTE + D5    mute LOOP5, focus unchanged
 
 ## The track row: D1–D7
 
@@ -49,10 +50,13 @@ the desk from a button beside the loop tracks.
 
 | gesture | action | status |
 |---|---|---|
-| `Dn` | focus strip *n* | **to build** |
-| `MUTE` + `Dn` | mute strip *n* | built |
+| `Dn` | focus strip *n* | built |
+| `REC` then `Dn` | punch in / out on strip *n* | built (panel side) |
+| `SHIFT` + `MUTE` + `Dn` | mute strip *n* | built |
 | `SOLO` + `Dn` | solo strip *n* | built |
-| `ARM` + `Dn` | arm strip *n* for record | **to build** |
+
+"Built (panel side)" means the panel emits the command; `daw-ctl` does not yet
+act on `punch_in` / `punch_out` / `focus` / `arm`.
 
 D1–D4 sit under the *left* screen, which shows the MPC, so four of the
 seven have no on-screen label. Their order is the mixer's own, and the same
@@ -67,12 +71,12 @@ transport action.
 
 | step | control | what happens |
 |---|---|---|
-| 1 | `Dn` | focus the track |
-| 2 | `ARM` | arm it; the column outlines |
-| 3 | `REC` | punch in at the next bar; column fills |
-| 4 | `REC` | punch out, loop closes and starts playing |
-| — | `REC` again | overdub onto the closed loop |
-| — | `CLEAR` | discard the take |
+| 1 | `REC` | arm loop recording; the strip buttons stop selecting |
+| 2 | `Dn` | punch in on strip *n* at the next bar; column fills |
+| 3 | `Dn` | punch out; the loop closes and starts playing |
+| — | `Dn` again | overdub onto the closed loop |
+| — | `REC` | disarm; the strip buttons select again |
+| — | `ERASE` | discard the take |
 | — | `UNDO` | undo the last take, non-destructively |
 
 Quantising the punch to the bar is what makes this usable at a keyboard's
