@@ -131,6 +131,7 @@ export MPC_PIPEWIRE_FRAMES="\${MPC_PIPEWIRE_FRAMES:-64}"
     -pluginspath "\$here/plugins" -plugin layout "\$@" &
 fast_pid=\$!
 raise_audio_threads
+trap '"\$here/scripts/mpcpi-sampler-input" --stop 2>/dev/null || true' EXIT INT TERM
 wait "\$fast_pid"
 WRAPPER
 
@@ -164,6 +165,7 @@ if "\$here/scripts/mpc-audio-thread-priority.sh"; then :; else
     printf 'warning: could not raise audio thread priority (chrt); audio may underrun\n' >&2
 fi
 "\$here/scripts/mpcpi-sampler-input" || true
+trap '"\$here/scripts/mpcpi-sampler-input" --stop 2>/dev/null || true' EXIT INT TERM
 wait "\$fast_pid"
 WRAPPER
 chmod +x "$staging/mpcpi" "$staging/mpcpi-accurate"
@@ -231,6 +233,7 @@ if "\$here/scripts/mpc-audio-thread-priority.sh"; then :; else
     printf 'warning: could not raise audio thread priority (chrt); audio may underrun\n' >&2
 fi
 "\$here/scripts/mpcpi-sampler-input" || true
+trap '"\$here/scripts/mpcpi-sampler-input" --stop 2>/dev/null || true' EXIT INT TERM
 wait "\$fast_pid"
 WRAPPER
 chmod +x "$staging/mpcpi-maschine"
@@ -292,6 +295,16 @@ rate=${PIPEWIRE_RATE_HZ:-48000}
 
 if ! command -v pactl >/dev/null || ! command -v pw-link >/dev/null; then
     printf 'mpcpi-sampler-input: pactl/pw-link not found; skipping\n' >&2
+    exit 0
+fi
+
+# TAKE IT AWAY AGAIN ON EXIT. The sink outlives the emulator otherwise, and
+# an "MPC-Sampler-Input" sitting in the sound settings with no machine
+# behind it is a device that silently swallows whatever you select into it.
+if [ "${1:-}" = "--stop" ]; then
+    for m in $(pactl list modules short 2>/dev/null | grep "sink_name=$sink" | cut -f1); do
+        pactl unload-module "$m" 2>/dev/null
+    done
     exit 0
 fi
 
