@@ -373,9 +373,18 @@ def _render():
                fill=colour_for(plain) if plain else UNMAPPED)
     
 
-    # pad shift functions, their own short block
+    # pad shift functions, their own short block.
+    #
+    # THIS HEADING USED TO SAY "printed on the MK1 panel", and the table under
+    # it has always been OUR bindings. The MK1's silkscreen is in the figure
+    # above - UNDO, REDO, QUANTIZE, COPY, PASTE, SEMITONE, OCTAVE - and those
+    # are Maschine's functions, not the MPC's. Four of them were transcribed
+    # straight into SHIFT_PADS as if they were MPC keys; the MPC2000XL has no
+    # semitone or octave key, so those four pads sent nothing at all for
+    # months. A heading that names the wrong panel is how that happens.
     PTY = TY + 26 + per * ROWH + 26
-    d.text((40, PTY), "PADS - SHIFT FUNCTIONS (printed on the MK1 panel)",
+    d.text((40, PTY), "PADS - WHAT SHIFT+PAD SENDS TO THE MPC "
+                      "(the MK1's own silkscreen, above, says otherwise)",
            font=F_HEAD, fill=TEXT)
     PTY += 32
     for i in range(16):
