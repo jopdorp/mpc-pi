@@ -13,22 +13,30 @@
 -- one.
 --
 --   queue lines (whitespace separated):
---     finalize <track> length <samples>        close a take into a loop
---     repeat   <track> at <samples> times <n>  keep the lane sounding
---     clear    <track>                         discard the lane's loop
---     split    <track> <region> <samples>
---     move     <track> <region> <samples>
---     fadein   <track> <region> <samples>
---     fadeout  <track> <region> <samples>
---     trim     <track> <region> <start> <end>
---     gain     <track> <region> <factor>
---     remove   <track> <region>
+--     finalize  <track> length <samples>        close a take into a loop
+--     repeat    <track> at <samples> times <n>  keep the lane sounding
+--     clear     <track>                         discard the lane's loop
+--     split     <track> <region> <samples>
+--     move      <track> <region> <samples>
+--     duplicate <track> <region> <samples>
+--     fadein    <track> <region> <samples>
+--     fadeout   <track> <region> <samples>
+--     trim      <track> <region> <start> <end>
+--     gain      <track> <region> <factor>
+--     normalize <track> <region> [target dB]
+--     remove    <track> <region>
+--     undo
 --     save
 --
 -- The first three are daw-ctl's loop-engine action strings VERBATIM (see
 -- loop-ops.lua): one vocabulary, so there is no translation layer between
 -- the two halves to drift apart. What each does, and what a punch-out
 -- costs, is documented in loop-ops.lua - this file is only the host.
+--
+-- AND ONE FILE THE OTHER WAY: $DAW_REGIONS, the region list. The queue
+-- carries edits down; that file carries the playlist back up, and it is
+-- the only thing daw-ctl can see of the audio it is editing. Its format
+-- and why it exists are at publish() below.
 --
 --   SESSION_DIR/SESSION_NAME select the session; DAW_QUEUE the queue file.
 
@@ -92,39 +100,17 @@ local function apply(line)
 	end
 end
 
--- After every drain, publish the track's regions. Editing renames
--- things - a split turns one region into two with new names - so
--- daw-ctl cannot keep addressing what it saw last time. This file is
--- how it resyncs, and it is also what the EDIT page draws.
+-- THE CHANNEL BACK: the region list, as a file. Written by loop-ops.lua,
+-- which owns the playlist; this file is only the host, and the format and
+-- the reasoning are documented next to the code, at M.publish.
 local state_path = os.getenv("DAW_REGIONS") or "/dev/shm/daw-regions"
 
-local function publish()
-	local f = io.open(state_path .. ".tmp", "w")
-	if not f then return end
-	for r in session:get_routes():iter() do
-		local t = r:to_track()
-		if t and not t:isnil() then
-			local pl = t:playlist()
-			if pl and not pl:isnil() then
-				for reg in pl:region_list():iter() do
-					local ar = reg:to_audioregion()
-					local gain = 1.0
-					local fi, fo = 0, 0
-					if ar and not ar:isnil() then
-						gain = ar:scale_amplitude()
-						fi = loop.samples_of(ar:fade_in_length())
-						fo = loop.samples_of(ar:fade_out_length())
-					end
-					f:write(string.format("%s\t%s\t%d\t%d\t%d\t%d\t%.4f\n",
-						r:name(), reg:name(),
-						loop.samples_of(reg:position()),
-						loop.samples_of(reg:length()), fi, fo, gain))
-				end
-			end
-		end
-	end
-	f:close()
-	os.rename(state_path .. ".tmp", state_path)
+-- Publishing must never take the session host down. A screen that misses a
+-- frame is a screen that misses a frame; a governor that exits stops
+-- draining the queue, and with it every loop the player has recorded.
+local function publish_safely()
+	local ok, err = pcall(loop.publish, state_path)
+	if not ok then say("GOVERNOR_PUBLISH_ERR " .. tostring(err)) end
 end
 
 local function drain()
@@ -144,13 +130,12 @@ local function drain()
 	os.remove(taken)
 	if #lines == 0 then return 0 end
 	for _, line in ipairs(lines) do apply(line) end
-	publish()
+	publish_safely()
 	return #lines
 end
 
 if once then
-	local pok, perr = pcall(publish)
-	if not pok then say("GOVERNOR_PUBLISH_ERR " .. tostring(perr)) end
+	publish_safely()
 	local n = drain()
 	say(string.format("GOVERNOR_DONE drained=%d applied=%d failed=%d",
 		n, applied, failed))
@@ -158,7 +143,30 @@ if once then
 	return
 end
 
+-- Publish ONCE BEFORE THE LOOP, not only after a drain. Nothing had ever
+-- written the file on a running appliance: /dev/shm/daw-regions did not
+-- exist until the first take closed, so daw-ctl came up with no idea
+-- whether the session was empty or unreadable, and a governor that
+-- restarted under a session full of audio published nothing until the
+-- player recorded something new.
+publish_safely()
+
+-- ...and on a slow timer after that, because the header carries the
+-- TRANSPORT POSITION as well as the regions and that is the EDIT page's
+-- playhead. Twice a second is far below the rate a moving playhead is
+-- drawn at, and it is also the resync a daw-ctl that restarted needs;
+-- region changes themselves still publish immediately, from the drain.
+local PUBLISH_TICKS = 25                  -- 25 * 20 ms = 500 ms
+local ticks = 0
 while true do
-	drain()
+	if drain() > 0 then
+		ticks = 0
+	else
+		ticks = ticks + 1
+		if ticks >= PUBLISH_TICKS then
+			ticks = 0
+			publish_safely()
+		end
+	end
 	ARDOUR.LuaAPI.usleep(20 * 1000)
 end

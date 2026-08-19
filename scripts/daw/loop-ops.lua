@@ -220,6 +220,10 @@ function M.attach(session)
 	M.rate = session:sample_rate()
 	M.loops = {}                -- [track] = { length =, layers = { ... } }
 	M.claimed = {}              -- [track] = { [region name] = true }
+	-- A new session is a new history. The inverses below close over region
+	-- objects from the session being replaced, and running one of those
+	-- against a different session is the one way this stack can do harm.
+	M.history = {}
 	-- What the last punch-out cost, in samples, so the next one can locate
 	-- over its own pause instead of over a guess. See finalize_stop.
 	M.roll_gap = math.floor(M.rate * 0.06)
@@ -466,58 +470,283 @@ function M.ops.clear(track)
 	M.loops[track] = nil
 end
 
+-- ---- the channel back: the region list ------------------------------
+--
+-- The queue carries edits DOWN. This carries the playlist UP, and it is
+-- the only thing daw-ctl can see of the audio it is editing: until it
+-- existed the EDIT page drew its bar grid, its snap and its cursor over an
+-- empty timeline and there was nothing for SPLIT or the region keys to
+-- select, so every audio-changing verb on EDIT and WAVE was blocked on it.
+--
+-- It mirrors the queue rather than inventing a second mechanism - one file
+-- each way, write-then-rename so a reader never sees half a frame, and a
+-- format that survives either side restarting with no reconnect dance.
+--
+--   # rate <n> transport <samples> gen <n>
+--   <track>\t<region>\t<pos>\t<len>\t<fade in>\t<fade out>\t<gain>
+--
+-- THE HEADER IS NOT DECORATION. Positions here are in ARDOUR's timeline
+-- and at ARDOUR's sample rate, and daw-ctl knows neither on its own: it
+-- counts the MPC's elapsed milliseconds at whatever rate it was
+-- constructed with, and Ardour's transport is a free-running counter that
+-- nothing ever locates to the MPC's zero (see `repeat at` above, which
+-- ignores daw-ctl's positions for exactly this reason). A cursor in the
+-- wrong coordinates does not draw slightly wrong - it splits a region
+-- somewhere else entirely.
+--
+-- Names, not indices, because editing renames: split makes two regions
+-- neither side named, and clone_region reuses its source's name.
+function M.publish(path)
+	local f = io.open(path .. ".tmp", "w")
+	if not f then return false end
+	M.gen = (M.gen or 0) + 1
+	f:write(string.format("# rate %d transport %d gen %d\n",
+		M.session:sample_rate(),
+		M.samples_of(M.session:transport_sample()), M.gen))
+	for r in M.session:get_routes():iter() do
+		local t = r:to_track()
+		if t and not t:isnil() then
+			local pl = t:playlist()
+			if pl and not pl:isnil() then
+				for reg in pl:region_list():iter() do
+					local ar = reg:to_audioregion()
+					local gain, fi, fo = 1.0, 0, 0
+					if ar and not ar:isnil() then
+						gain = ar:scale_amplitude()
+						fi = M.samples_of(ar:fade_in_length())
+						fo = M.samples_of(ar:fade_out_length())
+					end
+					f:write(string.format("%s\t%s\t%d\t%d\t%d\t%d\t%.4f\n",
+						r:name(), reg:name(),
+						M.samples_of(reg:position()),
+						M.samples_of(reg:length()), fi, fo, gain))
+				end
+			end
+		end
+	end
+	f:close()
+	return os.rename(path .. ".tmp", path) ~= nil
+end
+
 -- ---- the region edits the EDIT and WAVE pages send -------------------
+--
+-- UNDO IS OURS, BECAUSE ARDOUR'S IS NOT REACHABLE FROM LUA. Measured on
+-- both the appliance's Ardour 8 and the build host's Ardour 9, with
+-- scripts/daw/loop-ops.lua's own vocabulary against a real captured
+-- region:
+--
+--   Session:begin_reversible_command    bound
+--   Session:add_stateful_diff_command   bound
+--   Session:commit_reversible_command   bound
+--   Session:undo / redo / undo_depth    NOT BOUND - "attempt to call a
+--                                       nil value (method 'undo')"
+--
+-- So a command can be pushed onto Ardour's history and nothing in this
+-- process can ever pop it: wrapping the edits below in a reversible
+-- command would produce an undo stack only a GUI could reach, on an
+-- appliance that has no GUI. The stack below is therefore an INVERSE-OP
+-- stack of our own - each edit records how to put things back - which is
+-- the whole of what `UNDO` on the EDIT and WAVE pages means.
+--
+-- It covers REGION EDITS ONLY. finalize / repeat / clear are the loop
+-- lifecycle and have their own undo already (daw-ctl's engine sends
+-- `clear`, which is take-level ERASE and UNDO both); mixing them in here
+-- would make one press of UNDO on the EDIT page throw away a whole take.
+
+M.history = {}
+M.HISTORY_MAX = 32
+
+function M.remember(label, undo)
+	M.history[#M.history + 1] = { label = label, undo = undo }
+	-- Bounded, because every entry pins a region object alive. Losing the
+	-- oldest edit is the right thing to lose.
+	if #M.history > M.HISTORY_MAX then table.remove(M.history, 1) end
+end
+
+-- The names on a playlist right now, and what appeared since.
+--
+-- split_region does not tell you what it made, and a clone comes back
+-- named after its source (see copy_name), so the only reliable way to
+-- name the pieces an edit produced is to look before and after.
+function M.snapshot(pl)
+	local seen = {}
+	for r in pl:region_list():iter() do seen[r:name()] = true end
+	return seen
+end
+
+function M.added(pl, before)
+	local out = {}
+	for r in pl:region_list():iter() do
+		if not before[r:name()] then out[#out + 1] = r end
+	end
+	return out
+end
+
+-- A name no region on this track holds yet.
+function M.unique_name(track, base)
+	local n = 1
+	while M.region_by_name(track, M.copy_name(base, n)) do n = n + 1 end
+	return M.copy_name(base, n)
+end
+
+-- The scale factor that puts `peak` at `target_db`.
+--
+-- Pure, so the self-test can check the arithmetic without an audio file -
+-- and because AudioRegion:normalize is NOT BOUND in Lua on either Ardour
+-- (measured, same probe as above), so normalising here means computing
+-- the factor and setting the region's gain. maximum_amplitude reports the
+-- SOURCE's peak, unscaled, so this is absolute rather than relative to
+-- whatever gain the region already carries.
+--
+-- -0.5 dB rather than 0: a region normalised to exactly full scale
+-- clips the moment anything downstream sums with it.
+function M.norm_gain(peak, target_db)
+	if not peak or peak <= 0 then return nil end
+	return (10 ^ ((target_db or -0.5) / 20)) / peak
+end
+
+function M.audio_region(track, region)
+	local r, pl = M.region_by_name(track, region)
+	assert(r, "no region " .. tostring(region))
+	local ar = r:to_audioregion()
+	assert(ar and not ar:isnil(), tostring(region) .. " is not an audio region")
+	return ar, r, pl
+end
 
 function M.ops.split(track, region, pos)
 	local r, pl = M.region_by_name(track, region)
 	assert(r and pl, "no region " .. tostring(region))
+	local at = M.samples_of(r:position())
+	local before = M.snapshot(pl)
 	pl:split_region(r, Temporal.timepos_t(tonumber(pos)))
+	local halves = M.added(pl, before)
+	-- CLAIM THE PIECES. Everything a lane has accounted for is claimed
+	-- (see unclaimed), and a half-region nobody claimed would be read as a
+	-- fresh capture by the next finalize on this lane - so splitting a loop
+	-- would make the next take swallow the pieces of the old one.
+	for _, h in ipairs(halves) do M.claim(track, h:name()) end
+	M.remember("split " .. region, function()
+		for _, h in ipairs(halves) do
+			pl:remove_region(h)
+			if M.claimed[track] then M.claimed[track][h:name()] = nil end
+		end
+		pl:add_region(r, Temporal.timepos_t(at), 1, false)
+		M.claim(track, r:name())
+	end)
+end
+
+-- COPY THE REGION TO `pos`. What DUPLICATE sends.
+function M.ops.duplicate(track, region, pos)
+	local src, pl = M.region_by_name(track, region)
+	assert(src and pl, "no region " .. tostring(region))
+	local copy = ARDOUR.RegionFactory.clone_region(src, false, false)
+	assert(copy and not copy:isnil(), "clone_region failed")
+	-- clone_region hands back the SOURCE'S OWN NAME, so without this the
+	-- playlist holds two regions region_by_name cannot tell apart and the
+	-- EDIT page - which addresses regions by name - points at whichever
+	-- one iterates first.
+	copy:set_name(M.unique_name(track, region))
+	pl:add_region(copy, Temporal.timepos_t(tonumber(pos)), 1, false)
+	copy:set_opaque(src:opaque())
+	M.claim(track, copy:name())
+	M.remember("duplicate " .. region, function()
+		pl:remove_region(copy)
+		if M.claimed[track] then M.claimed[track][copy:name()] = nil end
+	end)
+	M.say("GOVERNOR_REGION duplicate " .. track .. " " .. copy:name())
 end
 
 function M.ops.move(track, region, pos)
 	local r = M.region_by_name(track, region)
 	assert(r, "no region " .. tostring(region))
+	local was = M.samples_of(r:position())
 	r:set_position(Temporal.timepos_t(tonumber(pos)))
+	M.remember("move " .. region, function()
+		r:set_position(Temporal.timepos_t(was))
+	end)
 end
 
 function M.ops.fadein(track, region, len)
-	local r = M.region_by_name(track, region)
-	assert(r, "no region")
-	local ar = r:to_audioregion()
-	assert(ar and not ar:isnil(), "not an audio region")
+	local ar = M.audio_region(track, region)
+	local was = M.samples_of(ar:fade_in_length())
+	local active = ar:fade_in_active()
 	ar:set_fade_in_length(tonumber(len))
 	ar:set_fade_in_active(true)
+	M.remember("fadein " .. region, function()
+		ar:set_fade_in_length(was)
+		ar:set_fade_in_active(active)
+	end)
 end
 
 function M.ops.fadeout(track, region, len)
-	local r = M.region_by_name(track, region)
-	assert(r, "no region")
-	local ar = r:to_audioregion()
-	assert(ar and not ar:isnil(), "not an audio region")
+	local ar = M.audio_region(track, region)
+	local was = M.samples_of(ar:fade_out_length())
+	local active = ar:fade_out_active()
 	ar:set_fade_out_length(tonumber(len))
 	ar:set_fade_out_active(true)
+	M.remember("fadeout " .. region, function()
+		ar:set_fade_out_length(was)
+		ar:set_fade_out_active(active)
+	end)
 end
 
 function M.ops.trim(track, region, from, to)
 	local r = M.region_by_name(track, region)
-	assert(r, "no region")
+	assert(r, "no region " .. tostring(region))
+	local was_pos = M.samples_of(r:position())
+	local was_len = M.samples_of(r:length())
 	r:trim_to(Temporal.timepos_t(tonumber(from)),
 	          Temporal.timecnt_t(tonumber(to) - tonumber(from)))
+	M.remember("trim " .. region, function()
+		r:trim_to(Temporal.timepos_t(was_pos), Temporal.timecnt_t(was_len))
+	end)
 end
 
 function M.ops.gain(track, region, factor)
-	local r = M.region_by_name(track, region)
-	assert(r, "no region")
-	local ar = r:to_audioregion()
-	assert(ar and not ar:isnil(), "not an audio region")
+	local ar = M.audio_region(track, region)
+	local was = ar:scale_amplitude()
 	ar:set_scale_amplitude(tonumber(factor))
+	M.remember("gain " .. region, function() ar:set_scale_amplitude(was) end)
+end
+
+-- NORM on the WAVE page.
+function M.ops.normalize(track, region, target_db)
+	local ar = M.audio_region(track, region)
+	local peak = ar:maximum_amplitude(nil)
+	local want = M.norm_gain(peak, tonumber(target_db))
+	assert(want, "nothing to normalise: " .. tostring(region) .. " is silent")
+	local was = ar:scale_amplitude()
+	ar:set_scale_amplitude(want)
+	M.remember("normalize " .. region, function()
+		ar:set_scale_amplitude(was)
+	end)
+	M.say(string.format("GOVERNOR_REGION normalize %s %s peak=%.4f gain=%.4f",
+		track, region, peak, want))
 end
 
 function M.ops.remove(track, region)
 	local r, pl = M.region_by_name(track, region)
 	assert(r and pl, "no region " .. tostring(region))
+	local at = M.samples_of(r:position())
 	pl:remove_region(r)
 	if M.claimed[track] then M.claimed[track][region] = nil end
+	-- The Lua reference keeps the region alive after the playlist drops it,
+	-- which is the only reason putting it back is possible at all.
+	M.remember("remove " .. region, function()
+		pl:add_region(r, Temporal.timepos_t(at), 1, false)
+		M.claim(track, r:name())
+	end)
+end
+
+-- Put the last region edit back. Takes no arguments: one stack, in the
+-- order the edits happened, whichever page they came from.
+function M.ops.undo()
+	local entry = table.remove(M.history)
+	assert(entry, "nothing to undo")
+	-- The entry is already off the stack, so a failing inverse cannot be
+	-- retried forever by a player holding the button down.
+	entry.undo()
+	M.say("GOVERNOR_UNDO " .. entry.label)
 end
 
 function M.ops.save()
@@ -610,7 +839,47 @@ function M.self_test()
 	-- every repetition is addressable, which clone_region does not manage
 	eq(M.copy_name("LOOP1-1.1", 3), "LOOP1-1.1@3", "copy name")
 
-	print("loop-ops self-test PASS: wire format, take selection, fit, plan")
+	-- the EDIT and WAVE vocabulary is on the ops table, or daw-ctl's lines
+	-- come back "unknown op" from a governor that looks perfectly healthy
+	for _, verb in ipairs({ "split", "move", "fadein", "fadeout", "trim",
+	                        "gain", "remove", "duplicate", "normalize",
+	                        "undo", "save" }) do
+		assert(type(M.ops[verb]) == "function", "no op " .. verb)
+	end
+
+	-- normalise is arithmetic, because Ardour binds no normalize() to Lua
+	local g = M.norm_gain(0.5, -0.5)
+	assert(math.abs(g - 1.8891) < 0.001, "norm gain " .. tostring(g))
+	eq(M.norm_gain(1.0, 0.0), 1.0, "a full-scale region needs no gain")
+	-- silence has no peak to normalise to, and 1/0 is not an answer
+	eq(M.norm_gain(0, -0.5), nil, "silence")
+	eq(M.norm_gain(nil, -0.5), nil, "no peak at all")
+
+	-- the undo stack is LIFO, bounded, and drops the OLDEST
+	M.history = {}
+	local undone = {}
+	for i = 1, 3 do
+		M.remember("edit" .. i, function() undone[#undone + 1] = i end)
+	end
+	M.ops.undo()
+	M.ops.undo()
+	eq(#undone, 2, "two undos ran")
+	eq(undone[1], 3, "undo is last-in-first-out")
+	eq(undone[2], 2, "undo is last-in-first-out")
+	eq(#M.history, 1, "the stack shrank")
+	local ok = pcall(M.ops.undo)
+	assert(ok, "the last entry must still be there")
+	ok = pcall(M.ops.undo)
+	assert(not ok, "an empty history must refuse rather than pretend")
+	M.HISTORY_MAX = 2
+	M.history = {}
+	for i = 1, 4 do M.remember("e" .. i, function() end) end
+	eq(#M.history, 2, "the stack is bounded")
+	eq(M.history[1].label, "e3", "the OLDEST entry is the one dropped")
+	M.HISTORY_MAX = 32
+
+	print("loop-ops self-test PASS: wire format, take selection, fit, plan, " ..
+	      "region vocabulary, normalise gain, undo stack")
 end
 
 if os.getenv("LOOP_OPS_SELFTEST") == "1" then M.self_test() end
