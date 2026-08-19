@@ -167,8 +167,28 @@ route() {
 
 	gin=$(gadget_in_node)
 	if [ -n "$gin" ]; then
+		# The computer's playback goes BOTH to Ardour's master (so it is
+		# audible and gets recorded by an armed loop) and to the MPC's
+		# sampling input, which is the destination that did not exist
+		# until patch 0051 gave the emulated machine an audio input at
+		# all - stream_alloc(0, 10, ...) had ten outputs and no inputs.
+		#
+		# Both, not either: the point of feeding the MPC is to sample
+		# from the computer, and the point of feeding Ardour is to hear
+		# what you are about to sample.
 		$op "$gin:capture_FL" ":Master/audio_in 1"
 		$op "$gin:capture_FR" ":Master/audio_in 2"
+		$op "$gin:capture_FL" ":mic:input_FL"
+		$op "$gin:capture_FR" ":mic:input_FR"
+
+		# PipeWire auto-links the graph clock's monitor into any free
+		# capture node, which sums a null sink's silence into the
+		# sampler's input. Harmless today and confusing later, so it is
+		# removed explicitly rather than left to be discovered.
+		if [ "$MODE" = "on" ]; then
+			$R pw-link -d "mpcpi-clock:monitor_FL" ":mic:input_FL" 2>/dev/null || true
+			$R pw-link -d "mpcpi-clock:monitor_FR" ":mic:input_FR" 2>/dev/null || true
+		fi
 	fi
 }
 
