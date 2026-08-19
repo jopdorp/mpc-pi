@@ -465,8 +465,11 @@ if [[ ! "$mame_nice" =~ ^-?([0-9]|1[0-9]|20)$ ]]; then
     exit 2
 fi
 
-if [[ ! "$mame_rt_priority" =~ ^([1-9]|[1-8][0-9]|9[0-5])$ ]]; then
-    printf 'error: MAME_RT_PRIORITY must be an integer from 1 through 95, got %s\n' "$mame_rt_priority" >&2
+# 0 disables SCHED_RR for hosts whose users hold no realtime rlimit; every
+# other value is passed to chrt unchanged.
+if [[ ! "$mame_rt_priority" =~ ^(0|[1-9]|[1-8][0-9]|9[0-5])$ ]]; then
+    printf 'error: MAME_RT_PRIORITY must be 0 or an integer from 1 through 95, got %s\n' \
+        "$mame_rt_priority" >&2
     exit 2
 fi
 
@@ -607,10 +610,17 @@ printf 'Starting %s BIOS %s with native PipeWire; quantum=%s, latency=%s (~%s ms
 # preempt at equal priority, so on a single pinned core those two only run when
 # the emulation thread blocks, and the audio producer delivered 9.7% of realtime.
 # Raise them afterwards with mpc-audio-thread-priority.sh; see docs/audio-chain.md.
-printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s\n' \
-    "$mame_cpuset" "$mame_nice" "$mame_rt_priority"
-printf '  NOTE: MAME'\''s audio threads inherit this priority. Run\n'
-printf '        mpc-audio-thread-priority.sh after start or they will be starved.\n'
+if (( mame_rt_priority > 0 )); then
+    scheduler_prefix=(chrt --rr "$mame_rt_priority")
+    printf 'Scheduling MAME on CPU(s) %s as nice %s, SCHED_RR priority %s\n' \
+        "$mame_cpuset" "$mame_nice" "$mame_rt_priority"
+    printf '  NOTE: MAME'\''s audio threads inherit this priority. Run\n'
+    printf '        mpc-audio-thread-priority.sh after start or they will be starved.\n'
+else
+    scheduler_prefix=()
+    printf 'Scheduling MAME on CPU(s) %s as nice %s, no realtime priority\n' \
+        "$mame_cpuset" "$mame_nice"
+fi
 printf 'Timing master: %s (%s)\n' "$timing_master" "${throttle_option#-}"
 if [[ -n "$sound_updates_per_quantum" ]]; then
     printf 'Sound update cadence: %s frames (%s per %s-frame quantum at %s Hz)\n' \
@@ -667,7 +677,7 @@ printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, window-resolution
     "$video_mode" "$async_present" "$external_event_loop" "$view_name" \
     "$window_resolution" "$artwork_resolution" "$filter_mode" "$gl_vbo"
 
-exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" chrt --rr "$mame_rt_priority" \
+exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" "${scheduler_prefix[@]}" \
     env "${panel_timer_countdown_unset[@]}" "${sound_cadence_unset[@]}" "${v53_fetch_unset[@]}" "${v53_data_unset[@]}" "${v53_idle_unset[@]}" "${dsp_read_unset[@]}" "${midi_unset_environment[@]}" \
     "${clock_environment[@]}" "${panel_environment[@]}" \
     "${panel_timer_environment[@]}" "${midi_clock_environment[@]}" "${midi_environment[@]}" \
