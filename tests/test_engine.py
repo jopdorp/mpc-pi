@@ -219,10 +219,18 @@ class TestRouting(unittest.TestCase):
         is a pad that has been taken away and given to the mixer.
         """
         events = r.pad(6, 100)
-        self.assertEqual([kind for kind, _ in events], ["midi"], where)
+        self.assertTrue(all(kind in ("midi", "midi_up") for kind, _ in events),
+                        where)
         if r.shift:
-            self.assertEqual(events, [("midi", control_map.SHIFT_PADS[7])],
-                             where)
+            # A SHIFTED PAD IS A KEY, SO IT IS TAPPED: press and release
+            # together, the release landing while SHIFT is still down, exactly
+            # as the machine's own panel reports a number let go before its
+            # modifier. It used to send the press alone, which latched a panel
+            # key in the MPC for good.
+            key = control_map.SHIFT_PADS[7]
+            self.assertEqual(events, [("midi", key), ("midi_up", key)], where)
+            self.assertEqual(r.pad(6, 0), [],
+                             "%s: the pad release fired the key again" % where)
         else:
             self.assertEqual(events, [("midi", "pad:6:100")], where)
 

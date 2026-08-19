@@ -391,11 +391,28 @@ class Router:
         if name == "shift":
             self.shift = down
             target = control_map.MPC_BUTTONS.get("shift")
-            if self.surface != "MPC" or not target:
-                return []
             if down:
+                if self.surface != "MPC" or not target:
+                    return []
                 self.pressed[name] = target
                 return [("midi", target)]
+            # A RELEASE IS OWED FOR ANY PRESS WE SENT, whatever the surface
+            # says NOW.
+            #
+            # This asked "are we on the MPC surface?" on the way up as well as
+            # on the way down, so a SHIFT held across a surface toggle - press
+            # SHIFT, press DISPLAY 8, let go - sent the key DOWN and then
+            # returned [] on the release. The MPC was left holding SHIFT with
+            # nothing able to lift it: every later press re-sends the down, and
+            # the release is refused for the same reason it was the first time.
+            #
+            # That is exactly the reported "shift is stuck, my pads do not
+            # work" - with SHIFT down the machine reads every pad as a shifted
+            # one - and it survives restarts of nothing, because the state that
+            # is wrong lives in the emulated machine rather than here.
+            #
+            # self.pressed is the record of what we actually sent, so let it
+            # decide. Nothing else can strand a key.
             sent = self.pressed.pop(name, None)
             return [("midi_up", sent)] if (sent and SEND_KEY_RELEASE) else []
 
@@ -410,6 +427,19 @@ class Router:
             target = control_map.ALWAYS[name]
             if not down:
                 sent = self.pressed.pop(name, None)
+                # A HELD MODE ENDS WITH ITS BUTTON, even when the release
+                # arrives down this path instead of the per-surface one.
+                #
+                # SHIFT+MUTE enters the mixer's MUTE mode, and the guard above
+                # only routes MUTE away from the transport WHILE SHIFT IS
+                # HELD. Let go of SHIFT before MUTE and the release lands here,
+                # where nothing cleared self.held - so MUTE stayed latched and
+                # the display buttons went on muting strips with no modifier
+                # held. Same shape as the SHIFT bug above: state entered on the
+                # way down and abandoned on the way up.
+                if self.held and HOLD_MODES.get(name) == self.held:
+                    self.held = None
+                    return [("cmd", "mode %s" % self.mode)]
                 return [("midi_up", sent)] if (sent and SEND_KEY_RELEASE
                                                and not TAP_KEYS) else []
             if TAP_KEYS and SEND_KEY_RELEASE:
@@ -552,11 +582,40 @@ class Router:
             if not velocity:
                 return []
             target = control_map.SHIFT_PADS.get(index + 1)
-            if target:
-                kind = "midi" if target.startswith("mpc:") else "cmd"
-                return [(kind, target if kind == "midi"
-                         else "action %s" % target.split(":", 1)[1])]
-            return []
+            if not target:
+                return []
+            if not target.startswith("mpc:"):
+                return [("cmd", "action %s" % target.split(":", 1)[1])]
+            # TAPPED - PRESS AND RELEASE - LIKE EVERY OTHER MPC KEY.
+            #
+            # This sent the key DOWN and nothing else, ever. Not "the release
+            # is late": there is no code path that releases it, so one
+            # SHIFT+pad latched a panel key in the machine permanently, and
+            # each further gesture latched another one on top.
+            #
+            # Measured at the wire with the hub's own decoder driven by
+            # synthetic reports, a SHIFT+pad-4 gesture produced exactly:
+            #
+            #   90 46 64   SHIFT   down
+            #   90 44 64   4/SAMPLE down
+            #   80 46 00   SHIFT   up
+            #
+            # and no 80 44 00. The real panel always sends the pair - see
+            # docs/mpc2000xl-panel-protocol.md, 84 = key down and 85 = key up -
+            # and an unshifted numeric key is a DIGIT: held down on the main
+            # screen it types itself into the sequence field, verified on the
+            # appliance. So the latched key is not inert, it is a number key
+            # waiting to be read without its modifier.
+            #
+            # Sending both here rather than on the pad's release is deliberate:
+            # the release then lands while SHIFT is still down, which is the
+            # order the machine sees from its own panel when a player lifts the
+            # number before the modifier. Waiting for the pad to fall would put
+            # it after the SHIFT release whenever the modifier is let go first,
+            # and would strand the key again if the pad's release is ever lost.
+            if SEND_KEY_RELEASE:
+                return [("midi", target), ("midi_up", target)]
+            return [("midi", target)]
         # THE PADS ARE ALWAYS THE MPC'S. On both surfaces, in every mode.
         #
         # They used to be re-targeted by mode - hold MUTE and the grid became a
@@ -735,10 +794,44 @@ def self_test():
     assert ev == [("midi", "mpc:shift")], ev
     assert r.shift is True
     assert sent(r.pad(0, 100)) == "mpc:song"            # SHIFT+pad 1 types a 1
+    # AND IT LETS GO OF IT. A SHIFT+pad used to send the key down and never
+    # up, so every gesture latched one more panel key in the machine for good.
+    # The release rides with the press so it lands while SHIFT is still held,
+    # which is the order the machine's own panel produces.
+    if SEND_KEY_RELEASE:
+        assert r.pad(0, 100) == [("midi", "mpc:song"),
+                                 ("midi_up", "mpc:song")], r.pad(0, 100)
+        # ...and the pad's own release adds nothing, or the key fires twice.
+        assert r.pad(0, 0) == [], "SHIFT+pad fired again on the release"
     up = r.button("shift", False)
     assert up == ([("midi_up", "mpc:shift")] if SEND_KEY_RELEASE else [])
     assert r.shift is False
     assert r.pad(0, 100) == [("midi", "pad:0:100")]     # unshifted, a drum pad
+
+    # A SHIFT HELD ACROSS A SURFACE TOGGLE MUST STILL BE RELEASED.
+    #
+    # Press SHIFT on the MPC surface, toggle to the DAW with it held, let go:
+    # the release used to be refused because the surface no longer matched, so
+    # the MPC held SHIFT forever and read every pad as a shifted one. That is
+    # the reported "shift is stuck and my pads do not work", and nothing in
+    # the hub could undo it.
+    rss = Router()
+    assert rss.button("shift", True) == [("midi", "mpc:shift")]
+    rss.button(control_map.SURFACE_TOGGLE, True)
+    assert rss.surface == "DAW"
+    assert rss.button("shift", False) == (
+        [("midi_up", "mpc:shift")] if SEND_KEY_RELEASE else []), \
+        "a SHIFT pressed on the MPC surface was never released"
+    assert "shift" not in rss.pressed
+
+    # And a held MODE ends with its button even if SHIFT went first.
+    rsm = Router()
+    rsm.button(control_map.SURFACE_TOGGLE, True)
+    rsm.button("shift", True)
+    assert rsm.button("mute", True) == [("cmd", "mode MUTE")]
+    rsm.button("shift", False)
+    rsm.button("mute", False)
+    assert rsm.held is None, "MUTE stayed latched after its button came up"
 
     # NOTE REPEAT sends TAP TEMPO, which is what the MK1 prints above it; the
     # MPC's own note repeat is AFTER, on SAMPLING beside it.
