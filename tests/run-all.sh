@@ -54,9 +54,38 @@ else
 		# The governor's own arithmetic needs no session, but it is Lua, and
 		# the only Lua on this appliance is Ardour's - so it runs here rather
 		# than with the unit tests.
+		# CAPTURE, THEN MATCH, AND RETRY ONE KNOWN ABORT.
+		#
+		# This was piped into `grep -q`, which threw the output away, so
+		# an intermittent failure here reported nothing at all to look
+		# at. Capturing it named the fault in one run: luasession aborts
+		# during process teardown with
+		#
+		#     FATAL: exception not rethrown        (SIGABRT, rc 134)
+		#
+		# roughly two runs in eight, before the self-test has printed
+		# anything. That is Ardour's own shutdown race - it happens with
+		# an unchanged, passing script and has nothing to do with the
+		# loop-ops logic under test - so retrying it is honest, where
+		# retrying a real assertion failure would not be. The retry is
+		# bounded and matches that ONE signature; anything else fails on
+		# the spot, with its output.
+		#
+		# A flaky harness is worse than a missing one: it trains you to
+		# re-run until green, which is how a real regression gets waved
+		# through.
 		run "loop-ops: wire format, take selection, fit, plan" \
-			bash -c 'LOOP_OPS_SELFTEST=1 "$LUASESSION" \
-				scripts/daw/loop-ops.lua 2>&1 | grep -q "self-test PASS"'
+			bash -c 'for attempt in 1 2 3; do
+				out=$(LOOP_OPS_SELFTEST=1 "$LUASESSION" \
+					scripts/daw/loop-ops.lua 2>&1)
+				case "$out" in
+					*"self-test PASS"*) exit 0;;
+					*"exception not rethrown"*) continue;;
+				esac
+				printf "%s\n" "$out"; exit 1
+			done
+			echo "luasession aborted on all 3 attempts:"
+			printf "%s\n" "$out"; exit 1'
 		run "every plugin in the manifest instantiates" \
 			bash tests/integration/plugins_load.sh
 		run "the session template builds the whole desk" \
