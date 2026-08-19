@@ -490,6 +490,15 @@ class Daw:
         repetitions are still laid ahead of the playhead goes on playing with
         no button left that means stop.
         """
+        # ASK FIRST. The engine answers "clear LANE" for a lane that holds
+        # nothing at all - it has no error for it - so this reported ERASED
+        # on an empty lane and put a no-op on the queue. A key that claims
+        # to have done something it did not is the failure this panel
+        # already ships tests against.
+        lane = self.engine.lanes.get(self.focus)
+        if lane is None or (lane.state == "idle" and not lane.length_samples):
+            self.message = "NO TAKE ON %s" % self.focus
+            return ["error no-take %s" % self.focus]
         out = self.apply(self.engine.command("undo %s" % self.focus,
                                              self.playhead))
         if any(a.startswith("error") for a in out):
@@ -1817,10 +1826,22 @@ def self_test():
         assert d.command("erase") == ["remove LOOP1 LOOP1-1.1"]
         assert d.page == "EDIT"
         d.command("page LOOP")
-        d.command("erase")
+        # A lane that has never recorded. The engine has no error for that -
+        # it answers "clear LANE" regardless - so this used to report ERASED
+        # for a lane with nothing on it, and put a no-op on the queue.
+        d.command("focus %s" % LANES[1])
+        out = d.command("erase")
+        assert out[0].startswith("error no-take"), out
+        assert d.message == "NO TAKE ON %s" % LANES[1], d.message
         assert "remove" not in " ".join(queued()[mark + 1:]), \
             "ERASE on the strips page must not delete a region"
+        # ...and a lane that IS holding one is discarded, which is the same
+        # single `clear` the take-level UNDO sends.
+        d.command("focus %s" % LANES[0])
+        assert d.command("erase") == ["clear %s" % LANES[0]]
+        assert d.message == "ERASED %s" % LANES[0], d.message
         d.command("page EDIT")
+        d.command("focus LOOP1")
 
         # UNDO on EDIT pops the Lua side's inverse-op stack. It is NOT
         # Ardour's undo - Session:undo is not bound in Lua on Ardour 8 or 9
