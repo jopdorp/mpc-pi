@@ -32,6 +32,10 @@ import ardour_bindings                                    # noqa: E402
 TRANSPORT = "/dev/shm/mpc-transport"
 STATE = "/dev/shm/daw-ui-state.json"
 FIFO = "/run/daw-ctl.fifo"
+# Region work goes to the Lua side, which owns the playlist. Same default as
+# session-governor.lua and run-session.sh, and the same reasoning as the FIFO
+# above: a file survives either side restarting with no reconnect dance.
+QUEUE = os.environ.get("DAW_QUEUE", "/dev/shm/daw-region-queue")
 # Where a floppy chosen on the panel is published for the emulator.
 #
 # NOTHING READS THIS YET, and saying so is the point of the constant. Mounting
@@ -60,8 +64,10 @@ LANES = [n for n in STRIPS if n not in ("DELAY", "REVERB", "MASTER")]
 
 
 class Daw:
-    def __init__(self, client, strips=None, lanes=None, bpm=120.0):
+    def __init__(self, client, strips=None, lanes=None, bpm=120.0,
+                 queue=QUEUE):
         self.osc = client
+        self.queue = queue
         self.strips = list(strips or STRIPS)
         self.transport = daw_ctl.Transport()
         self.transport.bpm = bpm
@@ -115,6 +121,34 @@ class Daw:
             parts = line.split()
             self.osc.send(parts[0], *[int(p) for p in parts[1:]])
 
+    # The engine actions that are region work rather than mixer work. OSC
+    # cannot express any of them - Ardour's surface has no "close this take"
+    # or "lay that region again" - so they go to the session governor, which
+    # holds the session open and has the Lua API. See loop-ops.lua.
+    QUEUED = ("finalize", "repeat", "clear")
+
+    def enqueue(self, action):
+        """Append one engine action to the governor's queue, verbatim.
+
+        VERBATIM is the point. The action strings are the wire format on both
+        sides, so there is no second vocabulary to keep in step - this file
+        has already shipped three bugs that were nothing but two halves
+        disagreeing about a name (the knobs, the punch verbs, a renamed strip
+        list), and each of them passed both sides' own tests.
+
+        Opened per line so the governor can take the whole queue with a
+        rename; a writer holding the fd open would keep appending into a file
+        nobody reads any more.
+        """
+        try:
+            with open(self.queue, "a") as f:
+                f.write(action + "\n")
+        except OSError:
+            # A queue that cannot be written is a loop that will not repeat,
+            # but it is not a reason to take the control process - and with
+            # it the mixer and the panel - down.
+            self.message = "NO QUEUE"
+
     def perform(self, action):
         """Turn one engine action string into Ardour calls."""
         parts = action.split()
@@ -128,9 +162,8 @@ class Daw:
         elif verb == "disarm" and len(parts) > 1:
             if parts[1] in self.strips:
                 self.osc.send(punch, self.ssid(parts[1]), 0)
-        # "finalize" and "repeat" are region work: they go to the Lua
-        # side, which owns the playlist. Queued here, drained by the
-        # session governor.
+        elif verb in self.QUEUED:
+            self.enqueue(action)
         return action
 
     # --- commands from the panel ---
@@ -554,7 +587,19 @@ def self_test():
             self.msgs.append((path, a))
 
     o = FakeOsc()
-    d = Daw(o, bpm=120.0)
+    # A real path, not /dev/shm: the self-test must not append to the queue a
+    # running governor is draining, and the round-trip below has to read back
+    # what was actually written.
+    import tempfile
+    qdir = tempfile.mkdtemp()
+    d = Daw(o, bpm=120.0, queue=os.path.join(qdir, "queue"))
+
+    def queued():
+        try:
+            with open(d.queue) as f:
+                return [ln.strip() for ln in f if ln.strip()]
+        except OSError:
+            return []
     d.setup()
     assert any(p == "/set_surface/bank_size" for p, _ in o.msgs)
 
@@ -654,6 +699,29 @@ def self_test():
     rec = d.engine.lanes[lane]
     assert rec.state == "looping" and rec.bars == 3, rec.bars
     assert rec.length_samples == 3 * spb
+
+    # THE TAKE REACHES THE PLAYLIST. Closing a take emits region work that
+    # OSC cannot express, and until this test existed it was emitted to
+    # nobody: the strip recorded and no loop ever appeared. What goes on the
+    # queue is the engine's action string unchanged, which is what
+    # loop-ops.lua parses - assert the words, because a rename on either side
+    # is exactly how the knobs and the punch verbs both shipped dead.
+    q = queued()
+    assert "finalize %s length %d" % (lane, 3 * spb) in q, q
+    assert any(a.startswith("repeat %s at " % lane) and " times " in a
+               for a in q), q
+    # Mixer and punch traffic must NOT end up on it: those are OSC, and a
+    # governor asked to "arm" answers "unknown op" for as long as REC is held.
+    assert not any(a.split()[0] in ("arm", "disarm", "record-start", "gain")
+                   for a in q), q
+    # The lookahead is what keeps it sounding: the loop must be laid out
+    # ahead of the playhead, not just once.
+    laid = sum(int(a.split()[-1]) for a in q if a.startswith("repeat "))
+    assert laid >= 1, q
+    # UNDO takes it away again. A lane that has gone idle while its
+    # repetitions are still laid out plays on with no button left to stop it.
+    d.command("undo %s" % lane)
+    assert "clear %s" % lane in queued(), queued()
 
     # DISARM closes anything still rolling. The hub forgets on the same
     # press, so if daw-ctl did not do this the strip would record forever.
@@ -775,8 +843,9 @@ def self_test():
         assert "files" not in d.ui_state()
     finally:
         shutil.rmtree(tmp)
-    print("daw-ctl self-test PASS: %d OSC messages, state renders" %
-          len(o.msgs))
+    shutil.rmtree(qdir, ignore_errors=True)
+    print("daw-ctl self-test PASS: %d OSC messages, %d queued region ops, "
+          "state renders" % (len(o.msgs), len(q)))
 
 
 def main():
@@ -784,6 +853,7 @@ def main():
     ap.add_argument("--fifo", default=FIFO)
     ap.add_argument("--state", default=STATE)
     ap.add_argument("--transport", default=TRANSPORT)
+    ap.add_argument("--queue", default=QUEUE)
     ap.add_argument("--osc-port", type=int, default=3819)
     ap.add_argument("--bpm", type=float, default=120.0)
     ap.add_argument("--self-test", action="store_true")
@@ -791,7 +861,8 @@ def main():
     if args.self_test:
         return self_test()
 
-    daw = Daw(osclib.Client(port=args.osc_port), bpm=args.bpm)
+    daw = Daw(osclib.Client(port=args.osc_port), bpm=args.bpm,
+              queue=args.queue)
     daw.setup()
     if not os.path.exists(args.fifo):
         os.mkfifo(args.fifo)

@@ -33,6 +33,7 @@ does.
 """
 import os
 import sys
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -62,7 +63,13 @@ class Rig:
 
     def __init__(self, rolling=True):
         self.osc = FakeOsc()
-        self.daw = daw_ctl_shim.Daw(self.osc)
+        # A queue of its own. Closing a take appends region work to
+        # /dev/shm/daw-region-queue by default, and a test run on the
+        # appliance would hand a live session governor a punch-out - which
+        # stops its transport. Tests drive the real reducer; they must not
+        # reach the real rig.
+        self.queue = os.path.join(tempfile.mkdtemp(), "queue")
+        self.daw = daw_ctl_shim.Daw(self.osc, queue=self.queue)
         self.router = maschine_hub_shim.Router()
         if rolling:
             # A looper quantises to a bar grid, so it needs a transport.

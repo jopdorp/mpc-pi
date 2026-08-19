@@ -55,11 +55,12 @@ the desk from a button beside the loop tracks.
 | `SHIFT` + `MUTE` + `Dn` | mute strip *n* | built |
 | `SOLO` + `Dn` | solo strip *n* | built |
 
-`daw-ctl` now acts on all four of `focus` / `arm` / `punch_in` / `punch_out`;
-the punches are quantised to the MPC's bar grid by its loop engine. What is
-still missing is downstream of the punch: `finalize` and `repeat` are emitted
-for the Lua side, which owns the playlist, and nothing consumes them yet, so a
-take is captured but does not yet become a region that loops.
+`daw-ctl` acts on all four of `focus` / `arm` / `punch_in` / `punch_out`; the
+punches are quantised to the MPC's bar grid by its loop engine. Downstream of
+the punch, `finalize`, `repeat` and `clear` go on the region queue verbatim and
+`scripts/daw/loop-ops.lua` — dofile'd by the session governor, which owns the
+playlist — turns them into a region that repeats. Every lane keeps its own
+length: LOOP1 can be four bars while LOOP2 is three.
 
 D1–D4 sit under the *left* screen, which shows the MPC, so four of the
 seven have no on-screen label. Their order is the mixer's own, and the same
@@ -98,6 +99,25 @@ press of `REC`.
 The first take fixes the loop's length: punch out three bars after punching
 in and it is a three-bar loop, whatever the lane was created with. A later
 take on the same lane is an overdub layer over that length, not a new loop.
+Lanes do not share a length — three bars on LOOP2 and eight on LOOP3 repeat
+side by side, each on its own grid, because each is its own set of regions on
+its own playlist rather than one transport loop range.
+
+**What a punch-out costs.** Ardour turns a capture into a region only when the
+transport stops (`loop-ops.lua` has the measurements; the punch-out alone
+leaves the playlist empty and no wav on disk). So closing a take stops the
+transport, waits for the region, and then *locates forward over the pause* so
+the timeline resumes in phase with the drums instead of falling permanently
+behind them. Measured on Ardour 9: 10–50 ms to the region, 55–60 ms to roll
+again. The MPC never pauses, so the drums do not stutter; what drops out for
+that ~100 ms is the loops already playing, and any lane still recording comes
+back split into two regions either side of the hole. On the first take of a
+set nothing else is playing yet, so nothing is audible at all.
+
+The stop is a workaround, and it is the only one the stock Lua API leaves:
+a locate while rolling does not finalise, and there is no binding that
+builds a region from a source. One small Ardour patch exposing "finalize
+captures now" removes it — see `docs/maschine-daw-design.md`, Phase 3.
 
 ## Pages
 

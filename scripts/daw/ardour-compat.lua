@@ -66,6 +66,31 @@ function M.route_group()
 	return M._group
 end
 
+-- Move the transport, whatever this Ardour's request_locate looks like.
+--
+-- Ardour 9 takes (sample, force, disposition, source); older builds drop the
+-- `force` flag, and the appliance runs Debian's Ardour 8 while the build host
+-- runs 9 - the two-versions problem this file exists for. A wrong arity is a
+-- Lua error, so try the widest form first and fall back; a locate that never
+-- happened leaves the transport where it stopped, which after a punch-out is
+-- a session permanently behind the beat, so the caller is told which.
+--
+-- Returns true if one of the forms was accepted.
+function M.locate(session, sample, roll)
+	local ltd = roll and ARDOUR.LocateTransportDisposition.MustRoll
+	                 or ARDOUR.LocateTransportDisposition.RollIfAppropriate
+	local src = ARDOUR.TransportRequestSource.TRS_UI
+	local forms = {
+		function() session:request_locate(sample, false, ltd, src) end,
+		function() session:request_locate(sample, ltd, src) end,
+		function() session:request_locate(sample) end,
+	}
+	for _, form in ipairs(forms) do
+		if pcall(form) then return true end
+	end
+	return false
+end
+
 -- Connect the session's master to the first physical playback pair.
 --
 -- Not cosmetic, and not only about hearing it: PipeWire schedules a node

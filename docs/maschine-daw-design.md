@@ -881,13 +881,39 @@ is claimed as working.
 - **Punch-in mid-roll captures, but the region materializes only at
   transport stop** (`Track::transport_stopped_wallclock` consumes
   `capture_info`; `DiskWriter::finish_capture` on punch-out only records
-  bookkeeping). The PoC therefore stops+re-rolls (~1.5 s gap) to finalize
-  each take, and stopping while Recording also disables session record —
-  re-engage before re-rolling. **Production looper needs one of:** (a) a
-  small Ardour patch (built from source for the Pi anyway) exposing
-  `finalize captures now` to Lua — preferred, upstreamable; (b) daw-ctl
-  records loop wavs itself (own PipeWire capture), imports them as sources
-  and places whole-file regions via the Lua-bound `ARDOUR.RegionFactory`.
+  bookkeeping). Re-measured against Ardour 9.0.0 while building the
+  production looper, because everything hangs off it: 2 s after a punch-out
+  the playlist still holds 0 regions and there is no wav on disk either;
+  `request_locate` while rolling (MustRoll) finalizes nothing after 1 s;
+  `request_stop` produces the region in **10–50 ms**. Escape (b) below is
+  **dead**: this build binds only `region_by_id`, `regions` and
+  `clone_region` on `RegionFactory`, binds `DiskWriter` as an empty class,
+  and binds no file import at all, so Lua cannot build a region from a
+  source. `Track:bounce_range` is bound but freewheels the engine, which
+  takes the live monitor path down with it.
+- **What shipped instead** (`scripts/daw/loop-ops.lua`): stop, wait for the
+  region *and* for `transport_stopped()`, re-engage session record, then
+  **locate forward over the pause** and roll — so the timeline resumes in
+  phase with the MPC rather than permanently ~100 ms behind it. The pause is
+  measured with `AudioEngine:processed_samples()`, which keeps counting while
+  the transport does not; the cost of the roll itself cannot be measured
+  before the fact, so it is learned from the previous punch-out. Two things
+  found the hard way: the region appears while the FSM is still
+  `DeclickToStop`, and a locate then is rejected outright (`bad transition …
+  event = Locate`); and `clone_region` hands back a region with the **same
+  name as its source**, so repetitions must be renamed or they are not
+  addressable. Measured cost per punch-out: 65–110 ms of lost playback for
+  loops already sounding, and any lane still recording comes back as two
+  regions either side of the hole (handled: a take is every region the lane
+  has not accounted for, fragments included).
+- **Still the right fix:** a small Ardour patch exposing `finalize captures
+  now` to Lua — preferred, upstreamable, and it deletes the stop, the locate,
+  the learned roll estimate and the fragmentation all at once.
+- **Global transport loop as a fallback** if per-lane ever proves untenable:
+  `/loop_toggle`, `/set_loop_range` and `/loop_location` are present in the
+  OSC surface of both the desktop's Ardour 9 and the Pi's Ardour 8 (checked
+  with `strings`). It buys one length for every lane, which is why it is the
+  fallback and not the design.
 - `maybe_enable_record` is a toggle; calling it while Recording disables
   record. Engage once, before rolling.
 - A killed luasession can linger holding its ports ("zombie" `MIDI Clock

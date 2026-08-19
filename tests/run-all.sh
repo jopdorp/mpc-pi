@@ -51,10 +51,18 @@ else
 	. scripts/daw/ardour-env.sh
 	if ardour_env; then
 		echo "  (Ardour $ARDOUR_VERSION at $ARDOUR_DLL_PATH)"
+		# The governor's own arithmetic needs no session, but it is Lua, and
+		# the only Lua on this appliance is Ardour's - so it runs here rather
+		# than with the unit tests.
+		run "loop-ops: wire format, take selection, fit, plan" \
+			bash -c 'LOOP_OPS_SELFTEST=1 "$LUASESSION" \
+				scripts/daw/loop-ops.lua 2>&1 | grep -q "self-test PASS"'
 		run "every plugin in the manifest instantiates" \
 			bash tests/integration/plugins_load.sh
 		run "the session template builds the whole desk" \
 			bash tests/integration/session_builds.sh
+		run "a take becomes a region that repeats" \
+			bash tests/integration/loop_records.sh
 	else
 		noted "Ardour not installed - integration not run"
 	fi
