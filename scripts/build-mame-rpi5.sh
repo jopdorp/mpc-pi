@@ -37,7 +37,36 @@ set -euo pipefail
 #        freetype flac sqlite portmidi expat zlib
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-mame_source_dir=${MAME_SOURCE_DIR:-"$repo_root/.cache/mame"}
+# A SEPARATE CHECKOUT FROM THE DESKTOP BUILD.
+#
+# Both builds defaulted to .cache/mame and genie generates ONE project per
+# tree, so whichever ran last decided the compiler for both. A hand-run
+# desktop `make ... REGENIE=1` left mpc.make saying "CXX = g++", the Pi build's
+# stamp still matched so genie was skipped, and the cross build compiled every
+# object with the aarch64 compiler and then linked them with the host one:
+#
+#   /usr/bin/x86_64-linux-gnu-ld.bfd: version.o: Relocations in generic ELF (EM: 183)
+#
+# Twenty minutes of correct compilation followed by a link failure, which
+# reads as a toolchain problem and is not one.
+#
+# Two trees, no sharing, no stamp to get wrong. Costs ~3GB of disk against a
+# class of failure that is expensive to diagnose every single time.
+mame_source_dir=${MAME_SOURCE_DIR:-"$repo_root/.cache/mame-rpi5"}
+desktop_source_dir="$repo_root/.cache/mame"
+
+# Seed from the desktop checkout the first time rather than re-cloning: the
+# sources are identical (both are the same pinned MAME), and copying the
+# object tree with them means the first cross build is warm instead of a
+# full rebuild. The generated project is deliberately NOT copied - it
+# belongs to whichever toolchain made it, and this tree's is about to be
+# regenerated for the cross compiler.
+if [[ ! -d "$mame_source_dir" && -d "$desktop_source_dir" ]]; then
+    echo "seeding $mame_source_dir from $desktop_source_dir (one time, ~3GB)"
+    cp -a "$desktop_source_dir" "$mame_source_dir"
+    rm -rf "$mame_source_dir/build/projects" \
+           "$mame_source_dir/build/.mpcpi-rpi5-genie-stamp"
+fi
 br_output=${BR_OUTPUT:-"$repo_root/.cache/br-rpi5"}
 mame_jobs=${MAME_JOBS:-$(nproc)}
 out_binary="$repo_root/board/rpi5/rootfs_overlay/usr/bin/mpc"
@@ -273,7 +302,9 @@ make -C "$mame_source_dir" \
 
 install -D -m 0755 "$mame_source_dir/mpc" "$out_binary"
 # The checkout is shared with the desktop build: leaving the aarch64 binary
-# as .cache/mame/mpc silently breaks every desktop harness that runs it.
+# as the checkout's ./mpc silently breaks every desktop harness that runs it.
+# Less likely now that the trees are separate, but the desktop harnesses take
+# MAME_SOURCE_DIR too, so a shared tree is still reachable on purpose.
 rm -f "$mame_source_dir/mpc"
 echo "note: removed aarch64 mpc from the checkout; desktop harnesses need"
 echo "      scripts/build-mame.sh to restore the x86 binary"
