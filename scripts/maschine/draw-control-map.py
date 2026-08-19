@@ -86,7 +86,18 @@ def binding(name):
         return ("switch:MPC/DAW", None)
     table = (control_map.MPC_BUTTONS if SURFACE == "MPC"
              else control_map.DAW_BUTTONS)
-    return (table.get(name), None)
+    target = table.get(name)
+    # THE TRANSPORT IS ON BOTH SURFACES, and the DAW picture drew it as
+    # unmapped - PLAY, RESTART and STOP in the "nothing reaches it" colour on
+    # the page whose whole point is that leaving the mixer to stop the beat is
+    # not something a player should have to do. control_map.ALWAYS is checked
+    # before either table in the hub, so it is checked before either table
+    # here. MUTE is the one key with both: bare it is STOP, and the mixer's
+    # own mute is the shifted half.
+    if SURFACE == "DAW" and name in control_map.ALWAYS:
+        return (control_map.ALWAYS[name],
+                target if target and target.startswith("mode:") else None)
+    return (target, None)
 
 
 def short(target):
@@ -102,7 +113,13 @@ def short(target):
     if kind == "mode":
         return "MODE " + rest
     if kind == "daw":
-        return "DAW " + rest.split(":")[-1].replace("_", " ")
+        # THE WHOLE LINE, not its last word. This drew the tail only, so
+        # "daw:region:prev" and "daw:region:next" came out as "DAW prev" and
+        # "DAW next" - two keys whose labels said nothing about what they
+        # step through. What the button sends is what belongs on the picture.
+        if rest.startswith("page:"):
+            return "DAW " + rest.split(":", 1)[1]
+        return "DAW " + rest.replace(":", " ").replace("_", " ")
     return target
 
 
@@ -174,7 +191,12 @@ PANEL_BOXES = {
     "shift":          (393, 788,  58, 42),
     "scene":          (498, 398,  58, 44),
     "pattern":        (498, 454,  58, 44),
-    "pad_mode":       (498, 510,  58, 44),
+    # cabl's name for the key the 1st-generation panel silkscreens KEYBOARD
+    # and later ones PAD MODE. This box was keyed "pad_mode", which no table
+    # binds, so the picture drew OVER DUB's button as unmapped while the
+    # binding sat in MPC_BUTTONS under the other name - the same two-names-
+    # for-one-key mistake that stopped the key working in the first place.
+    "keyboard":       (498, 510,  58, 44),
     "navigate":       (498, 566,  58, 44),
     "duplicate":      (498, 622,  58, 44),
     "select":         (498, 678,  58, 44),
@@ -437,11 +459,23 @@ def _render():
         d.text((x + 42, yy), name, font=F_LEG, fill=col)
         d.text((x + 120, yy), meaning, font=F_LEG, fill=DIM)
 
-    d.text((40, H - 40),
-           "Pad 1 is bottom-left on both machines; the MK1 reports its pads from the "
-           "TOP row down and the hub flips the row at the hardware boundary. "
-           "SHIFT+PLAY is STOP, because the MK1 has no stop button.",
-           font=F_SMALL, fill=DIM)
+    # THE FOOTER IS PART OF THE MAP, so it has to be as true as the boxes.
+    # It said "SHIFT+PLAY is STOP", which is not a binding this panel has and
+    # may never have been: the MPC's STOP is the bare MUTE key, on both
+    # surfaces, and that is what makes SHIFT+MUTE the mixer's mute.
+    note = ("Pad 1 is bottom-left on both machines; the MK1 reports its pads "
+            "from the TOP row down and the hub flips the row at the hardware "
+            "boundary. MUTE is the MPC's STOP - the MK1 has no stop button - "
+            "so the mixer's own mute is SHIFT+MUTE.")
+    if SURFACE == "DAW":
+        # The one thing a picture of a panel cannot show: the words that are
+        # not on it. SPLIT, NORM and UNDO are labels on the right-hand SCREEN,
+        # and the buttons under that screen are the strip row here, so those
+        # three verbs sit on bare keys whose silkscreen says something else.
+        note += ("  SPLIT, NORM and UNDO are printed nowhere on this panel: "
+                 "they are screen labels, and the keys carrying them are "
+                 "SAMPLING, AUTO WRITE and BROWSE.")
+    d.text((40, H - 40), note, font=F_SMALL, fill=DIM)
 
     return img
 
