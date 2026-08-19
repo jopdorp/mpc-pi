@@ -196,17 +196,22 @@ case "$MODE" in
 on)
 	route link
 	log "$made links up, $absent absent (26 up / 2 down configured)"
-	# EXIT NONZERO WHEN NOTHING WORTH HAVING GOT LINKED.
+	# EXIT NONZERO UNTIL THE SLOW SOURCE HAS ARRIVED.
 	#
-	# An earlier version of the sibling script for the local monitor sink
-	# returned 0 unconditionally here, and success arrived on the FIRST
-	# retry attempt - before the emulator had published its node - so the
-	# retry loop in the systemd unit stopped and the instrument came up
-	# with no links at all. Four is the floor: MPC master (2) plus Ardour
-	# master (2), the two sources that are always present once their
-	# units are up. Everything past that (individual outs, loop stems) is
-	# a bonus this attempt may not have caught yet.
-	[ "$made" -ge 4 ] || { log "only $made links - not enough yet"; exit 1; }
+	# This is the retry loop's only signal to keep waiting, so the floor
+	# has to sit ABOVE what is reachable before Ardour finishes starting.
+	# It was 4 - MPC master plus Ardour master - and that is precisely the
+	# count you get four seconds into a boot, with every loop stem still
+	# absent. Measured on a clean boot: "4 links up, 26 absent", success
+	# on the first attempt, and the other twenty-two links never retried.
+	#
+	# 18 is the arithmetic: MPC master (2) + Ardour master (2) + LOOP1-5,
+	# DELAY and REVERB (14). Deliberately excluded are the eight
+	# individual outs, which do not exist at all under
+	# MPC_OUTPUT_MODE=stereo, and the four host-return links, which exist
+	# only while a computer is plugged in - counting either would make the
+	# unit fail in a configuration that is working as designed.
+	[ "$made" -ge 18 ] || { log "only $made links - not enough yet"; exit 1; }
 	;;
 off)
 	route unlink

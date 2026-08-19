@@ -31,11 +31,25 @@ PartOf=mpcpi-emulator.service mpcpi-daw.service
 # answer to "are the links up". `mpc-usb-route.sh status` is, and that is
 # what any check should use.
 Type=exec
+# RemainAfterExit=yes, and it is not optional.
+#
+# Without it this unit destroyed its own work on every boot. ExecStart is a
+# retry loop that EXITS as soon as routing succeeds; systemd then saw the
+# main process gone, deactivated the unit, and ran ExecStop - which is
+# `mpc-usb-route.sh off`, "disconnect everything". Measured on a clean boot:
+# links made at 09:01:01, `mpc-usb-route: disconnected` at 09:01:04, and the
+# appliance came up with an empty graph. The unit reported "active (exited)"
+# the whole time, so nothing looked wrong.
+#
+# With this set, the unit stays active after the loop exits and ExecStop
+# fires only on a real stop - a restart of the emulator or Ardour (PartOf)
+# or shutdown, which are exactly the times the stale links must go.
+RemainAfterExit=yes
 # The graph needs a moment after every node appears. Retrying is cheaper than
 # guessing a delay - the script is idempotent, and it logs a channel as idle
 # rather than failing outright when only part of the graph (e.g. Ardour) is
 # not up yet, so this loop is really waiting for "as much as will ever link".
-ExecStart=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do /usr/bin/mpc-usb-route.sh on && exit 0; sleep 2; done; exit 1'
+ExecStart=/bin/sh -c 'for i in $(seq 20); do /usr/bin/mpc-usb-route.sh on && exit 0; sleep 2; done; exit 1'
 ExecStop=/usr/bin/mpc-usb-route.sh off
 
 [Install]
