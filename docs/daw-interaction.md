@@ -83,11 +83,17 @@ transport action.
 | 3 | `Dn` | punch out; the loop closes and starts playing |
 | — | `Dn` again | overdub onto the closed loop |
 | — | `REC` | disarm; the strip buttons select again |
-| — | `ERASE` | discard the take |
-| — | `UNDO` | undo the last take, non-destructively |
+| — | `erase` | discard the take (**unbound** on the panel) |
+| — | `undo` | undo the last take, non-destructively (**unbound**) |
 
 Quantising the punch to the bar is what makes this usable at a keyboard's
 distance, and it is why the countdown gets the largest glyphs on screen.
+
+`erase` and `undo` are one path in the engine — a single `clear` — so both
+take the lane off the timeline and both leave the captured audio on disk.
+They mean "undo what this page does": the take on the strips page, the
+region on EDIT and WAVE. One key that always undoes what you were just
+doing beats two keys that each work on one page and fault on the other.
 
 Which Ardour object carries which half is not arbitrary. `REC` engages the
 **session** record-enable, which is global; `Dn` punches the **strip's**
@@ -129,7 +135,7 @@ captures now" removes it — see `docs/maschine-daw-design.md`, Phase 3.
 | `group_e` | MIX | K1–K8 = the eight strip levels | built |
 | `group_f` | FX | the focused plugin's parameters | partial |
 | `group_g` | SONG | markers and arrangement | partial |
-| `group_h` | EDIT | regions on the timeline | partial |
+| `group_h` | EDIT | regions on the timeline | built (its keys are unbound) |
 | `SELECT` | WAVE | held + `Dn`: drill into lane n's take; tapped: the focused lane | built |
 
 All five **open and render** — that much has been true for a while, and it
@@ -186,35 +192,62 @@ COMMAND` to it is how a working panel comes to look broken.
 | `group_h` | open the page | built |
 | jog | move the edit cursor | built |
 | `SNAP` | cycle snap: bar / beat / off | built |
-| `SPLIT` | split the region at the cursor | missing |
-| `browse_left` / `browse_right` | previous / next region | missing |
-| K1 | slide the selected region in time | missing |
-| K2 / K3 | fade in / fade out | missing |
-| K4 | region gain | missing |
-| `ERASE` | delete the selected region | missing |
-| `DUPLICATE` | copy the selected region to the cursor | missing |
-| `UNDO` | undo | missing |
+| the timeline itself | regions drawn from the published list | built |
+| `split` | split the region at the cursor | built — **unbound** |
+| `region prev` / `region next` | previous / next region | built — **unbound** |
+| K1 | slide the selected region in time | built |
+| K2 / K3 | fade in / fade out | built |
+| K4 | region gain | built |
+| `erase` | delete the selected region | built — **unbound** |
+| `duplicate` | copy the selected region to the cursor | built — **unbound** |
+| `undo` | undo the last region edit | built — **unbound** |
 
-**What "missing" means here, precisely.** Everything above that moves a
-*position* is built: the page opens, the cursor moves under the jog, the
-snap cycles and the screen draws all three. Everything that changes
-*audio* is not, and it is all blocked on the same one thing — **nothing
-publishes the region list.** The playlist belongs to the Lua side
-(`session-governor.lua` and `loop-ops.lua`); `daw-ctl` owns the screen
-state and has no channel to read regions back. So EDIT draws its bar
-grid, its snap and its cursor over an **empty timeline**, and there is
-nothing for `SPLIT` or `browse_left` to select.
+**The channel exists now, and the page draws.** `loop-ops.lua` publishes
+the playlist to `$DAW_REGIONS` (`/dev/shm/daw-regions`) after every drain
+and twice a second besides; `daw-ctl` re-reads it whenever it changes and
+addresses regions **by name**, because editing renames — a split makes two
+regions neither side chose, and a clone comes back called after its
+source. Verified on the appliance: a take recorded onto LOOP1 appears on
+the EDIT page, `region next` selects it, `split` at the cursor makes two
+regions, `undo` puts the original back.
 
-The next piece of work on this page is not a button. It is a region
-publisher on the Lua side, the mirror of the queue that already carries
-`finalize` / `repeat` / `clear` the other way.
+**"Unbound" is what is left, and it is the panel's half, not `daw-ctl`'s.**
+Every verb above works when its line reaches `/run/daw-ctl.fifo` — that is
+the protocol `maschine-hub` writes and the way each one was exercised on
+the running appliance. What no button sends yet is the line. The bindings
+`control_map.DAW_BUTTONS` still needs, in the `daw:` form the hub turns
+into a command by replacing colons with spaces:
 
-`DUPLICATE` is deliberately **unbound on the DAW surface** rather than
-bound to a verb that does not exist. It used to send `daw:duplicate`,
-which `daw-ctl` did not understand, so the press spent the status line on
-`UNKNOWN COMMAND DUPLICATE`. An unbound button does nothing at all, which
-is this surface's documented behaviour and is strictly better than one
-that reports a fault. Bind it again with the region op, not before.
+    daw:split           split the selected region at the cursor
+    daw:region:prev     browse_left
+    daw:region:next     browse_right
+    daw:duplicate       copy to the cursor
+    daw:erase           delete the region (the take, on the strips page)
+    daw:undo            undo the region edit (the take, on the strips page)
+    daw:norm            normalise (WAVE)
+
+`DUPLICATE` was left unbound rather than sending `daw:duplicate` to a
+`daw-ctl` that did not understand it, which spent the status line on
+`UNKNOWN COMMAND DUPLICATE`. There is a region op behind it now, so that
+reason has gone. The MK1 has no key printed SPLIT, NORM or UNDO — those
+names are the labels drawn under the right-hand screen, and those four
+buttons are the strip row in DAW mode — so each needs a free bare button
+chosen on the panel side.
+
+**The cursor is in Ardour's coordinates, not the MPC's.** The published
+header carries Ardour's sample rate and transport position, and EDIT draws
+its playhead from that rather than from `daw-ctl`'s count of the emulator's
+elapsed milliseconds. The two free-run against each other by an unknown
+constant — `loop-ops.lua` ignores `daw-ctl`'s positions in `repeat at` for
+exactly this reason — and a cursor in the wrong coordinates does not draw
+slightly wrong, it splits a region somewhere else entirely.
+
+**The knobs are deferred.** The MK1 reports an absolute encoder angle many
+times a second, so one fade gesture would otherwise be thirty region
+edits, thirty republishes and thirty presses of `UNDO` to take back. The
+last value of a gesture goes out, a quarter of a second after the hand
+stops, and a *press* flushes whatever is pending first so the queue
+carries the gestures in the order they were made.
 
 ## WAVE: trimming a take
 
@@ -224,12 +257,12 @@ WAVE is a drill-in, not a page in the group row.
 |---|---|---|
 | `SELECT` + `Dn` | open the take on **lane n** | built |
 | `SELECT` (tapped) | open the take on the **focused** lane, and drill back out | built |
-| K1 / K2 | trim start / trim end | built (state only) |
-| K3 | zoom | built (state only) |
-| K4 | gain | built (state only) |
+| K1 / K2 | trim start / trim end — **the audio is cut** | built |
+| K3 | zoom | built (state only, and rightly: zoom touches no audio) |
+| K4 | gain | built |
 | jog | nudge the selected handle | built |
-| `NORM` | normalise | missing |
-| `UNDO` | undo | missing |
+| `norm` | normalise | built — **unbound** |
+| `undo` | undo the last region edit | built — **unbound** |
 | `BACK` | return to the page you came from | built |
 
 **`SELECT` + `Dn`, and `SELECT` alone.** `SELECT` is a held modifier over
@@ -260,13 +293,32 @@ rebound; a drill-in that exited through it would put you on the MPC when
 you asked for the mixer. So `SELECT` drills back out — the way in is the
 way out, the same idiom `SHIFT`+`NAVIGATE` already uses for the browser.
 
-**"State only"** means the handles, zoom and gain are real, clamped,
-remembered per drill-in and drawn on screen, and **no audio is touched**.
-The trim handles are fractions of a take, and the take is not published
-either — same missing region channel as EDIT — so the waveform is empty
-and the handles have nothing to cut. Each drill-in resets them, because
-carrying one lane's edit points onto another lane's audio is worse than
-starting square.
+**The handles cut now.** They were "state only" — real, clamped, drawn,
+and touching nothing — for as long as there was no published take to point
+them at. Drilling in reads the selected region off the region list, and
+the two handles become a `trim` on the queue a quarter-second after the
+hand stops moving.
+
+**Against the take's bounds at drill-in, not against the last trim.** The
+handles are fractions, and fractions of an already-trimmed region can only
+ever eat further inward: a handle pulled back out would never restore the
+audio it had just hidden. So the drill-in remembers where the take started
+and how long it was, and every trim is computed from that. Ardour clamps
+the result to what the source actually holds. Each drill-in resets the
+handles, because carrying one lane's edit points onto another lane's audio
+is worse than starting square.
+
+**NORM is arithmetic here, and UNDO is ours.** Neither
+`AudioRegion:normalize` nor `Session:undo` is bound in Ardour's Lua on
+either version this project runs — measured on the appliance's Ardour 8
+and the build host's 9, against a real captured region. So `norm` computes
+the factor from the region's own peak and sets its gain, and the answer
+comes back through the published list onto the K4 readout, which is the
+channel closing: the knob shows what actually happened rather than what
+was asked for. Normalising a silent region **refuses** rather than
+dividing by a zero peak. `undo` pops an inverse-op stack that
+`loop-ops.lua` keeps for region edits only, bounded at 32 — take-level
+UNDO is a different stack and a different key.
 
 ## Transport, on both surfaces
 
@@ -413,26 +465,36 @@ matter.
 | FILES: open, scroll, descend, select | built |
 | **FILES: the chosen image is mounted in the running drive** | built |
 | **The chosen image survives a reboot** | built |
-| WAVE: `SELECT`+`Dn` into any lane, drill in and out, trim handles, zoom, gain | built (no audio touched) |
-| EDIT: region ops — split, select, slide, fades, gain, erase, undo | missing |
-| WAVE: normalise, undo | missing |
+| WAVE: `SELECT`+`Dn` into any lane, drill in and out, zoom | built |
+| **The region list is published, and both pages draw it** | built |
+| **EDIT: split, select, slide, fades, gain, erase, duplicate, undo** | built — no panel button sends them |
+| **WAVE: trim and gain reach the audio; normalise; undo** | built — `norm` and `undo` unbound |
+| Looping: `ERASE` / `UNDO` on a take | built — unbound |
 | SONG: markers — `browse_left`/`browse_right`, `MARK` | missing |
 | FX: slot selection, `BYP` | missing |
 | FX: K1–K4 reach Ardour but always edit slot 1 | partial |
-| Looping: `ERASE` / `UNDO` on a take | missing |
+| The MPC's transport export | **not running** — see below |
 
-**One missing piece accounts for most of that column.** EDIT, WAVE and the
-take-level `ERASE`/`UNDO` are all blocked on the same thing: **nothing
-publishes the region list.** The playlist belongs to the Lua side, `daw-ctl`
-owns the screen state, and there is no channel carrying regions back. Until
-there is, those pages can draw a grid, a cursor and a pair of handles — which
-they do — and cannot select or cut anything, because from `daw-ctl`'s point of
-view the timeline is empty.
+**The channel is built; what is left is buttons.** `loop-ops.lua` publishes
+the playlist to `/dev/shm/daw-regions` — the mirror of the queue that
+already carries `finalize` / `repeat` / `clear` the other way — and
+`daw-ctl` reads it, draws it and edits it. Every verb in the EDIT and WAVE
+tables was exercised on the running appliance by writing its line to
+`/run/daw-ctl.fifo`, which is the protocol `maschine-hub` writes: a take
+recorded onto LOOP1 was selected, split, un-split, duplicated, gained,
+faded, trimmed, erased and restored, and the published list and the screen
+state agreed at every step. What no button yet *sends* is the line; the
+`daw:` bindings each one needs are listed under "EDIT: cutting and moving".
 
-The channel to build is the mirror of the region queue that already carries
-`finalize` / `repeat` / `clear` from `daw-ctl` to `loop-ops.lua`. One file,
-published the other way, unblocks the whole column at once. It is a
-considerably better next move than binding the buttons.
+**Two things that are not built and are not this work.** Nothing writes
+`/dev/shm/mpc-transport` on the appliance — `mpcpi-autoplay.lua` is MAME's
+autoboot script and does not export the transport, and
+`scripts/daw/transport-export.lua`, which does, is not loaded — so
+`daw-ctl` has no bar grid and its punch verbs answer `no-transport`. And
+nothing rolls **Ardour's** transport, which a capture needs. Loop recording
+therefore cannot produce a take from the panel alone today, whatever the
+buttons do; the take used to verify all of the above was made by supplying
+those two missing pieces by hand.
 
 ### A note on how three of these were found
 
