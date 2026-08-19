@@ -141,37 +141,6 @@ BUTTONS_LEFT = {
 
 # Screen R's four buttons are contextual: the page decides. The labels
 # are drawn in the cells directly under each button.
-BUTTONS_RIGHT_BY_PAGE = {
-    # One strips page, so these four no longer change underneath the hand.
-    # MUTE and SOLO are absent on purpose: they have their own dedicated
-    # buttons on the panel, and duplicating them here spent two of the four
-    # slots on controls that were already reachable.
-    # BANK is absent because there is nothing to bank - all eight knobs
-    # address all eight strips at once.
-    "LOOP": ("REC", "ARM", "UNDO", "PIN"),
-    "FX":   ("BYP", "PREV", "NEXT", "PIN"),
-    "SONG": ("PREV", "NEXT", "MARK", "PIN"),
-    # WAVE is a drill-in editor, not a top-level page: SELECT + pad opens
-    # the take under that pad, NAVIGATE opens the focused lane's take,
-    # and BACK returns to wherever the performer came from.
-    "WAVE": ("TRIM", "NORM", "UNDO", "BACK"),
-    # EDIT is the track/arrangement editor: split at the playhead, step
-    # region selection, and back out. Nudge, copy, paste, clear and undo
-    # ride the MPC's printed shift-pad functions, which are exactly the
-    # editing verbs - the silkscreen stays true.
-    "EDIT": ("SPLIT", "PREV", "NEXT", "BACK"),
-    # The floppy browser. Its verbs are the browse keys and the MPC's ENTER
-    # rather than the four display buttons, so the row under this screen is
-    # informational - but every page must appear here or the page tables and
-    # PAGES silently disagree, which is what the coverage test catches.
-    "FILES": ("UP", "INTO", "LOAD", "CLOSE"),
-    # FILES is an overlay rather than a page in the group row, and it needs
-    # exactly one label: the way out, drawn over the button that does it.
-    # The other three keep whatever the page underneath had - they are the
-    # MPC's soft keys on the MPC surface and the strip row on the DAW's, and
-    # neither stops working because a listing is up.
-    "FILES": ("", "", "", "CLOSE"),
-}
 
 # Transport maps one-for-one onto the MPC's, because that is the muscle
 # memory most worth preserving. SHIFT reaches the bar-level moves, which
@@ -211,6 +180,26 @@ STRIPS = (_names("MPCPI_STRIPS", ["LOOP1", "LOOP2", "LOOP3", "LOOP4", "LOOP5"])
 # order: display1 is the first, display7 the last. Master is absent on purpose -
 # see MODES. Derived, so renaming or resizing the desk carries through.
 MUTE_STRIPS = [n for n in STRIPS if n != "MASTER"]
+
+# WHAT THE FOUR BUTTONS UNDER THIS SCREEN ACTUALLY DO.
+#
+# Not a page menu. This was a per-page table - EDIT printed
+# "SPLIT PREV NEXT BACK", LOOP printed "REC ARM UNDO PIN" - naming a
+# dispatch that COULD NOT RUN. display1-7 are the strip row on the DAW
+# surface and display8 is the surface toggle, both handled before the
+# page branch is ever reached, so every one of those words was a label
+# on a button that did something else. Verified on the appliance: the
+# three buttons under "PREV NEXT BACK" focus LOOP5, DELAY and REVERB.
+#
+# The row is the same on every page because the strip row is the same on
+# every page - that is the point of the focus model, and a legend that
+# changed with the page would be describing a selector we deliberately
+# do not have. Only display5-8 sit under this screen; display1-4 are
+# under the LEFT one, which is showing the MPC.
+#
+# Derived from MUTE_STRIPS rather than typed out, so the legend cannot
+# drift from the row it names - which is exactly how it came to lie.
+BUTTONS_RIGHT = tuple(MUTE_STRIPS[4:]) + ("MPC",)
 
 # BUTTONS THAT REACH THE MPC ON BOTH SURFACES.
 #
@@ -546,6 +535,18 @@ KNOBS_RIGHT_BY_PAGE = {
     "EDIT": "move region / fade in / fade out / region gain",
     "FILES": "the jog scrolls the listing - one detent per row",
 }
+
+# display8 closes the browser before it toggles the surface, so the one
+# cell that genuinely changes says so. Every other page gets the row.
+#
+# Keyed off the knob table's own pages rather than a third list of page
+# names: the coverage test exists because those lists used to be written
+# out separately and drift apart, and two tables that cannot disagree
+# need no test to notice when they do.
+BUTTONS_RIGHT_BY_PAGE = dict(
+    (page, BUTTONS_RIGHT[:3] + ("CLOSE",) if page == "FILES"
+     else BUTTONS_RIGHT)
+    for page in KNOBS_RIGHT_BY_PAGE)
 
 # The three MASTER knobs are separate hardware, not a jog encoder, and they
 # carry the three continuous controls that do not belong to a mixer strip:

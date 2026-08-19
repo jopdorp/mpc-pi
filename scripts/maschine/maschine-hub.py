@@ -620,13 +620,14 @@ class Router:
                 return [("cmd", "focus %s" % strip)]
             return []
 
-        # In DAW mode the display buttons follow whatever the page shows.
-        if self.surface == "DAW" and name.startswith("display"):
-            idx = int(name[-1]) - 1
-            labels = control_map.BUTTONS_RIGHT_BY_PAGE.get(
-                self.page, ("", "", "", ""))
-            if 4 <= idx < 4 + len(labels):
-                return [("cmd", "button %s %s" % (self.page, labels[idx - 4]))]
+        # NO PAGE-DEPENDENT DISPLAY ROW. A second branch here dispatched
+        # "button <page> <label>" from BUTTONS_RIGHT_BY_PAGE, and it was
+        # unreachable: display1-7 are the strip row above, display8 is the
+        # surface toggle handled earlier, and MUTE_STRIPS is seven long, so
+        # nothing ever fell through to it. Its only effect was to make the
+        # legend look like a menu - the screen printed SPLIT/PREV/NEXT over
+        # buttons that focus LOOP5, DELAY and REVERB. The verbs it pretended
+        # to carry live on real keys now; see control_map.DAW_BUTTONS.
         return []
 
     # --- pads ---
