@@ -641,3 +641,42 @@ climbing to 1 and steady. It did not fix transport.
 Next: api.alsa.headroom is 0 on this device. A device that will not start
 until it has more than one period buffered would behave exactly like this,
 and headroom is what pre-fills it.
+
+### The gadget was never silent - the measurement was
+
+Verified on the host with an explicit link, leaving the card profile alone:
+
+    ch 1-2    MPC stereo master     peak  581   SIGNAL
+    ch 11-12  Ardour master         peak  872   SIGNAL
+    ch 13-14  LOOP1                 peak 1455   SIGNAL
+
+Every "silent" reading before this came from the same flawed method. To free
+the device for `arecord`, the host card's profile was set to 0 - and that
+leaves the USB interface in its zero-bandwidth alternate setting, so
+`arecord` opens successfully, streams, and reads zeros REGARDLESS of what the
+appliance is sending. The test was measuring itself.
+
+That single artifact invented five investigations: duplicate :speaker nodes,
+full-speed descriptors, driver groups, channel count, and a stalled
+PipeWire buffer. Four were disproved on their own merits. The fifth - the
+buffer - looked like the strongest lead of all, because appl_ptr really did
+sit one quantum ahead of hw_ptr while the host "heard nothing". It was one
+quantum ahead because nothing was draining it, and nothing was draining it
+because the profile had been switched off by the measurement.
+
+This is the second time in this project that a measurement artifact has
+produced a day of phantom faults - the first was 44 PipeWire links summing
+the emulator onto a test tone's channels, recorded further up this file. The
+shape is identical: a plausible mechanism, a reproducible number, and an
+instrument that was quietly wrong.
+
+The capture that works, and the rule it encodes - never disturb the thing
+being measured:
+
+    pw-record --latency 1024 out.wav &
+    pw-link <gadget-node>:capture_AUX0 pw-record:input_FL
+    pw-link <gadget-node>:capture_AUX1 pw-record:input_FR
+
+Two changes made along the way stand on their own and are kept:
+disable-tsched=false (error counter 3034 and climbing -> 1 and steady) and
+headroom=128 (queues four periods instead of one).
