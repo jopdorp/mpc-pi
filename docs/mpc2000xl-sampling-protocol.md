@@ -193,10 +193,76 @@ one wave-RAM word per captured word.
 (channel 2) so the two can be compared directly: they should climb together at
 the capture rate. `wave_words` racing ahead of `adc_words` is this bug.
 
-**The `x channels` factor is the part to check first if takes still come out
-the wrong length.** It assumes the target at `ds:0x8bc2` counts DMA words, the
-same units `m_voice[0].pos` counts. If a stereo take ends half as long as
-asked, that assumption is wrong and the rate should not scale with channels.
+The `x channels` factor is **measured correct**. With both channels enabled the
+live trace advances `adc_words` by 1,633,920 in 18.529 s, which is 88,181
+words/s against the 88,200 that stereo at 44,100 needs - 0.02% low, i.e. the
+emulated machine running very slightly under real time. One word per enabled
+channel per frame is what the DMA moves and what the ring produces.
+
+That leaves the take-length question, and the answer is not the DMA rate.
+
+## A stereo take is TWO MONO VOICES, and that is why it played back fast
+
+The target at `ds:0x8bc2` does **not** count DMA words. It counts words in ONE
+channel, because the firmware splits a stereo take into two separate mono
+buffers and times it against the first one alone.
+
+Three places in the module say so, and they agree:
+
+  * `0x49432` computes the requested length in words - `frames x channels`,
+    with `channels` chosen as 2 when `ds:0xd7cd == 2` - and stores it at
+    `ds:0x95fc`.
+  * `0x494c8`, **for stereo only**, calls `0x35b0:0x1e6` on that value with 2.
+    That helper is a wrapper around the signed 32-bit **divide** at
+    `0x35b0:0x00ac`, not a multiply: it loads the pointer from `[bp+6]`, pushes
+    the divisor and `*ptr`, and stores the quotient back. So the length is
+    HALVED, back to frames - the length of one channel.
+  * `0x4952f` forms the target as `(destination_base + that halved length) /
+    0x10`, and `0x49602` then programs the voice registers **twice** for a
+    stereo take: channel `0` from `ds:0x8bba` and channel `0x10` from
+    `ds:0x8be6`, whose start is the first buffer's end. Mono programs channel
+    `0` only, guarded by the same `cmp byte [0xd7cd],2`.
+
+And `0x492ba` arms the DSP for the take with **`0x58` for stereo against
+`0x40` for mono** - control bits 4 and 3 on top of bit 6, DMA start. Bit 3 is
+also set for ordinary wave DMA transfers, so bit 4 is the one that means
+"stereo recording" on its own.
+
+So the DSP demultiplexes: left words advance voice `0`, right words advance
+voice `0x10`, and **each voice's position advances at the FRAME rate, not the
+word rate**. Sending every word into voice 0 - which is what `dma_w16_cb` did
+for every other kind of transfer - made voice 0 reach `base + length/2` in half
+the wall-clock time. A take half as long as asked for is a take that plays back
+at double speed, which is what "not paced tempo" sounds like.
+
+The fix belongs in the DSP, not in the DMA pacing. Slowing the transfer to one
+word per frame would have made voice 0 count correctly by throwing away half
+the audio.
+
+## The take that ends on its first poll
+
+The poll at `0x49668` reads voice 0's register 0 back as a plain 32-bit
+position - word 1 (bits 16-31) low, word 2 (bits 32-47) high - and compares it
+against the target, whose high word it masks with `0x000f`. Four bits, which is
+exactly how much of the 24-bit address reaches bits 32-35 and no more.
+
+MAME's read-back preserved bits 36-47, the type and flags fields the CPU wrote,
+and the firmware writes `0x0100` into that word itself: `0x49519` does
+`mov ax,[bp-2] / or ah,1` on the third word of the start register before
+programming it - the "flags? always 01" byte the device's own register map
+documents.
+
+Preserved into the read-back, that flag makes `cmp dx,ax / ja` at `0x49685`
+unable to fire and the following `sbb dx,ax` leave the remaining length
+negative, so the `jl` at `0x4969a` reports the target already passed on the
+**first poll of every take**. The firmware masking its target to four bits is
+the evidence that the hardware returns no flags on a position read: it would
+have no reason to mask otherwise.
+
+The read-back is therefore stripped to the bare position, scoped to the two
+voices a take records into while a take is armed, so playback read-back - the
+`roadedge` case the preserving mask was written for, and pad voices triggered
+while the SAMPLE screen is open - is untouched.
 
 ## Analog vs digital: what WADCSN really carries
 
@@ -284,7 +350,10 @@ journal:
 
     mpc2000xl wadcsn: <byte>  L=.. R=.. spdif=.. analog_off=.. -> rec=.. cap=(..,..)
     mpc2000xl sampler: set_record_enable on=.. L=.. R=..
-    mpc2000xl sampler: rec=.. L=.. R=.. in_peak=.. ring_depth=.. adc_words=..
+    mpc2000xl sampler: rec=.. L=.. R=.. in_peak=.. ring_depth=.. adc_words=.. wave_words=.. ctl=.. pos0=.. posR=..
+    mpc2000xl sampler: control <old> -> <new> (ch .., rec=..)
+    mpc2000xl sampler: ch .. reg .. <- <48-bit> (start .. end ..)
+    mpc2000xl sampler: poll ch .. start .. pos .. addr .. reg ..
 
 `in_peak` is the loudest captured sample in the last report period: **zero
 means the audio never reached MAME**, which on this appliance almost always
@@ -303,10 +372,17 @@ Analog capture is confirmed working end to end on the appliance: audio from
 the host reaches the emulated sampler and registers on the record screen's
 level meter.
 
-The DMA pacing fix is reasoned from the disassembly above and is traced, but
-**take length is not confirmed**: it needs someone at the SAMPLE screen
-recording a take of known length and checking it comes out that long, with
-`wave_words` and `adc_words` climbing together in the journal.
+The DMA pacing is confirmed by measurement: 88,181 words/s against 88,200
+expected for stereo, with `adc_words` and `wave_words` in lockstep at a
+constant offset.
+
+The stereo two-voice split and the position read-back are reasoned from the
+disassembly above and traced, but **take length is still not confirmed on the
+machine**: it needs someone at the SAMPLE screen recording a take of a known
+length and checking it comes out that long. The trace now prints `ctl`, `pos0`
+and `posR` for exactly this - during a stereo take `ctl` should read `0158`,
+and `pos0` and `posR` should climb TOGETHER at half the rate `wave_words`
+does.
 
 The digital gate fix is reasoned from the disassembly above and is traced, but
 **S/PDIF is not confirmed working**. Confirming it needs someone at the SAMPLE
