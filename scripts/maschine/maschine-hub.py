@@ -828,6 +828,58 @@ def self_test():
     missing = set(_m.KEY) - reachable
     assert not missing, "MPC keys nothing can press: %s" % sorted(missing)
 
+    # ...AND THE OTHER DIRECTION, WHICH IS THE ONE THAT ACTUALLY SHIPPED A BUG.
+    #
+    # The check above only asks whether every key the machine HAS can be
+    # pressed. It never asked whether every key the map NAMES exists. So
+    # SHIFT_PADS could carry - and did carry, for months - four keys the
+    # MPC2000XL does not have:
+    #
+    #   13: mpc:semitone_down   14: mpc:semitone_up
+    #   15: mpc:octave_down     16: mpc:octave_up
+    #
+    # Those are soft functions reached from a screen, not panel keys. There
+    # is no keycode, so encode_midi returned b"" and the hub wrote ZERO BYTES
+    # for each of them. Four pads that answered a press with nothing, on a
+    # panel whose whole design position is that a control either does its one
+    # job or is not bound - and every test was green, because the only
+    # question anyone asked ran the other way.
+    #
+    # Ask both. A target has to name something the machine has AND encode to
+    # bytes; b"" is the failure mode, so it is the assertion.
+    _continuous = {"data_wheel", "note_variation"}
+    _routed = [("MPC_BUTTONS", control_map.MPC_BUTTONS.values()),
+               ("DAW_BUTTONS", control_map.DAW_BUTTONS.values()),
+               ("ALWAYS", control_map.ALWAYS.values()),
+               ("SHIFT_PADS", control_map.SHIFT_PADS.values()),
+               ("MASTER_KNOBS", control_map.MASTER_KNOBS.values())]
+    for _by_surface in control_map.MASTER_KNOBS_BY_SURFACE.values():
+        _routed.append(("MASTER_KNOBS_BY_SURFACE", _by_surface.values()))
+    for _where, _targets in _routed:
+        for _t in _targets:
+            if not _t or not _t.startswith("mpc:"):
+                continue
+            _k = _t.split(":", 1)[1]
+            if _k in _continuous:
+                # The wheel and the slider are CONTROL CHANGE, not keys, and
+                # encode_midi wants a delta appended. Checked separately -
+                # search CC_DATA_WHEEL below.
+                continue
+            assert _k in _m.KEY, \
+                "%s: mpc:%s is not a key the MPC2000XL has" % (_where, _k)
+            assert encode_midi(_t), \
+                "%s: mpc:%s encodes to no bytes at all" % (_where, _k)
+
+    # Every SHIFT+pad target must be on ONE side of the modifier split, and
+    # the shifted side must not name keys the layer does not carry - a mode
+    # key listed there and nowhere else is a key that cannot be pressed at
+    # all, because the digits have no other home on this panel.
+    _pad_keys = {t.split(":", 1)[1] for t in control_map.SHIFT_PADS.values()
+                 if t.startswith("mpc:")}
+    assert control_map.SHIFT_PADS_SHIFTED <= _pad_keys, \
+        "SHIFT_PADS_SHIFTED names keys no pad sends: %s" % sorted(
+            control_map.SHIFT_PADS_SHIFTED - _pad_keys)
+
     # The six soft keys are on the six display buttons under the screens.
     for i in range(1, 7):
         assert control_map.MPC_BUTTONS["display%d" % i] == "mpc:soft%d" % i

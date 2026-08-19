@@ -367,12 +367,43 @@ DAW_BUTTONS = {
     "rec":            "daw:arm",
 }
 
+# THE TOP ROW IS THE BANKS, AND THAT IS WHAT MAKES THE PADS THE MPC'S ON
+# BOTH SURFACES.
+#
+# It used to read semitone_down / semitone_up / octave_down / octave_up.
+# The MPC2000XL has no such keys - they are soft functions reached from a
+# screen, not panel keys - so none of the four had a keycode, encode_midi
+# returned b"" for all of them, and those four pads sent nothing at all.
+# Aspiration, written where a mapping goes.
+#
+# What belongs there instead comes from the invariant this panel is built
+# on: THE PADS ARE ALWAYS THE MPC'S, on both surfaces. They were not,
+# quite. Which sixteen of the machine's sixty-four pads the grid plays is
+# chosen by the BANK keys, and those sit on GROUP A-D, which are bound in
+# MPC_BUTTONS only. On the DAW surface the pads played whatever bank you
+# happened to leave them in and there was no way to change it, so three
+# quarters of the instrument was unreachable whenever the panel was
+# pointed at the mixer.
+#
+# SHIFT+pad reaches the MPC from either surface, so the top row of the
+# grid carries the four banks, left to right - the same order as the GROUP
+# buttons above the grid and as the BANK keys beside the MPC's own pads.
+# A bank key on the pad grid is not a duplicate of a distant button; it is
+# the grid's own control, on the grid.
+#
+# Verified on the appliance against the emulator's lamp export, which
+# reports the machine's own BANK lamps:
+#
+#   bare BANK B        bank_a=0 bank_b=1 bank_c=0 bank_d=0
+#   bare BANK D        bank_a=0 bank_b=0 bank_c=0 bank_d=1
+#   SHIFT + BANK B     unchanged - the key is dropped
+#
+# which is why they are in the BARE half of the split below.
 SHIFT_PADS = {
     1: "mpc:song",       2: "mpc:misc",      3: "mpc:load",   4: "mpc:sample",
     5: "mpc:trim",       6: "mpc:program",   7: "mpc:mixer",  8: "mpc:other",
     9: "mpc:midi_sync",  10: "mpc:zero",     11: "mpc:enter", 12: "mpc:main_screen",
-    13: "mpc:semitone_down", 14: "mpc:semitone_up",
-    15: "mpc:octave_down",   16: "mpc:octave_up",
+    13: "mpc:bank_a",    14: "mpc:bank_b",   15: "mpc:bank_c", 16: "mpc:bank_d",
 }
 
 # WHICH OF THESE THE MACHINE WANTS SHIFT HELD FOR - AND WHICH IT REFUSES
