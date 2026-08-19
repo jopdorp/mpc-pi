@@ -121,61 +121,135 @@ captures now" removes it — see `docs/maschine-daw-design.md`, Phase 3.
 
 ## Pages
 
-| button | page | knobs do |
-|---|---|---|
-| `group_e` | MIX | K1–K8 = the eight strip levels |
-| `group_f` | FX | the focused plugin's parameters |
-| `group_g` | SONG | markers and arrangement |
-| `group_h` | EDIT | regions on the timeline |
-| `SELECT` + `Dn` | WAVE | drill into that track's take |
+| button | page | knobs do | status |
+|---|---|---|---|
+| `group_e` | MIX | K1–K8 = the eight strip levels | built |
+| `group_f` | FX | the focused plugin's parameters | partial |
+| `group_g` | SONG | markers and arrangement | partial |
+| `group_h` | EDIT | regions on the timeline | partial |
+| `SELECT` | WAVE | drill into the focused track's take | partial |
+
+All five **open and render** — that much has been true for a while, and it
+is also the least interesting thing about them. What each one can then
+*do* is in its own section below; "partial" here always means the page
+draws and its position controls work, while the operations that change
+audio do not.
+
+FX is the exception to that pattern: its knobs do reach Ardour
+(`/strip/plugin/parameter` on the focused strip), but the plugin slot is
+hardcoded to the first one and `browse_left`/`browse_right` are unbound,
+so K1–K4 always edit slot 1 whatever the chain holds, and `BYP` does not
+exist. That is a knob that moves the wrong plugin rather than a knob that
+moves nothing, which is the more dangerous of the two.
 
 WAVE is a drill-in rather than a top-level page: you always open it *on*
-something, and BACK returns you where you came from.
+something, and `SELECT` both opens it and backs out of it.
 
 ## The jog wheel
 
 Cursor position, cut points and region moves all want a continuous
-position control. The DAW has none today: all three master knobs are
-hard-wired, `swing` to the MPC's DATA wheel, with no surface gating.
+position control, and `swing` is surface-gated to be it: MPC surface it
+stays the DATA wheel, DAW surface it is the jog. It is the biggest knob
+and the MPC idiom already teaches your hand that it means "move through
+the thing".
 
-**Proposed: surface-gate `swing`.** MPC surface, it stays the DATA wheel.
-DAW surface, it becomes the jog — playhead on SONG, cut point on EDIT,
-trim handle on WAVE. It is the biggest knob and the MPC idiom already
-teaches your hand that it means "move through the thing".
+| page | jog moves | status |
+|---|---|---|
+| MIX | nothing | built |
+| SONG | the playhead, snapped to bar | built |
+| EDIT | the edit cursor, snapped per `SNAP` | built |
+| WAVE | the selected trim handle, sample-accurate | built |
 
-| page | jog moves |
-|---|---|
-| MIX | nothing |
-| SONG | the playhead, snapped to bar |
-| EDIT | the edit cursor, snapped per `SNAP` |
-| WAVE | the selected trim handle, sample-accurate |
+This section read "Proposed" long after the panel half shipped, and the
+panel half was the half that did not matter. `maschine-hub` gated the
+knob and asserted the gating in its own self-test, so the feature looked
+built from both the code and the tests — while `daw-ctl` had never heard
+the word `jog`, answered `UNKNOWN COMMAND JOG` on every page, and the
+biggest knob on the instrument moved nothing anywhere.
+
+That is the third control to ship in exactly that shape here, after the
+mixer knobs and the punch verbs: a green test on each side of a gap that
+neither one crosses. The jog's self-test therefore asserts the **join**,
+page by page, against the table above.
+
+On MIX the jog is *silent*, which is a behaviour and not an absence: a
+knob with no job on a page is not a fault, and answering `UNKNOWN
+COMMAND` to it is how a working panel comes to look broken.
 
 ## EDIT: cutting and moving
 
-| control | action |
-|---|---|
-| jog | move the edit cursor |
-| `SNAP` | cycle snap: bar / beat / off |
-| `SPLIT` | split the region at the cursor |
-| `browse_left` / `browse_right` | previous / next region |
-| K1 | slide the selected region in time |
-| K2 / K3 | fade in / fade out |
-| K4 | region gain |
-| `ERASE` | delete the selected region |
-| `DUPLICATE` | copy the selected region to the cursor |
-| `UNDO` | undo |
+| control | action | status |
+|---|---|---|
+| `group_h` | open the page | built |
+| jog | move the edit cursor | built |
+| `SNAP` | cycle snap: bar / beat / off | built |
+| `SPLIT` | split the region at the cursor | missing |
+| `browse_left` / `browse_right` | previous / next region | missing |
+| K1 | slide the selected region in time | missing |
+| K2 / K3 | fade in / fade out | missing |
+| K4 | region gain | missing |
+| `ERASE` | delete the selected region | missing |
+| `DUPLICATE` | copy the selected region to the cursor | missing |
+| `UNDO` | undo | missing |
+
+**What "missing" means here, precisely.** Everything above that moves a
+*position* is built: the page opens, the cursor moves under the jog, the
+snap cycles and the screen draws all three. Everything that changes
+*audio* is not, and it is all blocked on the same one thing — **nothing
+publishes the region list.** The playlist belongs to the Lua side
+(`session-governor.lua` and `loop-ops.lua`); `daw-ctl` owns the screen
+state and has no channel to read regions back. So EDIT draws its bar
+grid, its snap and its cursor over an **empty timeline**, and there is
+nothing for `SPLIT` or `browse_left` to select.
+
+The next piece of work on this page is not a button. It is a region
+publisher on the Lua side, the mirror of the queue that already carries
+`finalize` / `repeat` / `clear` the other way.
+
+`DUPLICATE` is deliberately **unbound on the DAW surface** rather than
+bound to a verb that does not exist. It used to send `daw:duplicate`,
+which `daw-ctl` did not understand, so the press spent the status line on
+`UNKNOWN COMMAND DUPLICATE`. An unbound button does nothing at all, which
+is this surface's documented behaviour and is strictly better than one
+that reports a fault. Bind it again with the region op, not before.
 
 ## WAVE: trimming a take
 
-| control | action |
-|---|---|
-| K1 / K2 | trim start / trim end |
-| K3 | zoom |
-| K4 | gain |
-| jog | nudge the selected handle |
-| `NORM` | normalise |
-| `UNDO` | undo |
-| `BACK` | return to the page you came from |
+WAVE is a drill-in, not a page in the group row.
+
+| control | action | status |
+|---|---|---|
+| `SELECT` | open the take on the **focused** lane, and drill back out | partial |
+| K1 / K2 | trim start / trim end | built (state only) |
+| K3 | zoom | built (state only) |
+| K4 | gain | built (state only) |
+| jog | nudge the selected handle | built |
+| `NORM` | normalise | missing |
+| `UNDO` | undo | missing |
+| `BACK` | return to the page you came from | built |
+
+**`SELECT`, not `SELECT` + `Dn`.** The specification reaches any lane's
+take with a held modifier and a strip key; what is built opens the
+**focused** lane, which is one press after `Dn` rather than a chord. That
+is the focus model this panel is already built on — one press for the
+common case, two to reach a track that is not focused — so it is a
+smaller gesture than specified rather than a different one. The chord
+needs `SELECT` to become a held modifier in `maschine-hub`'s button
+dispatch, which is the one part of the panel a second surface has to
+agree about.
+
+**The way back cannot be D8.** D8 is the surface toggle and is never
+rebound; a drill-in that exited through it would put you on the MPC when
+you asked for the mixer. So `SELECT` drills back out — the way in is the
+way out, the same idiom `SHIFT`+`NAVIGATE` already uses for the browser.
+
+**"State only"** means the handles, zoom and gain are real, clamped,
+remembered per drill-in and drawn on screen, and **no audio is touched**.
+The trim handles are fractions of a take, and the take is not published
+either — same missing region channel as EDIT — so the waveform is empty
+and the handles have nothing to cut. Each drill-in resets them, because
+carrying one lane's edit points onto another lane's audio is worse than
+starting square.
 
 ## Transport, on both surfaces
 
@@ -234,15 +308,38 @@ reaches it.
 | jog / DATA wheel | move the cursor, one row per detent | built |
 | `browse_left` | up one directory | built |
 | `browse_right` | into the highlighted directory | built |
-| `STEP` (the MPC's ENTER) | load the highlighted image | built (panel side) |
+| `STEP` (the MPC's ENTER) | load the highlighted image | built |
 | `D8` | close | built |
 
-"Built (panel side)" means the whole path works up to the drive: the panel
-routes it, `daw-ctl` walks the tree and publishes the chosen image to
-`/dev/shm/mpc-disk`, and **nothing reads that file yet**. Mounting an image at
-runtime is MAME's side of the fence (`manager.machine.images[":fdc:0"]:load`)
-and that plugin does not exist, so today the screen says `LOAD BEAT02.IMG` and
-the drive does not change.
+**The drive actually changes now.** `daw-ctl` publishes the chosen image to
+`/dev/shm/mpc-disk` and `scripts/daw/mpcpi-autoplay.lua` — which is already
+MAME's autoboot script, already running Lua inside the machine — polls that
+path and calls the drive's own `load()`. No MAME patch and no rebuild were
+needed: the Lua image interface is the supported way to swap media at runtime,
+and an autoboot script is a place it can be called from. The drive is found by
+instance name (`floppydisk`, what `-listmedia` publishes) rather than a
+hardcoded `:fdc:0`, which resolves to `:fdc:0:35hd` on this driver.
+
+**The panel reports the machine's answer, not its own keypress.** ENTER prints
+`LOADING BEAT02.IMG`; the emulator writes back to `/dev/shm/mpc-disk-status`
+and the screen becomes `LOADED BEAT02.IMG`, or the drive's own refusal in the
+drive's own words — an `.iso` comes back as `UNABLE TO IDENTIFY IMAGE FILE
+FORMAT`. The browser lists anything disk-shaped on purpose, because the
+emulator is the authority on what it can mount, which makes a refusal an
+ordinary outcome on this page rather than an exceptional one.
+
+A swap **ejects, waits, and inserts**, because the guest's disk-change line is
+edge-triggered and loading straight over a mounted image can leave the MPC
+believing the old directory is still good. A refused load **puts back what was
+in the drive**: the eject has already happened by then, and an empty drive is
+strictly worse than the disk you had.
+
+**The choice survives a power cycle.** `/dev/shm` is a tmpfs, so without this
+the drive silently reverts to the unit's hardcoded `-flop` on every boot. Only
+a load the emulator has **confirmed** is remembered — writing the choice at
+keypress time instead put refused images into the boot seed, so one ENTER on an
+unreadable file made every subsequent boot come up with an empty drive and an
+error, with no way back except picking something else.
 
 It opens from **either surface**. Wanting another kit is not a reason to change
 surfaces first, and `NAVIGATE` is unbound in DAW mode, so nothing is taken away
@@ -275,3 +372,56 @@ that is neither gets no marker. Shape survives the cursor row, which inverts
 every brightness on it. A refusal ("NOT MOUNTED", "NOT A DISK") replaces the
 path in bright text until the next move, because a key that appears to do
 nothing is indistinguishable from a key that has broken.
+
+## What is actually built
+
+Honest status, because a specification that quietly describes itself as
+finished is worse than no specification. Every row below was checked
+against the **running appliance** rather than against this file — both
+this document and the artifact it mirrors had drifted, and in both
+directions: the jog was still marked "Proposed" months after its panel
+half shipped, and the panel half turned out to be the half that did not
+matter.
+
+| area | state |
+|---|---|
+| Surface toggle, page memory, pads always MPC, transport panel-wide | built |
+| Mixer levels on all eight knobs, master fader | built |
+| `SHIFT`+`MUTE` and `SOLO` per strip | built |
+| Focus, arm, punch in / punch out | built |
+| Page buttons on `group_e`–`group_h` | built |
+| Jog follows the surface, and moves something on every page | built |
+| `SNAP` cycles bar / beat / off | built |
+| FILES: open, scroll, descend, select | built |
+| **FILES: the chosen image is mounted in the running drive** | built |
+| **The chosen image survives a reboot** | built |
+| WAVE: drill in and out, trim handles, zoom, gain | built (no audio touched) |
+| EDIT: region ops — split, select, slide, fades, gain, erase, undo | missing |
+| WAVE: normalise, undo | missing |
+| SONG: markers — `browse_left`/`browse_right`, `MARK` | missing |
+| FX: slot selection, `BYP` | missing |
+| FX: K1–K4 reach Ardour but always edit slot 1 | partial |
+| Looping: `ERASE` / `UNDO` on a take | missing |
+
+**One missing piece accounts for most of that column.** EDIT, WAVE and the
+take-level `ERASE`/`UNDO` are all blocked on the same thing: **nothing
+publishes the region list.** The playlist belongs to the Lua side, `daw-ctl`
+owns the screen state, and there is no channel carrying regions back. Until
+there is, those pages can draw a grid, a cursor and a pair of handles — which
+they do — and cannot select or cut anything, because from `daw-ctl`'s point of
+view the timeline is empty.
+
+The channel to build is the mirror of the region queue that already carries
+`finalize` / `repeat` / `clear` from `daw-ctl` to `loop-ops.lua`. One file,
+published the other way, unblocks the whole column at once. It is a
+considerably better next move than binding the buttons.
+
+### A note on how three of these were found
+
+The mixer knobs, the punch verbs and the jog all shipped dead in the same
+shape: `maschine-hub` emitted a command, its own self-test asserted that it
+emitted it, `daw-ctl` had never heard the word, and the panel test on the other
+side was green about a screen it could draw. **Two green tests either side of a
+gap do not test the gap.** Every control added here should assert the *join* —
+press to Ardour, or press to published state — and the jog's self-test is
+written that way deliberately.
