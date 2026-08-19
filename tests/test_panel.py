@@ -128,9 +128,23 @@ class TestNoCollisions(unittest.TestCase):
         return [y for y in range(y0, y1)
                 if any(frame.px[y * frame.w + x] for x in range(frame.w))]
 
+    # LOOP and FILES own that band now.
+    #
+    # LOOP dropped its encoder bar - it repeated the name and level of four
+    # strips whose name and fader were already drawn directly above it - and
+    # spends the reclaimed 14px on a dB readout under each fader. FILES uses
+    # the full height for its listing. Neither has encoder labels to collide
+    # with, so the band is theirs and this invariant does not apply.
+    #
+    # The rule still holds for every page that DOES draw an encoder strip,
+    # which is what it was written to protect.
+    OWNS_ENCODER_BAND = {"LOOP", "FILES"}
+
     def test_body_does_not_touch_encoder_strip(self):
         gap_top = daw_ui.ENCBAR_Y - 2      # the divider row
         for page in daw_ui.PAGES:
+            if page in self.OWNS_ENCODER_BAND:
+                continue
             with self.subTest(page=page):
                 f = daw_ui.render(daw_ui.sample_state(page))
                 # The row directly above the divider must be clear, or

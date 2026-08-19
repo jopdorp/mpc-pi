@@ -133,6 +133,11 @@ BUTTONS_RIGHT_BY_PAGE = {
     # ride the MPC's printed shift-pad functions, which are exactly the
     # editing verbs - the silkscreen stays true.
     "EDIT": ("SPLIT", "PREV", "NEXT", "BACK"),
+    # The floppy browser. Its verbs are the browse keys and the MPC's ENTER
+    # rather than the four display buttons, so the row under this screen is
+    # informational - but every page must appear here or the page tables and
+    # PAGES silently disagree, which is what the coverage test catches.
+    "FILES": ("UP", "INTO", "LOAD", "CLOSE"),
     # FILES is an overlay rather than a page in the group row, and it needs
     # exactly one label: the way out, drawn over the button that does it.
     # The other three keep whatever the page underneath had - they are the
@@ -378,6 +383,7 @@ KNOBS_RIGHT_BY_PAGE = {
     "SONG": "scrub",
     "WAVE": "trim start / trim end / zoom / gain",
     "EDIT": "move region / fade in / fade out / region gain",
+    "FILES": "the jog scrolls the listing - one detent per row",
 }
 
 # The three MASTER knobs are separate hardware, not a jog encoder, and they

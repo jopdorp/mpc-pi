@@ -45,6 +45,13 @@ KNOBS = {
         ("gain", "osc", "/strip/gain {ssid} {db}",
          "-193..+6 dB; SHIFT gives 0.1 dB steps"),
     ] * KNOB_COUNT,
+    # The browser's only continuous control. Listed for the same reason as
+    # its BUTTONS entry: every page must appear in both tables, or the two
+    # disagree about what exists and nothing says so.
+    "FILES": [
+        ("scroll", "local", "files move {delta}",
+         "one detent per row, scaled the same way as the MPC's DATA wheel"),
+    ] * KNOB_COUNT,
     "LOOP": [
         ("lane level", "osc", "/strip/gain {ssid} {db}",
          "the loop lane is an ordinary strip, so this is the same call"),
@@ -131,6 +138,16 @@ BUTTONS = {
         ("NORM", "lua", "region:normalize()", None),
         ("UNDO", "osc", "/access_action Editor/undo", None),
         ("BACK", "local", "return to the previous page", None),
+    ],
+    # The floppy browser. Nothing here is Ardour's - the browser talks to
+    # daw-ctl, which owns the listing, and the load request goes to MAME.
+    # It is listed because every page in daw_ui.PAGES must appear in both
+    # tables or the two silently disagree about what exists.
+    "FILES": [
+        ("UP", "local", "files up", "leave the current directory"),
+        ("INTO", "local", "files into", "descend into the highlighted directory"),
+        ("LOAD", "local", "files enter", "publish the chosen image for MAME to mount"),
+        ("CLOSE", "local", "files close", "back to the page you came from"),
     ],
     "EDIT": [
         ("SPLIT", "lua", "playlist:split_region(region, playhead)", None),
