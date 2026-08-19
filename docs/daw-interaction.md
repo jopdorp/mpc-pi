@@ -12,12 +12,20 @@ exists — the "Status" column at the end of each table says which is which.
 | Under-screen knobs | 8 | K1–K8, page-dependent |
 | Master knobs | 3 | VOLUME, TEMPO, SWING |
 | Display buttons | 8 | D1–D8, D8 is the surface toggle |
-| Other buttons | 33 | 24 unbound in DAW mode |
+| Other buttons | 33 | 13 with no job at all in DAW mode |
 
-**24 free buttons.** There is no shortage, and therefore no PIN latch. SHIFT
-appears exactly once, on MUTE, and only because the bare MUTE key is the
-transport's STOP on both surfaces — see "Transport, on both surfaces". On the
-MPC surface SHIFT remains what it always was: the MPC's own SHIFT key.
+**Thirteen free buttons, and there were twenty when this said twenty-four.**
+Seven of them went to the region verbs — see "EDIT: cutting and moving" —
+and the count here was an overcount before that: it did not subtract the
+browser keys or the transport. There is still no shortage, and therefore
+no PIN latch. SHIFT appears exactly once, on MUTE, and only because the
+bare MUTE key is the transport's STOP on both surfaces — see "Transport,
+on both surfaces". On the MPC surface SHIFT remains what it always was:
+the MPC's own SHIFT key.
+
+Still doing nothing on this surface: `CONTROL`, `STEP`, `SCENE`,
+`PATTERN`, `PAD MODE`, `GRID`, both `TRANSPORT` arrows, `GROUP A`–`D` and
+`NOTE REPEAT`. That is the pool the next verb comes out of.
 
 ## Three invariants
 
@@ -83,8 +91,8 @@ transport action.
 | 3 | `Dn` | punch out; the loop closes and starts playing |
 | — | `Dn` again | overdub onto the closed loop |
 | — | `REC` | disarm; the strip buttons select again |
-| — | `erase` | discard the take (**unbound** on the panel) |
-| — | `undo` | undo the last take, non-destructively (**unbound**) |
+| — | `ERASE` | discard the take |
+| — | `BROWSE` | undo the last take, non-destructively |
 
 Quantising the punch to the bar is what makes this usable at a keyboard's
 distance, and it is why the countdown gets the largest glyphs on screen.
@@ -135,7 +143,7 @@ captures now" removes it — see `docs/maschine-daw-design.md`, Phase 3.
 | `group_e` | MIX | K1–K8 = the eight strip levels | built |
 | `group_f` | FX | the focused plugin's parameters | partial |
 | `group_g` | SONG | markers and arrangement | partial |
-| `group_h` | EDIT | regions on the timeline | built (its keys are unbound) |
+| `group_h` | EDIT | regions on the timeline | built |
 | `SELECT` | WAVE | held + `Dn`: drill into lane n's take; tapped: the focused lane | built |
 
 All five **open and render** — that much has been true for a while, and it
@@ -146,10 +154,19 @@ audio do not.
 
 FX is the exception to that pattern: its knobs do reach Ardour
 (`/strip/plugin/parameter` on the focused strip), but the plugin slot is
-hardcoded to the first one and `browse_left`/`browse_right` are unbound,
-so K1–K4 always edit slot 1 whatever the chain holds, and `BYP` does not
-exist. That is a knob that moves the wrong plugin rather than a knob that
-moves nothing, which is the more dangerous of the two.
+hardcoded to the first one, so K1–K4 always edit slot 1 whatever the chain
+holds, and `BYP` does not exist. That is a knob that moves the wrong
+plugin rather than a knob that moves nothing, which is the more dangerous
+of the two.
+
+**The two browse arrows now step regions, on every page.** FX wants them
+for the plugin slot and SONG wants them for markers, and when either is
+built it takes them **the way `ERASE` and `UNDO` did** — `daw-ctl` reads
+its own page and decides, because it is the side that owns the page.
+Neither gets a new key and neither gets a modifier. Until then `◀` and `▶`
+mean *previous / next region* wherever you press them, which is a verb
+with something behind it rather than a key reserved for one that is not
+written.
 
 WAVE is a drill-in rather than a top-level page: you always open it *on*
 something, and `SELECT` both opens it and backs out of it.
@@ -193,14 +210,14 @@ COMMAND` to it is how a working panel comes to look broken.
 | jog | move the edit cursor | built |
 | `SNAP` | cycle snap: bar / beat / off | built |
 | the timeline itself | regions drawn from the published list | built |
-| `split` | split the region at the cursor | built — **unbound** |
-| `region prev` / `region next` | previous / next region | built — **unbound** |
+| `SAMPLING` | split the region at the cursor | built |
+| `◀` / `▶` | previous / next region | built |
 | K1 | slide the selected region in time | built |
 | K2 / K3 | fade in / fade out | built |
 | K4 | region gain | built |
-| `erase` | delete the selected region | built — **unbound** |
-| `duplicate` | copy the selected region to the cursor | built — **unbound** |
-| `undo` | undo the last region edit | built — **unbound** |
+| `ERASE` | delete the selected region | built |
+| `DUPLICATE` | copy the selected region to the cursor | built |
+| `BROWSE` | undo the last region edit | built |
 
 **The channel exists now, and the page draws.** `loop-ops.lua` publishes
 the playlist to `$DAW_REGIONS` (`/dev/shm/daw-regions`) after every drain
@@ -211,28 +228,52 @@ source. Verified on the appliance: a take recorded onto LOOP1 appears on
 the EDIT page, `region next` selects it, `split` at the cursor makes two
 regions, `undo` puts the original back.
 
-**"Unbound" is what is left, and it is the panel's half, not `daw-ctl`'s.**
-Every verb above works when its line reaches `/run/daw-ctl.fifo` — that is
-the protocol `maschine-hub` writes and the way each one was exercised on
-the running appliance. What no button sends yet is the line. The bindings
-`control_map.DAW_BUTTONS` still needs, in the `daw:` form the hub turns
-into a command by replacing colons with spaces:
+**The buttons exist now, and this is which ones and why.** Every verb
+above reached `daw-ctl` only as a line written to `/run/daw-ctl.fifo` —
+the protocol `maschine-hub` writes, and the way each one was exercised on
+the running appliance. Seven bare buttons now write those lines:
 
-    daw:split           split the selected region at the cursor
-    daw:region:prev     browse_left
-    daw:region:next     browse_right
-    daw:duplicate       copy to the cursor
-    daw:erase           delete the region (the take, on the strips page)
-    daw:undo            undo the region edit (the take, on the strips page)
-    daw:norm            normalise (WAVE)
+| button | sends | why that key |
+|---|---|---|
+| `ERASE` | `erase` | the panel prints the word, and it means the same thing on both surfaces — the MPC's own `ERASE` over there, the region here |
+| `DUPLICATE` | `duplicate` | printed too; `GO TO` on the MPC surface, copy-to-the-cursor here |
+| `◀` / `▶` | `region prev` / `region next` | the specification's own choice: the MPC's cursor keys on the other surface, the browser's up/into while a listing is open — one gesture, *step through what is in front of you* |
+| `SAMPLING` | `split` | on the machine whose name is on the panel, `SAMPLING` opens the sample editor, which is where audio gets chopped |
+| `AUTO WRITE` | `norm` | the only free key whose printed word is about a level at all, and `norm` sets one |
+| `BROWSE` | `undo` | what is left in the block — said plainly, because a mnemonic invented after the fact is worse than admitting there is none |
 
-`DUPLICATE` was left unbound rather than sending `daw:duplicate` to a
+Nothing is on a modifier and nothing is on a pad. `SPLIT`, `NORM` and
+`UNDO` are printed nowhere on this panel — they are labels drawn under the
+right-hand screen, and the four buttons under that screen are the strip
+row here — so where the silkscreen says nothing, **position carries it**:
+the last four sit in one 2×3 block on the left of the panel, the block
+that already held `SNAP`, so EDIT's whole vocabulary is one shape under
+one hand.
+
+    BROWSE -> UNDO          SAMPLING   -> SPLIT
+    ◀      -> REGION PREV   ▶          -> REGION NEXT
+    SNAP   -> SNAP          AUTO WRITE -> NORM
+
+The two browse arrows are shared with the file browser and that is not a
+clash: the overlay is checked *before* the surface table, so opening a
+listing takes them back for as long as it is up, and `maschine-hub`'s
+self-test asserts it rather than trusting the order of two `if`s.
+
+`ERASE` and `UNDO` are **page-sensitive, and `daw-ctl` resolves that** —
+it is the side that knows which page is up. The panel sends the same bare
+word from the same key everywhere; `daw-ctl` turns it into the region on
+EDIT and WAVE and into the take on the strips page. No modifier was
+invented for it and nothing on the panel side mirrors the page.
+
+`DUPLICATE` had been unbound rather than sending `daw:duplicate` to a
 `daw-ctl` that did not understand it, which spent the status line on
-`UNKNOWN COMMAND DUPLICATE`. There is a region op behind it now, so that
-reason has gone. The MK1 has no key printed SPLIT, NORM or UNDO — those
-names are the labels drawn under the right-hand screen, and those four
-buttons are the strip row in DAW mode — so each needs a free bare button
-chosen on the panel side.
+`UNKNOWN COMMAND DUPLICATE`. That reason is gone, and the rule it came
+from is now a test: `tests/test_interaction.py` presses each of these
+seven buttons on EDIT, WAVE and the strips page and fails if the answer
+contains the word UNKNOWN.
+
+`MARK` is the one verb in this specification still deliberately unbound.
+`daw-ctl` has no marker command, so binding it would put the fault back.
 
 **The cursor is in Ardour's coordinates, not the MPC's.** The published
 header carries Ardour's sample rate and transport position, and EDIT draws
@@ -261,9 +302,9 @@ WAVE is a drill-in, not a page in the group row.
 | K3 | zoom | built (state only, and rightly: zoom touches no audio) |
 | K4 | gain | built |
 | jog | nudge the selected handle | built |
-| `norm` | normalise | built — **unbound** |
-| `undo` | undo the last region edit | built — **unbound** |
-| `BACK` | return to the page you came from | built |
+| `AUTO WRITE` | normalise | built |
+| `BROWSE` | undo the last region edit | built |
+| `SELECT` | drill back out to the page you came from | built |
 
 **`SELECT` + `Dn`, and `SELECT` alone.** `SELECT` is a held modifier over
 the strip row now — the same shape as `SOLO` and `SHIFT`+`MUTE`, which is
@@ -467,11 +508,11 @@ matter.
 | **The chosen image survives a reboot** | built |
 | WAVE: `SELECT`+`Dn` into any lane, drill in and out, zoom | built |
 | **The region list is published, and both pages draw it** | built |
-| **EDIT: split, select, slide, fades, gain, erase, duplicate, undo** | built — no panel button sends them |
-| **WAVE: trim and gain reach the audio; normalise; undo** | built — `norm` and `undo` unbound |
-| Looping: `ERASE` / `UNDO` on a take | built — unbound |
-| SONG: markers — `browse_left`/`browse_right`, `MARK` | missing |
-| FX: slot selection, `BYP` | missing |
+| **EDIT: split, select, slide, fades, gain, erase, duplicate, undo** | built — and every one of them has a bare button |
+| **WAVE: trim and gain reach the audio; normalise; undo** | built — `AUTO WRITE` and `BROWSE` |
+| Looping: `ERASE` / `UNDO` on a take | built — `ERASE` and `BROWSE`, page-resolved by `daw-ctl` |
+| SONG: markers — `MARK`, and the arrows on that page | missing; the arrows step regions everywhere until it is built |
+| FX: slot selection, `BYP` | missing; same arrows, same answer |
 | FX: K1–K4 reach Ardour but always edit slot 1 | partial |
 | The MPC's transport export | **not running** — see below |
 
