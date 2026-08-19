@@ -113,6 +113,13 @@ export MPC_MAXIMIZE="\${MPC_MAXIMIZE:-1}"
 # appliance is unaffected: it runs the panel HLE, a different path.
 export MPC_PANEL_MODE="\${MPC_PANEL_MODE:-accurate}"
 export MPC_PANEL_TIMER_MODE="\${MPC_PANEL_TIMER_MODE:-accurate}"
+# Audio: rate-match the graph to the device (48 kHz on ACP-pinned drivers)
+# and run the verified-clean 64-frame quantum. The resampler that ACP puts
+# in the path is what stalls the audio clock at small quanta, not the
+# quantum itself; 32 frames is the untested opt-in.
+"\$here/scripts/mpcpi-audio-setup"
+export PIPEWIRE_RATE_HZ="\${PIPEWIRE_RATE_HZ:-48000}"
+export MPC_PIPEWIRE_FRAMES="\${MPC_PIPEWIRE_FRAMES:-64}"
 "\$here/scripts/run-mpc2000xl-fast.sh" \\
     -pluginspath "\$here/plugins" -plugin layout "\$@" &
 fast_pid=\$!
@@ -133,7 +140,10 @@ export MAME_RUNTIME_DIR="\$here/runtime"
 all_cpus=\$(cat /sys/devices/system/cpu/online)
 all_cpus=\${all_cpus#0-}
 export MAME_CPUSET="\${MAME_CPUSET:-0-\${all_cpus:-0}}"
-"\$here/scripts/run-mpc.sh" "\$@" &
+# Audio setup and rate matching, as in mpcpi.
+"\$here/scripts/mpcpi-audio-setup"
+export PIPEWIRE_RATE_HZ="\${PIPEWIRE_RATE_HZ:-48000}"
+"\$here/scripts/run-mpc.sh" "\${1:-mpc2000xl}" 64 "\${@:2}" &
 fast_pid=\$!
 # The audio-thread starvation fix applies to the accurate path too.
 if "\$here/scripts/mpc-audio-thread-priority.sh"; then :; else
@@ -157,6 +167,9 @@ export MAME_RUNTIME_DIR="\$here/runtime"
 all_cpus=\$(cat /sys/devices/system/cpu/online)
 all_cpus=\${all_cpus#0-}
 export MAME_CPUSET="\${MAME_CPUSET:-0-\${all_cpus:-0}}"
+"\$here/scripts/mpcpi-audio-setup"
+export PIPEWIRE_RATE_HZ="\${PIPEWIRE_RATE_HZ:-48000}"
+export MPC_PIPEWIRE_FRAMES="\${MPC_PIPEWIRE_FRAMES:-64}"
 
 virmidi_card=\$(grep -l '^VirMIDI ' /proc/asound/card*/name 2>/dev/null | head -1 | grep -o 'card[0-9]*' | grep -o '[0-9]*' || true)
 if [[ -z "\$virmidi_card" ]]; then
@@ -200,6 +213,37 @@ WRAPPER
 chmod +x "$staging/mpcpi-maschine"
 
 cp -- "$mame_source_dir/COPYING" "$staging/COPYING"
+
+# The audio bootstrap: installs the WirePlumber rule that keeps the sink off
+# the ACP path. On many current drivers ACP pins the ALSA device at 48 kHz
+# with a fixed profile and resamples the graph into it, which no force
+# setting can override and which stalls the emulator's audio clock at small
+# quanta (silence at 32, crackle at 64). With ACP off and the graph
+# rate-matched to the device, 48 kHz/q64 is verified clean.
+cat >"$staging/scripts/mpcpi-audio-setup" <<'AUDIOSETUP'
+#!/usr/bin/env bash
+set -euo pipefail
+rule_dir=${XDG_CONFIG_HOME:-$HOME/.config}/wireplumber/wireplumber.conf.d
+rule_file=$rule_dir/50-mpcpi-no-acp.conf
+if [[ -f "$rule_file" ]]; then
+    exit 0
+fi
+mkdir -p "$rule_dir"
+cat >"$rule_file" <<'RULE'
+# Installed by the MPC-Pi bundle: keep ALSA devices off the ACP path so the
+# graph rate is not resampled into a pinned 48 kHz device profile.
+monitor.alsa.rules = [
+  {
+    matches = [ { device.name = "~^alsa_card\\..*" } ]
+    actions = { update-props = { api.alsa.use-acp = false } }
+  }
+]
+RULE
+printf 'Installed %s (one-time); restarting wireplumber once to apply it\n' "$rule_file"
+systemctl --user restart wireplumber || true
+sleep 3
+AUDIOSETUP
+chmod +x "$staging/scripts/mpcpi-audio-setup"
 
 # The MPC2000XL panel layout is drawn for the layout helper plugin: without
 # it the knobs and sliders render a warning string and are not mouse-driven.
@@ -299,6 +343,27 @@ which \`./mpcpi\` enables; \`./mpcpi-accurate\` does not pass it, so add
 The default panel path is the accurate one: the faster event-driven panel
 UART still ghosts button presses on desktop (presses revert or skip), so
 the bundle stays on the accurate path until that is fixed.
+
+## Audio, and what the launcher does to it
+
+\`./mpcpi\` rate-matches the graph to your sound device (48 kHz by default)
+and runs a 64-frame quantum (~1.3 ms). On first launch it installs a
+one-time WirePlumber rule at
+\`~/.config/wireplumber/wireplumber.conf.d/50-mpcpi-no-acp.conf\` that keeps
+ALSA devices off the ACP path - ACP pins many current drivers at 48 kHz
+with a resampler that no force-setting can override, and that resampler is
+what makes the emulator's audio clock stall (silence at 32 frames, crackle
+at 64). Deleting the file restores stock behaviour after a wireplumber
+restart.
+
+The 32-frame quantum is the untested opt-in on rate-matched devices:
+
+    MPC_PIPEWIRE_FRAMES=32 ./mpcpi
+
+On a device that natively follows the graph rate, the original 44.1 kHz
+tuning still applies:
+
+    PIPEWIRE_RATE_HZ=44100 MPC_PIPEWIRE_FRAMES=32 ./mpcpi
 
 ## Pad controllers (MPD18, MPD218, any USB-MIDI pads)
 
