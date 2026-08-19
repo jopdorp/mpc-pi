@@ -335,8 +335,17 @@ class TestRouting(unittest.TestCase):
                 self.assertEqual(self.r.mode, name)
                 self.assert_pads_reach_the_mpc(
                     self.r, "%s took the pads away" % name)
-                self.assertEqual(self.release_mode(name),
-                                 [("cmd", "mode %s" % control_map.DEFAULT_MODE)])
+                # RELEASING A MODE THAT REACHED NOTHING IS A TAP, and a mode
+                # may declare what a tap means: SELECT drills into the
+                # focused lane, which is the gesture the panel had before the
+                # chord existed and is still the cheap one. Read it from the
+                # map so a mode that gains or loses a fallback does not need
+                # this file edited.
+                ended = [("cmd", "mode %s" % control_map.DEFAULT_MODE)]
+                tap = control_map.MODES[name].get("tap")
+                if tap:
+                    ended.append(("cmd", tap))
+                self.assertEqual(self.release_mode(name), ended)
                 self.assertEqual(self.r.mode, control_map.DEFAULT_MODE)
 
     def test_a_mode_does_not_latch(self):
@@ -418,15 +427,27 @@ class TestRouting(unittest.TestCase):
     def held_modes(self):
         return [m for m, spec in control_map.MODES.items() if spec["button"]]
 
+    # What HOLD + Dn sends, per mode. The mixer modifiers are one verb and a
+    # strip name; SELECT is the WAVE drill-in, which is three verbs daw-ctl
+    # already has - back out of any take that is open, move the focus every
+    # page-level verb acts on, then drill in - so that the chord means the
+    # same thing from any page including from another lane's take.
+    CHORD = {
+        "MUTE":   lambda strip: [("cmd", "mute %s" % strip)],
+        "SOLO":   lambda strip: [("cmd", "solo %s" % strip)],
+        "SELECT": lambda strip: [("cmd", "back"), ("cmd", "focus %s" % strip),
+                                 ("cmd", "select")],
+    }
+
     def test_a_held_mode_retargets_the_display_row(self):
         for mode in self.held_modes():
+            self.assertIn(mode, self.CHORD, "no claim for mode %s" % mode)
             for i, strip in enumerate(control_map.MUTE_STRIPS):
                 r = self.to_daw(maschine_hub_shim.Router())
                 self.hold_mode(mode, r)
                 with self.subTest(mode=mode, strip=strip):
-                    self.assertEqual(
-                        r.button("display%d" % (i + 1), True),
-                        [("cmd", "%s %s" % (mode.lower(), strip))])
+                    self.assertEqual(r.button("display%d" % (i + 1), True),
+                                     self.CHORD[mode](strip))
 
     def test_armed_display_buttons_punch_in_and_out(self):
         """REC arms, a strip button punches, the same button closes it.

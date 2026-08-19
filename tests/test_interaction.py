@@ -195,6 +195,20 @@ class ModeMixin:
         if spec.get("shift"):
             rig.release("shift")
 
+    def undo_tap(self, rig, name):
+        """Put back what a mode's TAP action did on the way up.
+
+        A held mode may declare a fallback for the press that turned out not
+        to be a chord - SELECT drills into the focused lane - and every such
+        fallback is a TOGGLE, because the way in has to be the way out on a
+        panel with no spare button for "back". So firing it a second time
+        returns the state, which is what a test that cares about the mode
+        rather than its fallback needs.
+        """
+        if control_map.MODES[name].get("tap"):
+            self.hold_mode(rig, name)
+            self.release_mode(rig, name)
+
     def held_modes(self):
         return [m for m, spec in control_map.MODES.items() if spec["button"]]
 
@@ -279,6 +293,7 @@ class TestHeldModes(ModeMixin, unittest.TestCase):
                                     "holding %s showed nothing on screen"
                                     % mode)
                 self.release_mode(rig, mode)
+                self.undo_tap(rig, mode)
                 self.assertEqual(plain, bytes(rig.frame().px),
                                  "the screen did not return after release")
 
@@ -298,6 +313,7 @@ class TestHeldModes(ModeMixin, unittest.TestCase):
                 rig = Rig(surface="DAW")
                 self.hold_mode(rig, mode)
                 self.release_mode(rig, mode)
+                self.undo_tap(rig, mode)
                 self.assertEqual(rig.daw.mode, control_map.DEFAULT_MODE)
                 # And the row is a selector again, not a mute button.
                 strip = control_map.MUTE_STRIPS[0]
@@ -310,7 +326,26 @@ class TestHeldModes(ModeMixin, unittest.TestCase):
         A modifier over the focus model: it reaches any strip without
         moving focus, which is the whole reason it exists.
         """
-        books = {"MUTE": "mutes", "SOLO": "solos"}
+        def muted(daw, strip):
+            self.assertTrue(daw.mutes[strip], "the strip is not muted")
+
+        def soloed(daw, strip):
+            self.assertTrue(daw.solos[strip], "the strip is not soloed")
+
+        def drilled(daw, strip):
+            # SELECT + Dn IS THE WAVE DRILL-IN. The specification reaches ANY
+            # lane's take with the modifier held; what shipped before could
+            # only open the one already focused, because SELECT fired on its
+            # own press and the panel never knew a strip key came after it.
+            self.assertEqual(daw.page, "WAVE",
+                             "SELECT + a strip key did not drill in")
+            self.assertEqual(daw.focus, strip,
+                             "it drilled into the wrong lane")
+
+        # WHAT THE CHORD DOES, per mode. A mode added to control_map with no
+        # entry here fails loudly rather than being skipped, which is how
+        # SELECT went unnoticed by the generic loops for as long as it did.
+        checks = {"MUTE": muted, "SOLO": soloed, "SELECT": drilled}
         for mode in self.held_modes():
             strip = control_map.MUTE_STRIPS[2]
             with self.subTest(mode=mode):
@@ -320,10 +355,15 @@ class TestHeldModes(ModeMixin, unittest.TestCase):
                 self.hold_mode(rig, mode)
                 rig.press_strip(strip)
                 self.release_mode(rig, mode)
-                book = getattr(rig.daw, books[mode])
-                self.assertTrue(book[strip], "%s %s did nothing" % (mode, strip))
-                self.assertEqual(rig.daw.focus, focus,
-                                 "the modifier moved focus as well")
+                self.assertIn(mode, checks, "no claim for mode %s" % mode)
+                checks[mode](rig.daw, strip)
+                # The mixer modifiers reach a strip WITHOUT moving focus -
+                # that is the whole reason they exist. SELECT is the
+                # exception and says so: it moves focus, because the drill-in
+                # and the knobs above it have to agree which take is open.
+                if mode != "SELECT":
+                    self.assertEqual(rig.daw.focus, focus,
+                                     "the modifier moved focus as well")
                 self.assertNotEqual(before, bytes(rig.frame().px),
                                     "a %s strip looks the same as a plain one"
                                     % mode.lower())

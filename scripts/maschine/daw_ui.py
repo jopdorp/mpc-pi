@@ -106,14 +106,16 @@ def draw_status(f, st):
     # music rather than the panel.
     f.text_inverted(3, y, st["page"])
     # The mode word used to be printed unconditionally and spent most of its
-    # life reading "MPC" - daw-ctl initialises self.mode to that and only
-    # changes it for MUTE and SOLO. On the DAW screen "MPC" says nothing, and
-    # a permanent label that is usually wrong is worse than no label.
+    # life reading "MPC" - daw-ctl initialises self.mode to that - and on the
+    # DAW screen "MPC" says nothing. A permanent label that is usually wrong
+    # is worse than no label, so it appears only when a mode is engaged.
     #
-    # Now it appears only when a mode is actually engaged, which is the only
-    # time it carries information.
+    # WHICH MODES EXIST IS control_map's ANSWER, not a list here. This read
+    # `mode in ("MUTE", "SOLO")`, so a mode added to control_map.MODES was
+    # drawn nowhere - held, doing its work, and invisible on the one screen
+    # whose job is to say which mode is engaged. SELECT was that mode.
     mode = st.get("mode", "")
-    if mode in ("MUTE", "SOLO"):
+    if mode and mode in control_map.MODES and mode != control_map.DEFAULT_MODE:
         f.text(6 + f.text_width(st["page"]), y, mode, BRIGHT)
     else:
         mode = ""

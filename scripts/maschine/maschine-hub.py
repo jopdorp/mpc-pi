@@ -342,6 +342,12 @@ class Router:
         # is the one that was actually pressed.
         self.pressed = {}
         self.held = None          # a mode button currently held
+        # Did the held mode DO anything before it was let go? A mode may
+        # declare a "tap" action for the press that turned out not to be a
+        # chord - SELECT drills into the focused lane when no strip key was
+        # pressed while it was down - and that needs one bit to tell a chord
+        # from a tap.
+        self.mode_used = False
         # Loop recording arms globally and punches per strip, so the state is
         # "are we arming" plus "which strips are rolling", not a mode.
         self.armed = False
@@ -363,6 +369,27 @@ class Router:
     @property
     def mode(self):
         return self.held or control_map.DEFAULT_MODE
+
+    def _end_mode(self):
+        """Let go of the held mode, and fire its tap action if it had none.
+
+        ONE definition, because ending a mode already happens down two
+        different paths - the per-surface table and the panel-wide transport
+        branch, which is where a SHIFT+MUTE released SHIFT-first lands - and
+        the second one was written by copying the first. A third caller with
+        a third copy is how MUTE stayed latched the first time.
+        """
+        spec = control_map.MODES.get(self.held, {})
+        tap, used = spec.get("tap"), self.mode_used
+        self.held = None
+        self.mode_used = False
+        out = [("cmd", "mode %s" % self.mode)]
+        # A HELD MODE THAT REACHED NOTHING IS A TAP. SELECT+Dn opens lane n's
+        # take; a bare SELECT opens the focused lane's, which is the gesture
+        # this panel had before the chord existed and is still the cheap one.
+        if tap and not used:
+            out.append(("cmd", tap))
+        return out
 
     # --- buttons ---
 
@@ -438,8 +465,7 @@ class Router:
                 # held. Same shape as the SHIFT bug above: state entered on the
                 # way down and abandoned on the way up.
                 if self.held and HOLD_MODES.get(name) == self.held:
-                    self.held = None
-                    return [("cmd", "mode %s" % self.mode)]
+                    return self._end_mode()
                 return [("midi_up", sent)] if (sent and SEND_KEY_RELEASE
                                                and not TAP_KEYS) else []
             if TAP_KEYS and SEND_KEY_RELEASE:
@@ -494,9 +520,20 @@ class Router:
             sent = self.pressed.pop(name, None)
             if sent and SEND_KEY_RELEASE and sent.startswith("mpc:"):
                 return [("midi_up", sent)]
-            if target and target.startswith("mode:"):
-                self.held = None
-                return [("cmd", "mode %s" % self.mode)]
+            # A HELD MODE ENDS WITH ITS BUTTON, whatever the surface says NOW.
+            #
+            # This asked the CURRENT surface's table whether this button is a
+            # mode button, which is the same mistake the SHIFT release made:
+            # hold SOLO on the DAW surface, press D8, let go, and the release
+            # looks up MPC_BUTTONS["solo"] - "mpc:next_seq", not a mode - so
+            # nothing cleared self.held and the mixer mode outlived the finger
+            # holding it. Toggle back and the display row is still muting
+            # strips with nothing held.
+            #
+            # self.held is what we actually entered. Let it decide, exactly as
+            # the transport branch above already does.
+            if self.held and HOLD_MODES.get(name) == self.held:
+                return self._end_mode()
             return []
 
         if target:
@@ -515,6 +552,7 @@ class Router:
                 if control_map.MODES.get(_m, {}).get("shift") and not self.shift:
                     return []
                 self.held = _m
+                self.mode_used = False
                 return [("cmd", "mode %s" % self.mode)]
             rest = target.split(":", 1)[1]
             if rest.startswith("page:"):
@@ -544,7 +582,29 @@ class Router:
                 strip = control_map.MUTE_STRIPS[idx]
                 # Held modifier wins: reach any strip without moving focus.
                 if self.mode in ("MUTE", "SOLO"):
+                    self.mode_used = True
                     return [("cmd", "%s %s" % (self.mode.lower(), strip))]
+                # SELECT + Dn IS THE WAVE DRILL-IN, as specified. Three verbs
+                # daw-ctl already has, and no new state on this side:
+                #
+                #   back    leaves WAVE if we are on it, and is documented as
+                #           a no-op anywhere else - so the gesture means the
+                #           same thing from any page, including from WAVE on
+                #           another lane, which is the case a plain
+                #           focus+select would have toggled straight out of.
+                #   focus   moves the lane every page-level verb acts on, so
+                #           the drill-in and the knobs agree about the target.
+                #   select  drills in, remembering the page to come back to.
+                #
+                # Mirroring daw-ctl's page here to decide whether "back" is
+                # needed would be a second copy of a cursor with one owner,
+                # which is the mistake the FILES overlay exists as a
+                # counter-example to.
+                if self.mode == "SELECT":
+                    self.mode_used = True
+                    self.focus = idx
+                    return [("cmd", "back"), ("cmd", "focus %s" % strip),
+                            ("cmd", "select")]
                 # ARMED: the strip buttons punch in and out. This is why the
                 # pads are never needed for looping - the row that already
                 # names the tracks does the recording too.
@@ -1055,6 +1115,74 @@ def self_test():
     assert _rm.button("display7", True) == [("cmd", "mute REVERB")]
     _rm.held = "SOLO"
     assert _rm.button("display3", True) == [("cmd", "solo LOOP3")]
+    _rm.held = None
+
+    # SELECT + Dn IS THE WAVE DRILL-IN, as docs/daw-interaction.md specifies
+    # it. It could not be built while SELECT fired on its own press: the
+    # panel had no way to know a strip key came after it, so what shipped
+    # opened the FOCUSED lane and the doc's status column said "partial".
+    #
+    # Three verbs daw-ctl already has, in this order and for this reason:
+    # "back" leaves a take that is already open (and is documented as a
+    # no-op anywhere else), so the chord means the same thing from any page
+    # including from another lane's take, where focus+select alone would
+    # have toggled straight back out; "focus" moves the lane the page-level
+    # verbs and the knobs act on; "select" drills in.
+    _rw = Router()
+    _rw.button(control_map.SURFACE_TOGGLE, True)
+    assert _rw.button("select", True) == [("cmd", "mode SELECT")]
+    assert _rw.mode == "SELECT"
+    assert _rw.button("display3", True) == [
+        ("cmd", "back"), ("cmd", "focus LOOP3"), ("cmd", "select")], \
+        "SELECT + D3 is not the drill-in"
+    _rw.button("display3", False)
+    assert _rw.focus == 2, "the drill-in and the knobs must agree on the lane"
+    # A chord is not a tap: the fallback must NOT fire as well, or one
+    # gesture drills into two lanes.
+    assert _rw.button("select", False) == [("cmd", "mode MPC")]
+    assert _rw.held is None
+
+    # AND A BARE SELECT STILL DRILLS INTO THE FOCUSED LANE. The chord reaches
+    # any lane; the tap is the cheap gesture for the one you are already on,
+    # which is what this panel had before the modifier existed.
+    _rw2 = Router()
+    _rw2.button(control_map.SURFACE_TOGGLE, True)
+    assert _rw2.button("select", True) == [("cmd", "mode SELECT")]
+    assert _rw2.button("select", False) == [("cmd", "mode MPC"),
+                                            ("cmd", "select")], \
+        "a bare SELECT press must still open the focused lane's take"
+
+    # On the MPC surface SELECT is the MPC's UNDO key and stays it - the same
+    # way SOLO is NEXT SEQ over there. A modifier that ate an MPC key would
+    # cost the machine a function to give the mixer one.
+    _rw3 = Router()
+    assert sent(_rw3.button("select", True)) == "mpc:undo"
+    _rw3.button("select", False)
+    assert _rw3.held is None, "SELECT became a mode on the MPC surface"
+
+    # A HELD MODE MUST END EVEN IF THE SURFACE CHANGED UNDER IT.
+    #
+    # The release used to ask the CURRENT surface's table whether this button
+    # is a mode button. Hold SOLO on the DAW surface, press D8, let go: the
+    # lookup finds MPC_BUTTONS["solo"] - "mpc:next_seq", not a mode - so
+    # nothing cleared self.held and the mixer mode outlived the finger
+    # holding it. Toggle back and the display row is still muting strips with
+    # nothing held. Same shape as the SHIFT release bug, same fix: ask
+    # self.held, which is what we actually entered.
+    for _mode, _spec in control_map.MODES.items():
+        if not _spec.get("button"):
+            continue
+        _rl = Router()
+        _rl.button(control_map.SURFACE_TOGGLE, True)
+        if _spec.get("shift"):
+            _rl.button("shift", True)
+        _rl.button(_spec["button"], True)
+        assert _rl.held == _mode, _mode
+        _rl.button(control_map.SURFACE_TOGGLE, True)      # back to the MPC
+        assert _rl.surface == "MPC"
+        _rl.button(_spec["button"], False)
+        assert _rl.held is None, \
+            "%s outlived its button across a surface change" % _mode
     # display8 is the surface toggle and must NOT become a strip - and the
     # master has no button at all, which is why there are seven and not eight.
     assert "MASTER" not in control_map.MUTE_STRIPS

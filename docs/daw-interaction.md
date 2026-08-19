@@ -22,7 +22,10 @@ MPC surface SHIFT remains what it always was: the MPC's own SHIFT key.
 ## Three invariants
 
 1. **The instrument never goes away.** The pads reach the MPC on both
-   surfaces and in every mode. Mixing must never cost you the drums.
+   surfaces and in every mode — *all four banks of them*: `SHIFT` + the top
+   pad row is `BANK A`–`D`, because `GROUP A`–`D` are bound on the MPC
+   surface only and the grid used to be stuck in one bank whenever the
+   panel was pointed at the mixer. Mixing must never cost you the drums.
 2. **D8 is always the surface toggle.** The way back is in the same place
    whatever is on screen.
 3. **One press to reach anything; two to reach anything on a track that is
@@ -127,7 +130,7 @@ captures now" removes it — see `docs/maschine-daw-design.md`, Phase 3.
 | `group_f` | FX | the focused plugin's parameters | partial |
 | `group_g` | SONG | markers and arrangement | partial |
 | `group_h` | EDIT | regions on the timeline | partial |
-| `SELECT` | WAVE | drill into the focused track's take | partial |
+| `SELECT` | WAVE | held + `Dn`: drill into lane n's take; tapped: the focused lane | built |
 
 All five **open and render** — that much has been true for a while, and it
 is also the least interesting thing about them. What each one can then
@@ -219,7 +222,8 @@ WAVE is a drill-in, not a page in the group row.
 
 | control | action | status |
 |---|---|---|
-| `SELECT` | open the take on the **focused** lane, and drill back out | partial |
+| `SELECT` + `Dn` | open the take on **lane n** | built |
+| `SELECT` (tapped) | open the take on the **focused** lane, and drill back out | built |
 | K1 / K2 | trim start / trim end | built (state only) |
 | K3 | zoom | built (state only) |
 | K4 | gain | built (state only) |
@@ -228,15 +232,28 @@ WAVE is a drill-in, not a page in the group row.
 | `UNDO` | undo | missing |
 | `BACK` | return to the page you came from | built |
 
-**`SELECT`, not `SELECT` + `Dn`.** The specification reaches any lane's
-take with a held modifier and a strip key; what is built opens the
-**focused** lane, which is one press after `Dn` rather than a chord. That
-is the focus model this panel is already built on — one press for the
-common case, two to reach a track that is not focused — so it is a
-smaller gesture than specified rather than a different one. The chord
-needs `SELECT` to become a held modifier in `maschine-hub`'s button
-dispatch, which is the one part of the panel a second surface has to
-agree about.
+**`SELECT` + `Dn`, and `SELECT` alone.** `SELECT` is a held modifier over
+the strip row now — the same shape as `SOLO` and `SHIFT`+`MUTE`, which is
+the shape this panel already teaches — so the chord in the specification
+works: hold it and press `Dn` to open lane n's take. This used to read
+"`SELECT`, not `SELECT` + `Dn`": `SELECT` fired on its own press, so the
+panel had no way to know a strip key came after it, and what shipped
+could only open the lane that was already focused.
+
+The tap is that fallback, kept. Press and release `SELECT` with no strip
+key in between and it drills into the focused lane and back out, so the
+cheap gesture for the common case survives and the chord is there for the
+lane you are not on.
+
+The chord sends three verbs `daw-ctl` already had — `back`, `focus`,
+`select` — rather than a new one. `back` is documented as a no-op on a
+top-level page, so the same gesture means the same thing from anywhere,
+*including from another lane's take*, which a bare `focus`+`select` would
+have toggled straight out of instead of switching lanes. Nothing on the
+panel side mirrors `daw-ctl`'s page to decide: one cursor, one owner.
+
+On the MPC surface `SELECT` is still the MPC's `UNDO` key, exactly as
+`SOLO` is still `NEXT SEQ` there.
 
 **The way back cannot be D8.** D8 is the surface toggle and is never
 rebound; a drill-in that exited through it would put you on the MPC when
@@ -345,7 +362,7 @@ It opens from **either surface**. Wanting another kit is not a reason to change
 surfaces first, and `NAVIGATE` is unbound in DAW mode, so nothing is taken away
 there.
 
-**Why the one shifted button.** SHIFT+pad types the MPC's digits and was
+**Why the one shifted button.** SHIFT+pad reaches the MPC's keypad and was
 supposed to be the only shift layer; this is the second and last. Every bare
 button already carries an MPC key, and "list the host's filesystem" is not an
 MPC function at all — the machine has no such key — so a bare button could only
@@ -386,6 +403,7 @@ matter.
 | area | state |
 |---|---|
 | Surface toggle, page memory, pads always MPC, transport panel-wide | built |
+| SHIFT+pad: the ten mode keys, `ENTER`, `MAIN SCREEN`, `BANK A`–`D`, identical on both surfaces | built |
 | Mixer levels on all eight knobs, master fader | built |
 | `SHIFT`+`MUTE` and `SOLO` per strip | built |
 | Focus, arm, punch in / punch out | built |
@@ -395,7 +413,7 @@ matter.
 | FILES: open, scroll, descend, select | built |
 | **FILES: the chosen image is mounted in the running drive** | built |
 | **The chosen image survives a reboot** | built |
-| WAVE: drill in and out, trim handles, zoom, gain | built (no audio touched) |
+| WAVE: `SELECT`+`Dn` into any lane, drill in and out, trim handles, zoom, gain | built (no audio touched) |
 | EDIT: region ops — split, select, slide, fades, gain, erase, undo | missing |
 | WAVE: normalise, undo | missing |
 | SONG: markers — `browse_left`/`browse_right`, `MARK` | missing |

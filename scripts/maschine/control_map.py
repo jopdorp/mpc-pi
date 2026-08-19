@@ -76,6 +76,32 @@ MODES = {
         "pads": "mpc",
         "help": "hold SOLO: display 1-7 solo LOOP1..REVERB",
     },
+    # THE WAVE DRILL-IN, as docs/daw-interaction.md specifies it: SELECT + Dn
+    # opens the take on lane n. It is the same shape as SOLO - a held button
+    # over the display row, reaching any strip without moving focus first -
+    # because that is the shape this panel already teaches.
+    #
+    # It could not be built before: SELECT was a plain DAW_BUTTONS entry that
+    # fired on its press, so the panel had no way to know a strip key was
+    # pressed WHILE it was down. What shipped instead acted on the already
+    # focused lane, which is one press after Dn rather than a chord.
+    #
+    # THE TAP IS THAT FALLBACK, kept. A bare SELECT - pressed and released
+    # with no strip key in between - still drills into the focused lane and
+    # back out, so the cheap gesture for the common case survives and the
+    # chord is there for the lane you are not on. "tap" is the general
+    # mechanism: a held mode may declare an action for a press that turned
+    # out not to be a chord.
+    #
+    # On the MPC surface SELECT is the MPC's UNDO key and stays it. Same as
+    # SOLO, which is NEXT SEQ over there.
+    "SELECT": {
+        "button": "select",
+        "pads": "mpc",
+        "tap": "select",
+        "help": "hold SELECT: display 1-7 open that lane's take; tap: the "
+                "focused lane",
+    },
 }
 DEFAULT_MODE = "MPC"
 # NO PIN. Modes are held, not latched: SHIFT+MUTE and SOLO do their work while
@@ -343,11 +369,12 @@ DAW_BUTTONS = {
     # nothing at all, which is the documented behaviour for this surface and
     # is strictly better than a button that reports a fault when pressed.
     # Bind it again with the region op, not before.
-    # SELECT drills into WAVE on the focused lane, and drills back out. The
-    # way in is the way out, the same idiom SHIFT+NAVIGATE uses for the
-    # browser - and it cannot be D8, which is the surface toggle and is never
-    # rebound.
-    "select":         "daw:select",
+    # SELECT IS A HELD MODIFIER over the display row - see MODES["SELECT"].
+    # Held, display 1-7 drill into that lane's take; tapped, it drills into
+    # the focused lane and back out again. The way in is the way out, the
+    # same idiom SHIFT+NAVIGATE uses for the browser - and it cannot be D8,
+    # which is the surface toggle and is never rebound.
+    "select":         "mode:SELECT",
     # EDIT's snap grid, cycled: BAR / BEAT / OFF on one button, which is what
     # the key already means on the MPC side of the panel - SNAP is bar_right
     # there, "move by the grid". It decides how far one jog detent moves the
