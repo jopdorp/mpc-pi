@@ -36,6 +36,13 @@ FIFO = "/run/daw-ctl.fifo"
 # session-governor.lua and run-session.sh, and the same reasoning as the FIFO
 # above: a file survives either side restarting with no reconnect dance.
 QUEUE = os.environ.get("DAW_QUEUE", "/dev/shm/daw-region-queue")
+# ...and the same channel the other way: the region list the Lua side
+# publishes after every change. Without it EDIT and WAVE draw a grid, a
+# cursor and a pair of trim handles over an empty timeline - there is
+# nothing to select, so nothing to split, slide, fade, erase or normalise.
+# See session-governor.lua's publish() for the format and for why the
+# header carries Ardour's sample rate and transport position.
+REGIONS = os.environ.get("DAW_REGIONS", "/dev/shm/daw-regions")
 # Where a floppy chosen on the panel is published for the emulator.
 #
 # READ BY scripts/daw/mpcpi-autoplay.lua, which runs as MAME's autoboot script
@@ -77,12 +84,20 @@ LANES = [n for n in STRIPS if n not in ("DELAY", "REVERB", "MASTER")]
 
 
 class Daw:
+    # The appliance's sample rate, and the session's. It is 44.1k
+    # everywhere - the graph clock, the emulator and the USB gadget - and
+    # daw_ctl.Transport defaults to 48000, which nothing here overrode: every
+    # length this process put on the queue was 8.8% long, so a four-bar loop
+    # was fitted to four bars and eight percent of a fifth. The published
+    # region header carries the session's real rate and overrides this.
+    RATE = int(os.environ.get("MPCPI_RATE", "44100"))
+
     def __init__(self, client, strips=None, lanes=None, bpm=120.0,
-                 queue=QUEUE):
+                 queue=QUEUE, regions=REGIONS):
         self.osc = client
         self.queue = queue
         self.strips = list(strips or STRIPS)
-        self.transport = daw_ctl.Transport()
+        self.transport = daw_ctl.Transport(rate=self.RATE)
         self.transport.bpm = bpm
         self.engine = daw_ctl.Engine(self.transport)
         for name in (lanes or LANES):
@@ -151,6 +166,34 @@ class Daw:
         # Which page WAVE was drilled into from, so backing out returns there
         # rather than to a default.
         self.drilled_from = None
+        # --- the regions, as published by the Lua side -------------------
+        #
+        # THE ONLY THING THIS PROCESS KNOWS ABOUT THE AUDIO. The playlist
+        # belongs to session-governor.lua; this is its mirror, re-read
+        # whenever the file changes, and every region verb below addresses
+        # it by the names it finds here rather than by names it invented.
+        self.regions_path = regions
+        self.regions = {}          # track -> [ {name,pos,len,fi,fo,gain} ]
+        self.regions_stamp = None  # (mtime_ns, size) of the last file read
+        self.regions_gen = 0
+        # Where ARDOUR's transport is. EDIT and WAVE work in Ardour's
+        # timeline, not the MPC's: the two free-run against each other by an
+        # unknown constant, and a split at a cursor in the wrong coordinates
+        # does not land slightly off, it lands in another part of the song.
+        self.ardour_playhead = 0
+        # The selected region, by NAME, on the focused lane. A name because
+        # editing renames: a split makes two regions neither side named, so
+        # an index would point at whatever moved into the slot.
+        self.sel_region = None
+        # Where the take started when WAVE was drilled into, so the trim
+        # handles stay fractions of the ORIGINAL take. Without it each trim
+        # would be a fraction of the already-trimmed region and the handles
+        # could only ever eat inward.
+        self.wave_base = None
+        # Knob edits waiting to be sent. See defer(): a knob reports tens of
+        # times a second and each report would otherwise be one queue line
+        # and one region edit, so they settle first.
+        self.deferred = {}
 
     # --- Ardour ---
 
@@ -206,6 +249,254 @@ class Daw:
         elif verb in self.QUEUED:
             self.enqueue(action)
         return action
+
+    # --- the region channel ------------------------------------------------
+
+    def poll_regions(self, path=None):
+        """Re-read the published region list when it has changed.
+
+        Cheap on the hot path: one stat per 10 ms tick, and the file is only
+        read when its mtime or size moves. The governor republishes twice a
+        second even when nothing was edited, because the header carries
+        Ardour's transport position and that is the EDIT playhead.
+        """
+        path = path or self.regions_path
+        try:
+            info = os.stat(path)
+        except OSError:
+            return False
+        stamp = (info.st_mtime_ns, info.st_size)
+        if stamp == self.regions_stamp:
+            return False
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError:
+            return False
+        self.regions_stamp = stamp
+        self.load_regions(text)
+        return True
+
+    def load_regions(self, text):
+        """Parse one published frame. See session-governor.lua's publish()."""
+        found = {}
+        for line in text.splitlines():
+            if line.startswith("#"):
+                words = line[1:].split()
+                kw = dict(zip(words[0::2], words[1::2]))
+                # ARDOUR'S RATE WINS. Everything on the wire is samples, and
+                # the two sides have to agree what a sample is worth or every
+                # bar count, loop length and cursor position is out by the
+                # ratio - which is exactly the bug this replaced.
+                rate = int(kw.get("rate") or 0)
+                if rate > 0:
+                    self.transport.rate = rate
+                self.ardour_playhead = int(kw.get("transport") or 0)
+                self.regions_gen = int(kw.get("gen") or 0)
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                continue
+            try:
+                found.setdefault(parts[0], []).append({
+                    "name": parts[1], "pos": int(parts[2]),
+                    "len": int(parts[3]), "fade_in": int(parts[4]),
+                    "fade_out": int(parts[5]), "gain": float(parts[6])})
+            except ValueError:
+                continue
+        for rows in found.values():
+            rows.sort(key=lambda r: (r["pos"], r["name"]))
+        self.regions = found
+        self.resync_selection()
+        self.adopt_region_gain()
+        return found
+
+    def adopt_region_gain(self):
+        """Let the published gain move WAVE's gain knob.
+
+        This is the channel closing: NORM sends a verb and the Lua side
+        decides the factor, so the only way the knob can show what actually
+        happened is to read it back. Not while a gain edit of our own is
+        still pending, or the knob would snap back to the old value between
+        the hand moving and the edit landing.
+        """
+        r = self.selected()
+        if self.page != "WAVE" or r is None:
+            return
+        if "gain %s" % r["name"] in self.deferred:
+            return
+        self.wave_gain = r["gain"]
+
+    def lane_regions(self, track=None):
+        return self.regions.get(track or self.focus, [])
+
+    def selected(self):
+        for r in self.lane_regions():
+            if r["name"] == self.sel_region:
+                return r
+        return None
+
+    def region_near(self, pos):
+        """The region under `pos`, else the nearest one by start."""
+        rows = self.lane_regions()
+        if not rows:
+            return None
+        for r in rows:
+            if r["pos"] <= pos < r["pos"] + r["len"]:
+                return r
+        return min(rows, key=lambda r: abs(r["pos"] - pos))
+
+    def resync_selection(self):
+        """Keep a selection across a republish, whatever got renamed.
+
+        A split turns the selected region into two regions with new names,
+        so holding the old name would leave the page with nothing selected
+        immediately after the one edit most likely to be followed by
+        another. Falling back to the region under the cursor puts the
+        selection on the half the cut just made.
+        """
+        if self.selected():
+            return
+        near = self.region_near(self.cursor)
+        self.sel_region = near["name"] if near else None
+        # WAVE's handles are fractions of a take; a different take is a
+        # different set of samples under them.
+        if near is not None and self.page == "WAVE":
+            self.wave_base = (near["pos"], near["len"])
+
+    # Knob edits settle before they are sent.
+    #
+    # The MK1's encoders report an absolute angle many times a second, so a
+    # quarter turn of the fade knob is dozens of deltas. One queue line each
+    # would be dozens of region edits, dozens of republishes and dozens of
+    # undo entries for one gesture - and the player would have to press UNDO
+    # dozens of times to take it back. So the LAST value of a gesture is what
+    # is sent, keyed by what it edits, and a press flushes whatever is
+    # pending first so the order on the queue is the order of the hands.
+    COMMIT_DELAY = float(os.environ.get("MPCPI_EDIT_COMMIT", "0.25"))
+
+    def defer(self, key, line, now=None):
+        now = time.monotonic() if now is None else now
+        self.deferred[key] = (line, now + self.COMMIT_DELAY)
+        return [line]
+
+    def flush(self, now=None, force=False):
+        now = time.monotonic() if now is None else now
+        due = [k for k, (_, at) in self.deferred.items() if force or now >= at]
+        out = []
+        for key in sorted(due):
+            line, _ = self.deferred.pop(key)
+            self.enqueue(line)
+            out.append(line)
+        return out
+
+    # --- region edits ------------------------------------------------------
+
+    def region_op(self, line, message):
+        """Send one region edit now, after anything a knob left pending."""
+        self.flush(force=True)
+        self.enqueue(line)
+        self.message = message
+        return [line]
+
+    def no_region(self):
+        # Naming which lane is empty beats a key that appears to do nothing,
+        # which is indistinguishable from a key that has broken.
+        self.message = "NO REGION ON %s" % self.focus
+        return ["error no-region %s" % self.focus]
+
+    def step_region(self, way):
+        """browse_left / browse_right: the previous or next region.
+
+        The cursor FOLLOWS the selection to the region's start. The EDIT
+        window is drawn around the cursor, so a selection the cursor did not
+        follow would be a bright region somewhere off screen - and every verb
+        that acts at the cursor would then act somewhere the eye is not.
+        """
+        rows = self.lane_regions()
+        if not rows:
+            return self.no_region()
+        names = [r["name"] for r in rows]
+        if self.sel_region in names:
+            i = names.index(self.sel_region) + (1 if way == "next" else -1)
+            i = max(0, min(len(rows) - 1, i))
+        else:
+            i = 0 if way == "next" else len(rows) - 1
+        self.sel_region = rows[i]["name"]
+        self.cursor = rows[i]["pos"]
+        self.message = "%s  %d/%d" % (self.sel_region, i + 1, len(rows))
+        return ["region %s" % self.sel_region]
+
+    def split_region(self):
+        r = self.selected()
+        if r is None:
+            return self.no_region()
+        # A cut outside the region is not a cut. Ardour accepts the call and
+        # does nothing, so without this the button reports a split that never
+        # happened - the one answer worse than refusing.
+        if not (r["pos"] < self.cursor < r["pos"] + r["len"]):
+            self.message = "CURSOR NOT IN %s" % r["name"]
+            return ["error cursor-outside %s" % r["name"]]
+        return self.region_op(
+            "split %s %s %d" % (self.focus, r["name"], self.cursor),
+            "SPLIT %s" % r["name"])
+
+    def duplicate_region(self):
+        r = self.selected()
+        if r is None:
+            return self.no_region()
+        return self.region_op(
+            "duplicate %s %s %d" % (self.focus, r["name"], self.cursor),
+            "COPY %s" % r["name"])
+
+    def erase_region(self):
+        r = self.selected()
+        if r is None:
+            return self.no_region()
+        # Let go of the name before the playlist does. The next publish will
+        # pick a neighbouring region; holding a name that no longer exists
+        # would leave the page selecting nothing until something else moved.
+        self.sel_region = None
+        return self.region_op("remove %s %s" % (self.focus, r["name"]),
+                              "ERASED %s" % r["name"])
+
+    def normalize_region(self):
+        r = self.selected()
+        if r is None:
+            return self.no_region()
+        return self.region_op("normalize %s %s" % (self.focus, r["name"]),
+                              "NORM %s" % r["name"])
+
+    def region_undo(self):
+        """UNDO on EDIT and WAVE: the last region edit, put back.
+
+        NOT Ardour's undo, which does not exist here: Session:undo is not
+        bound in Lua on either the appliance's Ardour 8 or the build host's
+        9 (measured - begin_reversible_command and add_stateful_diff_command
+        are bound, so an edit can be pushed onto a history nothing in this
+        process can ever pop). loop-ops.lua keeps an inverse-op stack
+        instead, and this is the key that pops it.
+        """
+        return self.region_op("undo", "UNDO")
+
+    # --- take-level ERASE and UNDO -----------------------------------------
+
+    def take_undo(self, what):
+        """Discard the focused lane's loop. ERASE and UNDO on the LOOP page.
+
+        One path, honestly: the engine has a single `clear`, so both keys
+        take the take off the timeline and leave the captured audio on disk.
+        The regions go because a lane whose engine state says idle while its
+        repetitions are still laid ahead of the playhead goes on playing with
+        no button left that means stop.
+        """
+        out = self.apply(self.engine.command("undo %s" % self.focus,
+                                             self.playhead))
+        if any(a.startswith("error") for a in out):
+            self.message = "NO TAKE ON %s" % self.focus
+        else:
+            self.message = "%s %s" % (what, self.focus)
+        return out
 
     # --- commands from the panel ---
 
@@ -281,6 +572,32 @@ class Daw:
         # player on the MPC when they asked for the mixer.
         if verb in ("select", "back"):
             return self.drill(verb)
+
+        # THE REGION VERBS. Every one of them was blocked on the same thing -
+        # nothing published the region list - so the buttons were left
+        # deliberately unbound rather than wired to a verb that would answer
+        # UNKNOWN COMMAND. They address what poll_regions read, by name.
+        if verb == "region" and len(parts) > 1:
+            return self.step_region(parts[1])
+        if verb == "split":
+            return self.split_region()
+        if verb == "duplicate":
+            return self.duplicate_region()
+        if verb == "norm":
+            return self.normalize_region()
+        # ERASE and UNDO mean "undo what THIS PAGE does". On EDIT and WAVE
+        # that is the region under the hand; on the strips page it is the
+        # take on the focused lane, which is the only thing that page makes.
+        # One key that always undoes what you were just doing beats two keys
+        # that each work on one page and report a fault on the other.
+        if verb == "erase" and len(parts) == 1:
+            if self.page in ("EDIT", "WAVE"):
+                return self.erase_region()
+            return self.take_undo("ERASED")
+        if verb == "undo" and len(parts) == 1:
+            if self.page in ("EDIT", "WAVE"):
+                return self.region_undo()
+            return self.take_undo("UNDO")
 
         # The file browser. One verb with a sub-verb rather than five top-level
         # words, because everything under it is meaningless unless the browser
@@ -534,6 +851,8 @@ class Daw:
             if target in ("0", "1"):
                 return self.trim(int(target), delta * self.KNOB_FX_STEP)
             if target == "2":
+                # ZOOM IS THE ONE KNOB HERE THAT TOUCHES NO AUDIO. It is how
+                # much of the take the 253 pixels show, so it commits nothing.
                 self.wave_zoom = max(1.0, min(64.0, self.wave_zoom *
                                               (1.0 + delta * 0.002)))
                 self.message = "WAVE ZOOM %.1fX" % self.wave_zoom
@@ -542,9 +861,84 @@ class Daw:
                 self.wave_gain = max(0.0, min(4.0, self.wave_gain +
                                               delta * self.KNOB_FX_STEP * 2))
                 self.message = "WAVE GAIN %.2f" % self.wave_gain
-                return ["wave gain %.2f" % self.wave_gain]
+                return self.commit_gain(self.wave_gain)
             return ["error no-knob WAVE %s" % target]
+        if page == "EDIT":
+            # K1 slides the region, K2/K3 are its fades, K4 its gain - all
+            # four on the SELECTED region, and all four deferred, because a
+            # knob reports far faster than a playlist wants to be edited.
+            r = self.selected()
+            if r is None:
+                return self.no_region()
+            if target == "0":
+                return self.slide(r, delta)
+            if target in ("1", "2"):
+                return self.fade(r, int(target) - 1, delta)
+            if target == "3":
+                gain = max(0.0, min(4.0,
+                                    r["gain"] + delta * self.KNOB_FX_STEP * 2))
+                r["gain"] = gain
+                self.message = "%s GAIN %.2f" % (r["name"], gain)
+                return self.defer("gain %s" % r["name"],
+                                  "gain %s %s %.4f" % (self.focus, r["name"],
+                                                       gain))
+            return ["error no-knob EDIT %s" % target]
         return ["error no-knob %s" % page]
+
+    # One turn of a knob is one bar of slide. The encoder reports 1000 units
+    # per revolution (see KNOB_DB_STEP), and a bar per turn is the move this
+    # knob is for - the sample-accurate one is the jog's job on WAVE.
+    def slide(self, region, delta):
+        bar = self.transport.samples_per_bar() or self.transport.rate
+        pos = max(0, region["pos"] + int(delta * bar / 1000.0))
+        region["pos"] = pos
+        self.message = "%s AT %.2f" % (region["name"], pos / float(bar) + 1)
+        return self.defer("move %s" % region["name"],
+                          "move %s %s %d" % (self.focus, region["name"], pos))
+
+    def fade(self, region, which, delta):
+        key = "fade_in" if which == 0 else "fade_out"
+        # A fade is a length in samples, held as a fraction of the region so
+        # one turn means the same gesture on a two-bar take and a ten-bar one.
+        frac = region[key] / float(max(1, region["len"]))
+        frac = max(0.0, min(1.0, frac + delta * self.KNOB_FX_STEP))
+        region[key] = int(frac * region["len"])
+        self.message = "%s %s %.0f%%" % (
+            region["name"], "FADE IN" if which == 0 else "FADE OUT",
+            frac * 100)
+        verb = "fadein" if which == 0 else "fadeout"
+        return self.defer("%s %s" % (verb, region["name"]),
+                          "%s %s %s %d" % (verb, self.focus, region["name"],
+                                           region[key]))
+
+    def commit_gain(self, gain):
+        r = self.selected()
+        if r is None:
+            return ["wave gain %.2f" % gain]
+        r["gain"] = gain
+        return self.defer("gain %s" % r["name"],
+                          "gain %s %s %.4f" % (self.focus, r["name"], gain))
+
+    def commit_trim(self):
+        """Turn WAVE's two handles into one trim of the take.
+
+        Against the bounds the take had WHEN THE PAGE WAS OPENED, not against
+        what the last trim left: cumulative fractions can only ever eat
+        inward, so a handle pulled back out would never restore the audio it
+        just hid. Ardour clamps the result to what the source actually holds.
+        """
+        r = self.selected()
+        if r is None or self.wave_base is None:
+            return []
+        pos, length = self.wave_base
+        t0, t1 = self.wave_trim
+        start = pos + int(t0 * length)
+        end = pos + int(t1 * length)
+        if end - start < 1:
+            return []
+        return self.defer("trim %s" % r["name"],
+                          "trim %s %s %d %d" % (self.focus, r["name"],
+                                                start, end))
 
     # --- the jog, and the pages it points at -------------------------------
 
@@ -593,6 +987,10 @@ class Daw:
         self.wave_trim = t
         self.message = "TRIM %s %.3f" % ("START" if handle == 0 else "END",
                                          t[handle])
+        # ...and the audio follows the handle. "State only" was what these
+        # knobs did for as long as no region list existed to point them at:
+        # real, clamped, drawn, and touching nothing.
+        self.commit_trim()
         return ["trim %d %.4f" % (handle, t[handle])]
 
     def drill(self, verb):
@@ -620,7 +1018,20 @@ class Daw:
         # another's audio.
         self.wave_trim = [0.0, 1.0]
         self.wave_handle = 0
-        self.message = "WAVE %s" % self.focus
+        # WHICH take, and what its bounds are: the handles are fractions of
+        # this, for as long as the drill-in lasts. Selection comes from the
+        # published list, so opening WAVE on a lane with nothing recorded
+        # says so rather than presenting handles over nothing.
+        self.sel_region = None
+        self.resync_selection()
+        r = self.selected()
+        if r is None:
+            self.wave_base = None
+            self.message = "NO TAKE ON %s" % self.focus
+        else:
+            self.wave_base = (r["pos"], r["len"])
+            self.wave_gain = r["gain"]
+            self.message = "WAVE %s %s" % (self.focus, r["name"])
         return ["page WAVE"]
 
     def jog(self, delta):
@@ -658,6 +1069,13 @@ class Daw:
                 self.message = "NO TEMPO YET"
                 return ["error no-tempo"]
             self.cursor = max(0, self.cursor + delta * step)
+            if self.snap != "OFF":
+                # SNAP means the cursor lands ON the grid, not that it moves
+                # by a grid step from wherever it happened to be. Stepping
+                # alone kept whatever offset the cursor picked up from
+                # following a region's start, so a "bar" cut could land
+                # anywhere inside a bar.
+                self.cursor = (self.cursor // step) * step
             bar = self.transport.samples_per_bar()
             self.message = "CURSOR %.2f  SNAP %s" % (
                 self.cursor / float(bar) + 1, self.snap)
@@ -734,9 +1152,13 @@ class Daw:
             self.message = rest.upper()[:40] or "DISK FAILED"
         return line
 
-    def tick(self):
+    def tick(self, now=None):
         self.poll_disk()
-        return [self.perform(a) for a in self.engine.tick(self.playhead)]
+        self.poll_regions()
+        # Knob edits that have settled go out here, so one gesture is one
+        # region edit and one undo entry rather than dozens of each.
+        out = self.flush(now)
+        return out + [self.perform(a) for a in self.engine.tick(self.playhead)]
 
     # Fader position from dB. This was hardcoded to 0.8 for every strip,
     # so the readout moved and the fader graphic never did: the mixer
@@ -762,6 +1184,37 @@ class Daw:
     def lane_ui(self, lane):
         state = self.LANE_UI_STATE.get(lane.state, lane.state)
         return "dub" if (state == "rec" and lane.layer) else state
+
+    def edit_lanes(self, bar):
+        """The published regions, as the EDIT renderer's stacked lanes.
+
+        Only lanes that HOLD something, plus the focused one whether it does
+        or not. The renderer divides the body by the number of lanes, so
+        listing all five when one has been recorded would draw five slivers
+        and no waveform; the focused lane is always there because its tag is
+        how the page says which lane the verbs will act on.
+        """
+        out = []
+        for name in self.strips:
+            rows = self.regions.get(name, [])
+            if not rows and name != self.focus:
+                continue
+            out.append({
+                # Two characters is all the gutter has: LOOP1 -> L1, so the
+                # five lanes are told apart rather than all reading "LO".
+                "tag": (name[:1] + name[-1:]).upper(),
+                "sel": name == self.focus,
+                "regions": [{"name": r["name"], "start": r["pos"] / float(bar),
+                             "len": r["len"] / float(bar),
+                             "fade_in": r["fade_in"] / float(max(1, r["len"])),
+                             "fade_out": r["fade_out"] / float(max(1,
+                                                                  r["len"])),
+                             "gain": r["gain"],
+                             "sel": (name == self.focus and
+                                     r["name"] == self.sel_region)}
+                            for r in rows],
+            })
+        return out
 
     def ui_state(self):
         lanes = []
@@ -813,24 +1266,31 @@ class Daw:
                        "level_l": 0.0, "level_r": 0.0},
         }
         # THE PAGES THE JOG POINTS AT have to report where their cursor is, or
-        # turning the knob moves a number nobody can see. These carry the
-        # positions only; the REGIONS are the Lua side's to publish and are
-        # not wired yet, so EDIT draws its grid, its snap and its cursor over
-        # an empty timeline rather than over takes.
+        # turning the knob moves a number nobody can see - and now they carry
+        # the REGIONS too, straight from what the Lua side published.
+        #
+        # IN ARDOUR'S COORDINATES, not the MPC's. The playhead drawn here is
+        # Ardour's transport as published, not this process's own count of the
+        # emulator's elapsed milliseconds: the two free-run against each other
+        # by an unknown constant (loop-ops.lua ignores daw-ctl's positions for
+        # that reason), and a page that drew regions on one clock and its
+        # cursor on the other would cut in the wrong place while looking right.
         bar = self.transport.samples_per_bar() or 1
         st["edit"] = {
             "snap": self.snap,
             # The renderer's window and playhead are in BARS; the cursor is
             # kept in samples for the same reason the playhead is.
             "cursor": self.cursor / float(bar),
-            "playhead": self.playhead / float(bar),
+            "playhead": self.ardour_playhead / float(bar),
             "window": (max(0.0, self.cursor / float(bar) - 4.0),
                        max(8.0, self.cursor / float(bar) + 4.0)),
-            "lanes": [],
+            "lanes": self.edit_lanes(bar),
         }
+        sel = self.selected()
         st["wave"] = {
             "lane": self.focus,
-            "region": "-",
+            "region": sel["name"] if sel else "-",
+            "length": ("%.2f BARS" % (sel["len"] / float(bar))) if sel else "",
             "trim": tuple(self.wave_trim),
             "handle": self.wave_handle,
             "zoom": self.wave_zoom,
@@ -1243,7 +1703,10 @@ def self_test():
         d.command("page SONG")
         d.command("focus LOOP4")
         assert d.command("select") == ["page WAVE"]
-        assert d.page == "WAVE" and d.message == "WAVE LOOP4", d.message
+        assert d.page == "WAVE"
+        # Nothing has been published for LOOP4, so the page says so instead of
+        # presenting a pair of trim handles over no audio.
+        assert d.message == "NO TAKE ON LOOP4", d.message
         # Backing out returns to the page it was opened FROM, not a default -
         # a drill-in that always dropped you on MIX loses your place.
         assert d.command("select") == ["page SONG"]
@@ -1261,6 +1724,214 @@ def self_test():
         # BACK on a top-level page is a key with no job, not a fault.
         d.message = ""
         assert d.command("back") == [] and d.message == ""
+
+        # --- THE REGION CHANNEL ------------------------------------------
+        #
+        # The one missing piece the whole EDIT and WAVE column was blocked
+        # on. session-governor.lua publishes the playlist; this reads it,
+        # and every verb below addresses what it found BY NAME - which is
+        # the join, and the join is the thing that has shipped dead three
+        # times here. Both halves are exercised against a real file, in the
+        # format the governor actually writes.
+        regions_file = os.path.join(tmp, "daw-regions")
+        d.regions_path = regions_file
+        d.command("focus LOOP1")
+        spb = d.transport.samples_per_bar()
+
+        def publish(rows, transport=0, rate=None):
+            """Write one frame exactly as session-governor.lua's publish()."""
+            with open(regions_file, "w") as fh:
+                fh.write("# rate %d transport %d gen 1\n"
+                         % (rate or d.transport.rate, transport))
+                for track, name, pos, ln, fi, fo, gain in rows:
+                    fh.write("%s\t%s\t%d\t%d\t%d\t%d\t%.4f\n"
+                             % (track, name, pos, ln, fi, fo, gain))
+            # The stat-based poll must not be fooled by a same-second write.
+            d.regions_stamp = None
+            assert d.poll_regions(), "a changed file was not picked up"
+
+        # An EMPTY session publishes a header and no rows, and that is a
+        # different thing from no file at all: the page has to be able to say
+        # the lane is empty rather than draw handles over nothing.
+        publish([])
+        assert d.regions == {} and d.selected() is None
+        d.command("page EDIT")
+        assert d.command("split")[0].startswith("error no-region")
+        assert d.message == "NO REGION ON LOOP1", d.message
+
+        publish([("LOOP1", "LOOP1-1.1", 0, 4 * spb, 0, 0, 1.0),
+                 ("LOOP1", "LOOP1-1.1@1", 4 * spb, 4 * spb, 0, 0, 1.0),
+                 ("LOOP2", "LOOP2-1.1", 2 * spb, 3 * spb, 0, 0, 0.5)],
+                transport=6 * spb)
+        assert [r["name"] for r in d.lane_regions()] == \
+            ["LOOP1-1.1", "LOOP1-1.1@1"], d.lane_regions()
+        # The header is not decoration: the playhead EDIT draws is ARDOUR's,
+        # published with the regions, not this process's count of the MPC's
+        # elapsed milliseconds. They free-run against each other.
+        assert d.ui_state()["edit"]["playhead"] == 6.0, d.ui_state()["edit"]
+        # ...and the rate comes with them, because everything on the wire is
+        # samples and the two sides have to agree what one is worth.
+        publish([], rate=48000)
+        assert d.transport.rate == 48000
+        publish([("LOOP1", "LOOP1-1.1", 0, 4 * spb, 0, 0, 1.0),
+                 ("LOOP1", "LOOP1-1.1@1", 4 * spb, 4 * spb, 0, 0, 1.0)],
+                rate=d.RATE)
+        spb = d.transport.samples_per_bar()
+
+        # A published frame always leaves SOMETHING selected, so the first
+        # press of a region key is not spent choosing a starting point.
+        d.cursor = 0
+        d.resync_selection()
+        assert d.sel_region == "LOOP1-1.1", d.sel_region
+
+        # ...and the two keys that move it. The cursor FOLLOWS: the window is
+        # drawn around the cursor, so a selection it did not follow would be
+        # bright somewhere off screen and every verb would act out of sight.
+        assert d.command("region next") == ["region LOOP1-1.1@1"]
+        assert d.cursor == 4 * spb, "the cursor must follow the selection"
+        assert d.command("region next") == ["region LOOP1-1.1@1"], \
+            "the last region is the last region, not an error"
+        assert d.command("region prev") == ["region LOOP1-1.1"]
+        assert d.cursor == 0
+
+        # SPLIT cuts the selected region AT THE CURSOR, in Ardour's samples.
+        d.command("jog +2")                      # two bars in, snapped to bar
+        assert d.cursor == 2 * spb
+        mark = len(queued())
+        assert d.command("split") == ["split LOOP1 LOOP1-1.1 %d" % (2 * spb)]
+        assert queued()[mark:] == ["split LOOP1 LOOP1-1.1 %d" % (2 * spb)]
+        # A cut outside the region is refused rather than reported as done:
+        # Ardour accepts the call and does nothing, so the button would lie.
+        d.cursor = 40 * spb
+        assert d.command("split")[0].startswith("error cursor-outside")
+
+        # DUPLICATE - unbound on the panel until there was a region op to
+        # answer it with, which is what this is.
+        d.cursor = 9 * spb
+        assert d.command("duplicate") == \
+            ["duplicate LOOP1 LOOP1-1.1 %d" % (9 * spb)]
+
+        # ERASE on EDIT is the region; on the strips page it is the take.
+        # One key that undoes what the page in front of you does.
+        mark = len(queued())
+        assert d.command("erase") == ["remove LOOP1 LOOP1-1.1"]
+        assert d.page == "EDIT"
+        d.command("page LOOP")
+        d.command("erase")
+        assert "remove" not in " ".join(queued()[mark + 1:]), \
+            "ERASE on the strips page must not delete a region"
+        d.command("page EDIT")
+
+        # UNDO on EDIT pops the Lua side's inverse-op stack. It is NOT
+        # Ardour's undo - Session:undo is not bound in Lua on Ardour 8 or 9
+        # (measured), so there is no session history to pop.
+        mark = len(queued())
+        assert d.command("undo") == ["undo"]
+        assert queued()[mark:] == ["undo"], queued()
+        # ...and `undo LANE` still means the loop engine's take-level undo,
+        # which is a different stack and a different key.
+        d.command("undo LOOP2")
+        assert "clear LOOP2" in queued(), queued()
+
+        # THE KNOBS. All four are DEFERRED: the MK1 reports an absolute
+        # angle many times a second, so one gesture must be one region edit
+        # and one undo entry, not thirty of each.
+        publish([("LOOP1", "TAKE", 4 * spb, 4 * spb, 0, 0, 1.0)])
+        assert d.sel_region == "TAKE", d.sel_region
+        mark = len(queued())
+        for _ in range(5):
+            d.command("knob EDIT 0 +100")        # K1: slide
+        assert queued()[mark:] == [], "a knob edit went out per report"
+        d.tick(now=time.monotonic() + 1.0)
+        out = queued()[mark:]
+        assert len(out) == 1 and out[0].startswith("move LOOP1 TAKE "), out
+        assert int(out[0].split()[-1]) > 4 * spb, "the slide went nowhere"
+
+        mark = len(queued())
+        d.command("knob EDIT 1 +500")            # K2: fade in
+        d.command("knob EDIT 2 +500")            # K3: fade out
+        d.command("knob EDIT 3 -400")            # K4: region gain
+        d.tick(now=time.monotonic() + 1.0)
+        verbs = [a.split()[0] for a in queued()[mark:]]
+        assert sorted(verbs) == ["fadein", "fadeout", "gain"], verbs
+
+        # A PRESS FLUSHES WHAT A KNOB LEFT PENDING, so the queue carries the
+        # gestures in the order the hands made them - a split that overtook
+        # the slide before it would cut the region somewhere it no longer is.
+        mark = len(queued())
+        d.command("knob EDIT 0 +100")
+        d.cursor = 5 * spb
+        d.command("split")
+        out = queued()[mark:]
+        assert [a.split()[0] for a in out] == ["move", "split"], out
+
+        # --- WAVE, ON A REAL TAKE ----------------------------------------
+        publish([("LOOP1", "TAKE", 4 * spb, 8 * spb, 0, 0, 0.75)])
+        d.command("page LOOP")
+        d.command("select")
+        assert d.page == "WAVE" and d.sel_region == "TAKE"
+        assert d.message == "WAVE LOOP1 TAKE", d.message
+        # The gain knob starts where the REGION is, not at unity: a knob that
+        # reads 1.0 over a region at 0.75 jumps the moment it is touched.
+        assert d.wave_gain == 0.75, d.wave_gain
+        assert d.ui_state()["wave"]["region"] == "TAKE"
+
+        # K1/K2 and the jog now CUT, and the cut is against the take's
+        # bounds at drill-in, not against what the last trim left - so a
+        # handle pulled back out restores audio instead of eating further in.
+        mark = len(queued())
+        d.command("knob WAVE 0 +200")            # K1: start handle inward
+        d.tick(now=time.monotonic() + 1.0)
+        out = queued()[mark:]
+        assert len(out) == 1 and out[0].startswith("trim LOOP1 TAKE "), out
+        start, end = (int(x) for x in out[0].split()[3:5])
+        assert 4 * spb < start < end <= 12 * spb, (start, end)
+        first_start = start
+        d.command("knob WAVE 0 -100")            # back out again
+        d.tick(now=time.monotonic() + 1.0)
+        start2 = int(queued()[-1].split()[3])
+        assert start2 < first_start, "the handle could only eat inward"
+        assert start2 >= 4 * spb, "a trim escaped the take it belongs to"
+
+        # NORM. Ardour binds no normalize() to Lua, so the Lua side computes
+        # the factor from the region's peak - what goes on the wire is the
+        # verb, and the answer comes back as the region's gain.
+        mark = len(queued())
+        assert d.command("norm") == ["normalize LOOP1 TAKE"]
+        assert queued()[mark:] == ["normalize LOOP1 TAKE"]
+        publish([("LOOP1", "TAKE", 4 * spb, 8 * spb, 0, 0, 1.8891)])
+        assert abs(d.ui_state()["wave"]["gain"] - 1.8891) < 1e-4, \
+            "the normalised gain never came back to the knob"
+
+        # UNDO on WAVE is the same stack as EDIT's.
+        mark = len(queued())
+        assert d.command("undo") == ["undo"]
+        assert queued()[mark:] == ["undo"]
+        # BACK still leaves, and D8 is still not involved.
+        d.command("back")
+        assert d.page == "LOOP"
+
+        # THE PAGE DRAWS WHAT THE CHANNEL PUBLISHED. Positions, not just a
+        # count: this is what the EDIT renderer stacks into lanes.
+        d.command("focus LOOP1")
+        publish([("LOOP1", "A", 0, 2 * spb, spb // 4, spb // 8, 1.0),
+                 ("LOOP2", "B", 4 * spb, 2 * spb, 0, 0, 1.0)])
+        ed = d.ui_state()["edit"]
+        tags = [ln["tag"] for ln in ed["lanes"]]
+        assert tags == ["L1", "L2"], tags
+        assert ed["lanes"][0]["sel"] is True, "the focused lane is not marked"
+        reg = ed["lanes"][0]["regions"][0]
+        assert reg["start"] == 0.0 and reg["len"] == 2.0, reg
+        assert abs(reg["fade_in"] - 0.125) < 1e-9, reg
+        assert reg["sel"] is True, "the selected region is not marked"
+        # A lane nobody recorded on is not drawn - five slivers and no
+        # waveform is worse than one lane you can see - but the FOCUSED lane
+        # is always there, because its tag is how the page says where the
+        # verbs will land.
+        d.command("focus LOOP4")
+        tags = [ln["tag"] for ln in d.ui_state()["edit"]["lanes"]]
+        assert tags == ["L1", "L2", "L4"], tags
+        d.command("focus LOOP1")
 
         # Every page the jog names must be drawable with the state it
         # produces - the EDIT page took the renderer down once already by
@@ -1282,6 +1953,7 @@ def main():
     ap.add_argument("--state", default=STATE)
     ap.add_argument("--transport", default=TRANSPORT)
     ap.add_argument("--queue", default=QUEUE)
+    ap.add_argument("--regions", default=REGIONS)
     ap.add_argument("--osc-port", type=int, default=3819)
     ap.add_argument("--bpm", type=float, default=120.0)
     ap.add_argument("--self-test", action="store_true")
@@ -1290,7 +1962,7 @@ def main():
         return self_test()
 
     daw = Daw(osclib.Client(port=args.osc_port), bpm=args.bpm,
-              queue=args.queue)
+              queue=args.queue, regions=args.regions)
     daw.setup()
     if not os.path.exists(args.fifo):
         os.mkfifo(args.fifo)
