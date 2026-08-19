@@ -97,25 +97,6 @@ class TestPages(unittest.TestCase):
                 self.assertGreater(sum(1 for p in f.px if p), 100,
                                    "%s view nearly blank" % kind)
 
-    def test_pad_overlay_is_opaque(self):
-        """The overlay must cover the page, not blend with it.
-
-        A first version dimmed the page and drew the grid over it; both
-        layers landed on the same rows and it was illegible.
-        """
-        st = daw_ui.sample_state("LOOP")
-        st["pad_overlay"] = True
-        st["pads"] = {"held": "PAD MODE", "rows": ("REC",) * 4,
-                      "grid": [[1] * 4] * 4}
-        f = daw_ui.render(st)
-        # The lane columns of the LOOP page sit in this band; after the
-        # overlay only the overlay's own marks may remain.
-        band = [f.px[y * f.w + x]
-                for y in range(daw_ui.BODY_Y, daw_ui.BODY_Y + 4)
-                for x in range(200, 250)]
-        self.assertLessEqual(max(band), ui.NORMAL,
-                             "page content bleeds through the overlay")
-
 
 class TestNoCollisions(unittest.TestCase):
     """Nothing may draw into a band another element owns.

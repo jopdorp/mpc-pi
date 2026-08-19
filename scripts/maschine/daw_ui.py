@@ -803,69 +803,6 @@ def page_song(f, st):
     ])
 
 
-def draw_pad_overlay(f, st):
-    """The 4x4 pad map, drawn while a mode button is held.
-
-    Each pad mode has its own button (PAD MODE, MUTE, SOLO) and holding
-    it *is* the mode; releasing returns the pads to the MPC. While held
-    this map covers the page so the performer sees what the pads mean
-    before hitting one. The header names the held button and says what
-    release does, because a mode you cannot name is a mode you can get
-    lost in - and PIN is offered on the spot for when both hands are
-    needed elsewhere.
-
-    Columns are lanes, matching the four screen columns above and Akai's
-    own Clip-program convention, so "column = lane" is true on the pads,
-    on the screen and in the MPC idiom at once.
-    """
-    pads = st.get("pads", {})
-    rows = pads.get("rows", ("REC", "PLAY", "STOP", "CLEAR"))
-    grid = pads.get("grid", [[0] * COLS for _ in rows])
-    labels = pads.get("labels")
-
-    # Opaque, not translucent: a first attempt dimmed the page and drew
-    # the grid over it, and the two layers were illegible together. What
-    # makes this a peek is that it is momentary, not see-through.
-    f.fill(0, BTNBAR_H + 1, f.w, f.h - BTNBAR_H - 1, OFF)
-
-    held = pads.get("held", "PAD MODE")
-    f.text_inverted(3, HEADER_Y + 1, "HOLD " + held)
-    f.text_right(254, HEADER_Y + 1, "RELEASE = MPC PADS", MUTED)
-
-    gutter = 34
-    cell_w = (f.w - gutter - 4) // COLS
-    for r, label in enumerate(rows[:4]):
-        y = BODY_Y + 2 + r * 9
-        f.text(2, y, label[:5], MUTED)
-        for c in range(COLS):
-            x = gutter + c * cell_w
-            state = grid[r][c] if r < len(grid) and c < len(grid[r]) else 0
-            w = cell_w - 3
-            if state == 2:        # active now
-                f.fill(x, y, w, 7, BRIGHT)
-            elif state == 1:      # available
-                f.rect(x, y, w, 7, NORMAL)
-            else:                 # unavailable: a third shape, not just
-                f.hline(x, y + 6, w, DIM)      # a dimmer version of one
-            if labels:
-                txt = (labels[r][c] if r < len(labels)
-                       and c < len(labels[r]) else "")
-                if txt:
-                    f.text_center(x, w, y + 1, txt[:4],
-                                  OFF if state == 2 else
-                                  (NORMAL if state == 1 else DIM))
-
-    # The overlay is opaque, so it hides the page's message line - and
-    # the message line is where a refusal appears. Pressing REC with the
-    # transport stopped is refused for a good reason, and while the pad
-    # map is up the player is looking at exactly this rectangle, so
-    # swallowing the answer here makes a correct refusal read as a dead
-    # pad. Carry the message onto the overlay instead.
-    msg = st.get("message")
-    if msg:
-        f.text_center(0, f.w, ENCBAR_Y - 9, msg[:40], BRIGHT)
-
-
 # --- WAVE ------------------------------------------------------------
 
 
@@ -1226,10 +1163,14 @@ RENDERERS = {"EDIT": page_edit, "WAVE": page_wave, "LOOP": page_loop, "FX": page
 
 
 def render(st):
+    # NO PAD OVERLAY. There used to be a "pad_overlay" branch here drawing a
+    # 4x4 map of what the grid had become while a mode was held. Modes
+    # retarget the DISPLAY BUTTONS now and the pads are always the MPC's - on
+    # both surfaces, in every mode - so there is nothing for such a map to
+    # show, and no process anywhere set the key. It survived only because a
+    # test set it by hand, which made a dead branch look covered.
     f = Frame()
     RENDERERS[st["page"]](f, st)
-    if st.get("pad_overlay"):
-        draw_pad_overlay(f, st)
     return f
 
 
@@ -1256,15 +1197,6 @@ def sample_state(page):
          "phase": _bars[i % len(_bars)][3], "level": 0.55 - i * 0.1}
         for i, n in enumerate(_loops)
     ]
-    st["pads"] = {
-        "mode": "LOOP - COLUMN IS LANE",
-        "rows": ("REC", "PLAY", "STOP", "CLEAR"),
-        # 0 unavailable, 1 available, 2 active
-        "grid": [[1, 2, 1, 1],
-                 [2, 1, 2, 2],
-                 [1, 1, 1, 1],
-                 [0, 1, 0, 0]],
-    }
     import math as _m
     st["wave"] = {
         "lane": "GTR2", "region": "TAKE 3", "length": "2 BARS  192000",
