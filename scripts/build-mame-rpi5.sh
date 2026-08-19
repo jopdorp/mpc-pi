@@ -214,6 +214,27 @@ regenie_key=$(printf '%s|%s|%s|%s' \
     'SUBTARGET=mpc OSD=sdl NO_X11=1 NO_USE_PULSEAUDIO=1 NO_OPENGL=1 NO_USE_XINPUT=1' |
     sha256sum | cut -d' ' -f1)
 regenie_argument=()
+# A DESKTOP BUILD IN THE SAME CHECKOUT CLOBBERS THE GENERATED PROJECT.
+#
+# scripts/build-mame.sh runs genie for the HOST in this very tree, leaving
+# build/projects/.../mpc.make with "CXX = g++". The stamp below only tracks
+# toolchain/sysroot/flags, so it still matched and genie was skipped - and the
+# cross build then compiled every object correctly with the aarch64 compiler
+# and LINKED them with the host one:
+#
+#   /usr/bin/x86_64-linux-gnu-ld.bfd: version.o: Relocations in generic ELF (EM: 183)
+#
+# The failure lands twenty minutes in, at the link, which is what made it look
+# like a toolchain path problem rather than a stale makefile.
+#
+# So ask the generated makefile who it thinks the compiler is. If it is not
+# our cross compiler, regenerate regardless of the stamp.
+generated_make="$mame_source_dir/build/projects/sdl/mamempc/gmake-linux/mpc.make"
+if [[ -f "$generated_make" ]] &&
+   ! grep -qE "^CXX *= *.*aarch64" "$generated_make"; then
+    echo "generated project targets the host - forcing a genie regeneration"
+    rm -f "$mame_source_dir/build/.mpcpi-rpi5-genie-stamp"
+fi
 if [[ ! -d "$mame_source_dir/build/projects" ]] ||
         [[ ! -f "$regenie_stamp" ]] ||
         [[ "$(cat "$regenie_stamp" 2>/dev/null)" != "$regenie_key" ]]; then
