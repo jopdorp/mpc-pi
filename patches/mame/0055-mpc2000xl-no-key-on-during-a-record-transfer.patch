@@ -1,0 +1,98 @@
+mpc2000xl: the record transfer's key-on, and a real input monitor
+
+Bit 8 of the control register keys on m_cur_channel, and the firmware
+sets it during a record transfer with no preceding voice select, so it
+landed on whatever voice was selected last. When that picked 0x10 - the
+right-channel record voice - the voice was left playing the wave RAM the
+take was writing while still being a record destination.
+
+Measured on :speaker after a take, per channel, against an idle baseline
+of rms 78-89:
+
+    LEFT   peak  744   rms  131.6   baseline, silent
+    RIGHT  peak 8619   rms 1327.0   ~15x baseline, looping the take
+
+A rate error or an xrun degrades both channels alike; only a voice left
+running can be loud in one ear and silent in the other. The user heard it
+as a ring buffer repeating, and only ever after recording.
+
+Suppressing that key-on during a transfer makes takes record cleanly and
+land under the pads. It also, on its own, killed the input monitor - the
+accidental key-on was what had been making the input audible, which is
+not something to rely on. So record_capture() now mixes the input into
+the output deliberately, where it already reads it. Monitoring is a
+property of the sampler being armed, not of a voice that happens to be
+running.
+
+The record voices are also keyed off when a take ends, so nothing is left
+running across the boundary even if a key-on does slip through.
+
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -691,7 +691,24 @@
+ 
+ 	m_control = data;
+ 
+-	if (BIT(data, CONTROL_KEY_ON))
++	// BIT 8 IS NOT A KEY-ON WHILE A TAKE IS TRANSFERRING.
++	//
++	// The firmware sets it during a record transfer with NO preceding voice
++	// select (mov ah,1 / out dx,ax at 0x4965e), so it keyed on whatever voice
++	// was selected last - seen on ch 23, ch 12, ch 0 and ch 16 across runs.
++	// When the lottery picked 0x10, the RIGHT record voice was left playing
++	// the wave RAM the take was writing, while still being a record
++	// destination. Measured on :speaker after a take, against an idle
++	// baseline of rms 78-89: LEFT rms 131.6 (silent), RIGHT rms 1327.0,
++	// looping. Only a voice left running can be loud in one ear and silent in
++	// the other; a rate error or an xrun degrades both alike. With this
++	// suppressed, takes record cleanly and land under the pads correctly.
++	//
++	// It costs the input monitor, because that accidental key-on was also
++	// what made the input audible - so record_capture() now mixes the input
++	// into the output deliberately instead. Monitoring is a property of the
++	// sampler being armed, not of a voice that happens to be running.
++	if (BIT(data, CONTROL_KEY_ON) && !(m_rec_on && BIT(data, CONTROL_DMA_START)))
+ 	{
+ 		l7a1045_voice* const vptr = &m_voice[m_cur_channel];
+ 
+@@ -922,6 +939,13 @@
+ 			if (q > 32767) q = 32767;
+ 			if (q < -32768) q = -32768;
+ 
++			// MONITOR: the input has to be audible while the sampler is
++			// armed, which is how a player sets the level at all. The real
++			// machine does this on its analog path; here it is a deliberate
++			// mix, added before the voice loop so a voice playing over the
++			// top still sums normally.
++			stream.add_int(ch, j, q, 32768);
++
+ 			m_rec_ring[m_rec_wr & (REC_RING - 1)] = int16_t(q);
+ 			m_rec_wr++;
+ 			if (!m_dump_prefix.empty() && (m_dump_in.size() < 40u * 44100u * 2u))
+@@ -1062,6 +1086,26 @@
+ 	}
+ 	if (!on && m_rec_on)
+ 		dump_take();
++	// THE TAKE IS OVER: SILENCE THE VOICES IT KEYED ON.
++	//
++	// The firmware keys a voice on during a record transfer, and that
++	// key-on is what makes the input audible - suppressing it, which was
++	// the first attempt at this bug, killed monitoring outright. The fault
++	// is not the key-on but that nothing ever keys the voice off again: it
++	// is left running over the wave RAM the take just wrote, looping it.
++	//
++	// It is worse than a stuck note because the transfer programs voice 0
++	// and voice 0x10 as the two halves of a stereo take, so the voice left
++	// playing is a record destination as well - a Pi trace caught posR
++	// advancing at twice pos0 for exactly that reason. Measured on the
++	// desktop after a take, :speaker per channel against an idle baseline
++	// of rms 78-89: LEFT rms 131.6 (baseline, silent) and RIGHT rms 1327.0,
++	// about fifteen times baseline, looping. Only a voice left running can
++	// be loud in one ear and silent in the other; a rate error or an xrun
++	// degrades both alike.
++	if (!on && m_rec_on)
++		m_key &= ~((1U << 0) | (1U << REC_RIGHT_VOICE));
++
+ 	m_rec_on = on;
+ 	m_rec_left = left;
+ 	m_rec_right = right;

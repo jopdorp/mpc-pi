@@ -33,8 +33,10 @@ if [[ -n "$(git -C "$mame_source_dir" status --porcelain --untracked-files=no)" 
 fi
 
 flags_stamp="$mame_source_dir/build/.mpc-flags"
-flags_now="archopts=$mame_archopts lto=$mame_lto"
+flags_now="archopts=$mame_archopts lto=$mame_lto sources=$mame_sources"
+regenie_needed=0
 if [[ ! -f "$flags_stamp" || "$(cat "$flags_stamp" 2>/dev/null)" != "$flags_now" ]]; then
+    regenie_needed=1
     printf 'Build flags changed; clearing object tree for a clean rebuild\n'
     rm -rf "$mame_source_dir/build/linux_gcc/obj" "$mame_source_dir/build/linux_gcc/bin"
     mkdir -p "$mame_source_dir/build"
@@ -70,8 +72,27 @@ make_arguments=(
     USE_QTDEBUG=0
     DEBUG=0
     SYMBOLS=0
-    REGENIE=1
 )
+# REGENIE ONLY WHEN THE PROJECT ACTUALLY CHANGED.
+#
+# This was unconditional, and it is why every build was a full one. GENie
+# rewrites the project makefiles whenever it runs; make then sees every
+# object as older than the makefile that produced it and rebuilds all ~2500
+# of them. Measured on a one-line edit to a single device: 2500 objects with
+# REGENIE, 79 without - and the 79 are only there because the script
+# reverses the patch stack on exit, so re-applying it re-stamps the mtime of
+# every file the stack touches. Twenty minutes became about one.
+#
+# The project genuinely does need regenerating when the build configuration
+# changes - SOURCES, the subtarget, archopts, LTO - so that is exactly what
+# the stamp above now covers, SOURCES included. A missing project directory
+# also forces it, which is what makes the first build after a fresh
+# bootstrap correct.
+project_dir="$mame_source_dir/build/projects/sdl/mamempc/gmake-linux"
+if [[ "$regenie_needed" == 1 || ! -d "$project_dir" ]]; then
+    printf 'Regenerating the GENie project (configuration changed or first build)\n'
+    make_arguments+=(REGENIE=1)
+fi
 [[ -z "$mame_archopts" ]] || make_arguments+=(ARCHOPTS="$mame_archopts")
 [[ "$mame_lto" != 1 ]] || make_arguments+=(LTO=1)
 make -C "$mame_source_dir" "${make_arguments[@]}" -j"$mame_jobs"

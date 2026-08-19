@@ -1,0 +1,148 @@
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.h
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.h
+@@ -146,6 +146,12 @@
+ 	// a read, so it leaves no trace in memory - and the first few are the ones
+ 	// that decide whether a take runs at all, so log those and stop.
+ 	u32             m_rec_reads = 0;
++	// TEMPORARY DIAGNOSTICS - MAME_MPC_SAMPLE_DUMP. Not for release.
++	std::string     m_dump_prefix;
++	std::vector<int16_t> m_dump_in;
++	u32             m_idle_peak = 0;
++	u32             m_idle_count = 0;
++	void dump_take();
+ 	void update_adc_drq();
+ 	void record_capture(sound_stream &stream);
+ 	void warm_capture_input(sound_stream &stream);
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -235,6 +235,8 @@
+ 	// the one question worth answering cheaply is "did the audio get as
+ 	// far as the ADC ring, and did the guest come and take it".
+ 	m_rec_debug = (std::getenv("MAME_MPC_SAMPLE_DEBUG") != nullptr);
++	if (char const *const dump = std::getenv("MAME_MPC_SAMPLE_DUMP"))
++		m_dump_prefix = dump;
+ 
+ 	m_dma_timer = timer_alloc(FUNC(l7a1045_sound_device::dma_timer_callback), this);
+ 
+@@ -680,6 +682,13 @@
+ 		osd_printf_info("mpc2000xl sampler: control %04x -> %04x (ch %d, rec=%d)\n",
+ 				m_control, data, m_cur_channel, m_rec_on ? 1 : 0);
+ 
++	if (m_rec_debug && BIT(data, CONTROL_KEY_ON))
++		osd_printf_info("mpc2000xl sampler: KEYON ch %d data %04x prev %04x rec=%d dma=%d key=%08x start %08x end %08x step %04x\n",
++				m_cur_channel, data, m_control, m_rec_on ? 1 : 0,
++				BIT(m_control, CONTROL_DMA_START), m_key,
++				m_voice[m_cur_channel].start, m_voice[m_cur_channel].end,
++				m_voice[m_cur_channel].step);
++
+ 	m_control = data;
+ 
+ 	if (BIT(data, CONTROL_KEY_ON))
+@@ -876,7 +885,27 @@
+ 	for (int j = 0; j < stream.samples(); j++)
+ 	{
+ 		for (int ch = 0; ch < 2; ch++)
+-			stream.get(ch, j);
++		{
++			const float v = stream.get(ch, j);
++			if (m_rec_debug)
++			{
++				const u32 mag = u32(std::abs(v) * 32767.0f);
++				if (mag > m_idle_peak)
++					m_idle_peak = mag;
++			}
++		}
++	}
++
++	if (m_rec_debug)
++	{
++		m_idle_count += stream.samples();
++		if (m_idle_count >= u32(m_sample_rate))
++		{
++			osd_printf_info("mpc2000xl sampler: idle in_peak=%u key=%08x rd=%u wr=%u\n",
++					m_idle_peak, m_key, m_rec_rd, m_rec_wr);
++			m_idle_count = 0;
++			m_idle_peak = 0;
++		}
+ 	}
+ }
+ 
+@@ -895,6 +924,8 @@
+ 
+ 			m_rec_ring[m_rec_wr & (REC_RING - 1)] = int16_t(q);
+ 			m_rec_wr++;
++			if (!m_dump_prefix.empty() && (m_dump_in.size() < 40u * 44100u * 2u))
++				m_dump_in.push_back(int16_t(q));
+ 			// Overrun drops the OLDEST. A sampler that keeps stale audio
+ 			// and discards what is being played into it now is worse than
+ 			// one that glitches.
+@@ -932,6 +963,9 @@
+ 				m_rec_peak, m_rec_wr - m_rec_rd, (unsigned long long)m_adc_words,
+ 				(unsigned long long)m_wave_words, m_control,
+ 				m_voice[0].pos, m_voice[REC_RIGHT_VOICE].pos);
++		osd_printf_info("mpc2000xl sampler:   key=%08x v0(start %08x end %08x step %04x) vR(start %08x end %08x step %04x)\n",
++				m_key, m_voice[0].start, m_voice[0].end, m_voice[0].step,
++				m_voice[REC_RIGHT_VOICE].start, m_voice[REC_RIGHT_VOICE].end, m_voice[REC_RIGHT_VOICE].step);
+ 		m_rec_peak = 0;
+ 	}
+ }
+@@ -965,6 +999,50 @@
+ 	return uint16_t(m_rec_last);
+ }
+ 
++// TEMPORARY DIAGNOSTIC. Writes what the take actually captured and what
++// actually landed in wave RAM, so "garbage" can be measured instead of heard.
++void l7a1045_sound_device::dump_take()
++{
++	if (m_dump_prefix.empty())
++		return;
++
++	const int channels = (m_rec_left && m_rec_right) ? 2 : 1;
++	osd_printf_info("mpc2000xl sampler: DUMP ch=%d wave_words=%llu adc_words=%llu key=%08x captured=%u v0(start %08x end %08x pos %u step %04x) vR(start %08x end %08x pos %u step %04x)\n",
++			channels, (unsigned long long)m_wave_words, (unsigned long long)m_adc_words,
++			m_key, unsigned(m_dump_in.size()),
++			m_voice[0].start, m_voice[0].end, m_voice[0].pos, m_voice[0].step,
++			m_voice[REC_RIGHT_VOICE].start, m_voice[REC_RIGHT_VOICE].end,
++			m_voice[REC_RIGHT_VOICE].pos, m_voice[REC_RIGHT_VOICE].step);
++
++	std::string const in_path = m_dump_prefix + "-in.raw";
++	if (FILE *const f = std::fopen(in_path.c_str(), "wb"))
++	{
++		std::fwrite(m_dump_in.data(), 2, m_dump_in.size(), f);
++		std::fclose(f);
++	}
++
++	char const *const names[2] = { "-wave0.raw", "-waveR.raw" };
++	const int voices[2] = { 0, REC_RIGHT_VOICE };
++	for (int i = 0; i < channels; i++)
++	{
++		const l7a1045_voice &v = m_voice[voices[i]];
++		u64 words = (m_wave_words / channels) + 8192;
++		if (words > (4ull << 20))
++			words = 4ull << 20;
++		std::string const path = m_dump_prefix + names[i];
++		FILE *const f = std::fopen(path.c_str(), "wb");
++		if (!f)
++			continue;
++		for (u64 w = 0; w < words; w++)
++		{
++			const uint16_t sample = m_cache.read_word((v.start << 1) + (w << 1));
++			std::fwrite(&sample, 2, 1, f);
++		}
++		std::fclose(f);
++	}
++	m_dump_in.clear();
++}
++
+ void l7a1045_sound_device::set_record_enable(bool on, bool left, bool right)
+ {
+ 	if (on == m_rec_on && left == m_rec_left && right == m_rec_right)
+@@ -982,6 +1060,8 @@
+ 		m_rec_report_at = 0;
+ 		m_rec_reads = 0;
+ 	}
++	if (!on && m_rec_on)
++		dump_take();
+ 	m_rec_on = on;
+ 	m_rec_left = left;
+ 	m_rec_right = right;
