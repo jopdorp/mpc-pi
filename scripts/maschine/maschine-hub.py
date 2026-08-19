@@ -544,6 +544,13 @@ class Router:
     def pad(self, index, velocity):
         """Pad 0..15, velocity 0..127 (0 = release)."""
         if self.shift:
+            # PRESS ONLY. This fired on the RELEASE too - velocity 0 is a pad
+            # event like any other - so one SHIFT+pad sent the MPC key TWICE:
+            # once on the way down and again on the way up. The screen jumped
+            # to the target and then straight back off it, which reads as the
+            # navigation not sticking rather than as a double press.
+            if not velocity:
+                return []
             target = control_map.SHIFT_PADS.get(index + 1)
             if target:
                 kind = "midi" if target.startswith("mpc:") else "cmd"
@@ -770,6 +777,16 @@ def self_test():
                     _m, _d["button"])
         assert _d["pads"] == "mpc", \
             "mode %s steals the pads; they belong to the MPC" % _m
+
+    # SHIFT+pad must fire ONCE, on the press. Sending it on the release too
+    # navigated to the target screen and immediately back off it.
+    _rs = Router()
+    _rs.shift = True
+    _first = next(iter(control_map.SHIFT_PADS))
+    assert _rs.pad(_first - 1, 100), "SHIFT+pad must act on the press"
+    assert _rs.pad(_first - 1, 0) == [], \
+        "SHIFT+pad must do nothing on the release - it double-pressed the key"
+    _rs.shift = False
 
     # THE PADS STAY THE MPC'S, whatever mode is held and whichever surface is
     # up. This is the property the whole mixer redesign exists to protect.
