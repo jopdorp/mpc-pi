@@ -1,6 +1,6 @@
 --- a/src/devices/sound/l7a1045_l6028_dsp_a.h
 +++ b/src/devices/sound/l7a1045_l6028_dsp_a.h
-@@ -36,6 +36,13 @@
+@@ -36,6 +36,35 @@
  	uint16_t dma_r16_cb();
  	void dma_w16_cb(uint16_t data);
  
@@ -11,10 +11,39 @@
 +	void set_record_enable(bool on, bool left, bool right);
 +	bool recording() const { return m_rec_on; }
 +
++	// THE ADC LIVES ON DMA CHANNEL 2, NOT CHANNEL 3.
++	//
++	// This is the correction that made sampling work. The first attempt
++	// served captured audio from dma_r16_cb, channel 3, on the reasoning
++	// that channel 3 is already how sample words move between CPU and
++	// wave RAM. Disassembling the v1.20 sampling module says otherwise
++	// (docs/mpc2000xl-sampling-protocol.md):
++	//
++	//   * channel 2, mode 0x55 - single, auto-init, 16-bit, I/O->MEMORY -
++	//     is programmed to a 2KiB ring at linear 0x7F000. That is the ADC
++	//     feed, and the SAMPLE screen's level meter is literally a scan of
++	//     that ring bounded by channel 2's current-address register.
++	//   * channel 3, mode 0x59 - MEMORY->I/O - then pushes blocks of that
++	//     same buffer into wave RAM. During sampling channel 3 runs in the
++	//     WRITE direction, so dma_r16_cb is not even called; hijacking it
++	//     could only corrupt sample LOADING.
++	//
++	// So the ADC needs its own DRQ and its own read callback, and the
++	// machine wires them to DMA channel 2.
++	uint16_t adc_dma_r16_cb();
++	auto adc_drq_handler_cb() { return m_adc_drq_handler.bind(); }
++
  protected:
  	// device-level overrides
  	virtual void device_start() override ATTR_COLD;
-@@ -85,6 +92,18 @@
+@@ -79,12 +108,44 @@
+ 	};
+ 
+ 	devcb_write_line m_drq_handler;
++	devcb_write_line m_adc_drq_handler;
+ 	sound_stream    *m_stream;
+ 	l7a1045_voice   m_voice[NUM_VOICES];
+ 	uint32_t        m_key;
  	uint16_t        m_control;
  	emu_timer       *m_dma_timer;
  
@@ -22,6 +51,14 @@
 +	// buffer: if nothing drains it the OLDEST audio is what should be
 +	// lost, and an emulator must never grow memory without bound because
 +	// a guest forgot to stop recording.
++	//
++	// Words are INTERLEAVED exactly as the firmware expects to find them
++	// in the 0x7F000 ring: one word per enabled channel, L before R. The
++	// meter routine reads two consecutive words per frame when WADCSN has
++	// both channels on and one word per frame otherwise, and it forces an
++	// even word index in the stereo case - so summing L+R to mono here,
++	// as the first attempt did, would have made the stereo meter read
++	// alternate samples of a mono signal as if they were two channels.
 +	static constexpr u32 REC_RING = 1 << 16;
 +	std::unique_ptr<int16_t[]> m_rec_ring;
 +	u32             m_rec_wr = 0;
@@ -29,13 +66,32 @@
 +	bool            m_rec_on = false;
 +	bool            m_rec_left = true;
 +	bool            m_rec_right = true;
++	bool            m_adc_drq = false;
++	int16_t         m_rec_last = 0;
++	// Diagnostics for MAME_MPC_SAMPLE_DEBUG; see set_record_enable.
++	bool            m_rec_debug = false;
++	u64             m_adc_words = 0;
++	u32             m_rec_peak = 0;
++	u64             m_rec_report_at = 0;
++	void update_adc_drq();
++	void record_capture(sound_stream &stream);
++	void arm_dma_timer();
++	u64             m_wave_words = 0;
 +
  	uint8_t m_cur_channel;
  	uint8_t m_cur_register;
  	double  m_sample_rate;
 --- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
 +++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
-@@ -219,7 +219,11 @@
+@@ -182,6 +182,7 @@
+ 	  device_sound_interface(mconfig, *this),
+ 	  device_memory_interface(mconfig, *this),
+ 	  m_drq_handler(*this),
++	  m_adc_drq_handler(*this),
+ 	  m_stream(nullptr),
+ 	  m_key(0),
+ 	  m_control(0),
+@@ -219,7 +220,16 @@
  	// Allocate the stream
  	m_sample_rate = clock() / 768.0f;
  	m_dsp_window_enable = (std::getenv("MAME_MPC_DSP_WINDOW") != nullptr);
@@ -45,26 +101,148 @@
 +	// worked whatever the firmware wrote to WADCSN.
 +	m_stream = stream_alloc(2, 10, m_sample_rate);
 +	m_rec_ring = std::make_unique<int16_t[]>(REC_RING);
++	// Opt-in tracing. Sampling cannot be verified from the outside - the
++	// level meter is drawn by the guest from a buffer only DMA fills - so
++	// the one question worth answering cheaply is "did the audio get as
++	// far as the ADC ring, and did the guest come and take it".
++	m_rec_debug = (std::getenv("MAME_MPC_SAMPLE_DEBUG") != nullptr);
  
  	m_dma_timer = timer_alloc(FUNC(l7a1045_sound_device::dma_timer_callback), this);
  
-@@ -277,6 +281,32 @@
+@@ -277,6 +287,11 @@
  
  void l7a1045_sound_device::sound_stream_update(sound_stream &stream)
  {
 +	// Capture BEFORE the voice loop: the machine can sample while it
 +	// plays, and a voice may be reading the very RAM recording will fill.
 +	if (m_rec_on)
-+	{
-+		for (int j = 0; j < stream.samples(); j++)
-+		{
-+			sound_stream::sample_t v = 0;
-+			int n = 0;
-+			if (m_rec_left)  { v += stream.get(0, j); n++; }
-+			if (m_rec_right) { v += stream.get(1, j); n++; }
-+			if (n == 2) v *= 0.5f;   // sum without letting two hot channels clip
++		record_capture(stream);
 +
-+			int32_t q = int32_t(v * 32767.0f);
+ 	for (int i = 0; i < NUM_VOICES; i++)
+ 	{
+ 		if (m_key & (1 << i))
+@@ -623,26 +638,61 @@
+ 		LOGMASKED(LOG_KEYON, "      raw 6 %012llx 7 %012llx\n", m_regs[6][m_cur_channel], m_regs[7][m_cur_channel]);
+ 	}
+ 
+-	if (BIT(m_control, CONTROL_DMA_START))
++	arm_dma_timer();
++}
++
++// WHILE RECORDING, THIS DMA IS THE AUDIO CLOCK, AND IT MUST RUN AT IT.
++//
++// This is what made a take end the instant it started. DMA channel 3 moves the
++// staged ADC block from RAM into wave RAM through dma_w16_cb, and dma_w16_cb
++// advances m_voice[0].pos - which is exactly the counter the firmware polls to
++// decide the take is long enough (0x49668 reads voice 0's position registers
++// through I/O 0x84/0x86 and compares them against the target length held at
++// ds:0x8bc2). So this DRQ rate IS the recording speed.
++//
++// Free-running, the period is 64 clock ticks: 33.8688MHz/64 = 529kHz, twelve
++// times too fast. With MAME_MPC_DSP_DMA_TURBO=8, which the appliance sets, it
++// is 4.23MHz - ninety-six times too fast, so a five-second take reaches its
++// target length in fifty milliseconds. The machine jumps straight to "name the
++// file" and the recording is empty.
++//
++// Turbo is right for LOADING, which is what it was added for: a sample coming
++// off disk has no natural rate and the firmware only waits for terminal count,
++// so finishing sooner is a pure win. Recording is the opposite - the words
++// arrive in real time and the transfer must not outrun them.
++//
++// One wave-RAM word per captured word, so the period is the capture rate: the
++// sample rate times the number of enabled channels, which is exactly what
++// record_capture() pushes into the ring.
++void l7a1045_sound_device::arm_dma_timer()
++{
++	if (!BIT(m_control, CONTROL_DMA_START))
+ 	{
+-		// 8x the sample period. On real hardware this spreads DMA so it does
+-		// not monopolise the bus; in emulation it only makes the firmware
+-		// wait. MAME_MPC_DSP_DMA_TURBO shortens the interval so transfers
+-		// complete sooner and terminal count arrives earlier. This changes
+-		// machine timing deliberately and is not accuracy-preserving.
+-		int divider = 64;
+-		if (char const *const turbo = std::getenv("MAME_MPC_DSP_DMA_TURBO"))
+-		{
+-			const int requested = std::atoi(turbo);
+-			divider = ((requested >= 1) && (requested <= 64)) ? requested : 4;
+-		}
+-		const auto time = attotime::from_ticks(divider, clock());
++		m_dma_timer->adjust(attotime::never);
++		return;
++	}
++
++	if (m_rec_on)
++	{
++		const int channels = (m_rec_left && m_rec_right) ? 2 : 1;
++		const auto time = attotime::from_hz(m_sample_rate * channels);
+ 		m_dma_timer->adjust(time, 0, time);
++		return;
+ 	}
+-	else
++
++	// 8x the sample period. On real hardware this spreads DMA so it does
++	// not monopolise the bus; in emulation it only makes the firmware
++	// wait. MAME_MPC_DSP_DMA_TURBO shortens the interval so transfers
++	// complete sooner and terminal count arrives earlier. This changes
++	// machine timing deliberately and is not accuracy-preserving.
++	int divider = 64;
++	if (char const *const turbo = std::getenv("MAME_MPC_DSP_DMA_TURBO"))
+ 	{
+-		m_dma_timer->adjust(attotime::never);
++		const int requested = std::atoi(turbo);
++		divider = ((requested >= 1) && (requested <= 64)) ? requested : 4;
+ 	}
++	const auto time = attotime::from_ticks(divider, clock());
++	m_dma_timer->adjust(time, 0, time);
+ }
+ 
+ void l7a1045_sound_device::atomic_w(uint16_t data)
+@@ -686,9 +736,140 @@
+ 	}
+ 
+ 	m_voice[0].pos++;
++	m_wave_words++;
+ }
+ 
+ TIMER_CALLBACK_MEMBER(l7a1045_sound_device::dma_timer_callback)
+ {
+ 	m_drq_handler(ASSERT_LINE);
+ }
++
++// DRQ IS LEVEL, NOT A PACED PULSE.
++//
++// The obvious alternative was a timer ticking at the ADC rate, mirroring
++// m_dma_timer. It is wrong here: the ring is filled in blocks by the sound
++// stream and drained one word per DMA cycle, so a free-running timer and
++// the block writer drift apart and the reader starves at every block
++// boundary - audible as a chopped recording and a flickering meter. Holding
++// DRQ while the ring has data makes the transfer self-pacing: the DMAC takes
++// exactly as many words as the stream produced, no faster.
++//
++// Safe to call from sound_stream_update: device streams are generated by
++// sound_manager::streams_update() on the EMULATION thread (only the speaker
++// effects chain runs on m_effects_thread), so this is an ordinary
++// device-to-device line change on the emulated timeline.
++void l7a1045_sound_device::update_adc_drq()
++{
++	const bool want = m_rec_on && (m_rec_rd != m_rec_wr);
++	if (want == m_adc_drq)
++		return;
++	m_adc_drq = want;
++	m_adc_drq_handler(want ? ASSERT_LINE : CLEAR_LINE);
++}
++
++void l7a1045_sound_device::record_capture(sound_stream &stream)
++{
++	for (int j = 0; j < stream.samples(); j++)
++	{
++		for (int ch = 0; ch < 2; ch++)
++		{
++			if (ch == 0 ? !m_rec_left : !m_rec_right)
++				continue;
++
++			int32_t q = int32_t(stream.get(ch, j) * 32767.0f);
 +			if (q > 32767) q = 32767;
 +			if (q < -32768) q = -32768;
 +
@@ -75,51 +253,92 @@
 +			// one that glitches.
 +			if (m_rec_wr - m_rec_rd > REC_RING)
 +				m_rec_rd = m_rec_wr - REC_RING;
++
++			if (m_rec_debug)
++			{
++				const u32 mag = u32(q < 0 ? -q : q);
++				if (mag > m_rec_peak)
++					m_rec_peak = mag;
++			}
 +		}
 +	}
 +
- 	for (int i = 0; i < NUM_VOICES; i++)
- 	{
- 		if (m_key & (1 << i))
-@@ -657,6 +687,19 @@
- 
- 	m_drq_handler(CLEAR_LINE);
- 
-+	// WHILE RECORDING THIS CHANNEL CARRIES THE ADC, NOT WAVE RAM.
-+	// DMA channel 3 is already how sample data moves between CPU and this
-+	// device (mpc2000.cpp in_io16r_cb<3>); on real hardware sampling is
-+	// the same transfer with the words coming from the ADC behind the
-+	// FPGA. Silence on an empty ring rather than stalling: a DMA that
-+	// never completes hangs the guest, a gap in a take does not.
-+	if (m_rec_on)
-+	{
-+		if (m_rec_rd == m_rec_wr)
-+			return 0;
-+		return uint16_t(m_rec_ring[m_rec_rd++ & (REC_RING - 1)]);
-+	}
++	update_adc_drq();
 +
- 	m_voice[0].pos++;
- 	if (m_voice[0].sample_type == 1)
- 	{
-@@ -688,6 +731,18 @@
- 	m_voice[0].pos++;
- }
- 
++	if (m_rec_debug && m_rec_wr >= m_rec_report_at)
++	{
++		// Once a second of captured audio, not once a block: this exists to
++		// answer a yes/no question, not to flood the journal.
++		m_rec_report_at = m_rec_wr + u32(m_sample_rate);
++		// adc_words is DMA channel 2, the ADC filling the guest's ring;
++		// wave_words is channel 3, the same block going on into wave RAM and
++		// advancing the position the firmware times the take by. Both should
++		// climb at the capture rate. wave_words racing ahead is the signature
++		// of the instant-finish bug that arm_dma_timer() exists to prevent.
++		osd_printf_info("mpc2000xl sampler: rec=%d L=%d R=%d in_peak=%u ring_depth=%u adc_words=%llu wave_words=%llu pos=%u\n",
++				m_rec_on ? 1 : 0, m_rec_left ? 1 : 0, m_rec_right ? 1 : 0,
++				m_rec_peak, m_rec_wr - m_rec_rd, (unsigned long long)m_adc_words,
++				(unsigned long long)m_wave_words, m_voice[0].pos);
++		m_rec_peak = 0;
++	}
++}
++
++// DMA channel 2: one ADC word per cycle, straight into the guest's 0x7F000
++// ring.
++//
++// AN EMPTY RING WITHHOLDS DATA; IT DOES NOT FABRICATE SILENCE. The two failure
++// modes here pull in opposite directions and the choice matters:
++//
++//   * hand over a zero whenever the ring is empty and the transfer runs to
++//     completion at bus speed on audio that never arrived - which is how a
++//     recording finishes before it starts;
++//   * never complete the transfer and the guest hangs waiting for it.
++//
++// Level-triggered DRQ resolves both without choosing between them. update_adc_drq()
++// drops the request the moment the ring drains, so the DMAC simply stops
++// asking until record_capture() puts more audio in, and it never has to be
++// told a lie. The transfer then advances at exactly the rate audio arrives.
++//
++// The held last value below is therefore unreachable in normal operation. It
++// is kept for the case where the DMAC reads anyway - a flat spot rather than
++// a click, and never a zero that could be mistaken for real silence.
++uint16_t l7a1045_sound_device::adc_dma_r16_cb()
++{
++	if (m_rec_rd != m_rec_wr)
++		m_rec_last = m_rec_ring[m_rec_rd++ & (REC_RING - 1)];
++
++	m_adc_words++;
++	update_adc_drq();
++	return uint16_t(m_rec_last);
++}
++
 +void l7a1045_sound_device::set_record_enable(bool on, bool left, bool right)
 +{
 +	if (on == m_rec_on && left == m_rec_left && right == m_rec_right)
 +		return;
 +	m_stream->update();   // do not retroactively capture this block
 +	if (on && !m_rec_on)
++	{
 +		m_rec_rd = m_rec_wr = 0;   // a fresh take, not the tail of the last
++		m_rec_last = 0;
++		m_adc_words = 0;
++		m_wave_words = 0;
++		m_rec_peak = 0;
++		m_rec_report_at = 0;
++	}
 +	m_rec_on = on;
 +	m_rec_left = left;
 +	m_rec_right = right;
-+}
++	update_adc_drq();
++	// The DMA period depends on whether we are recording and on how many
++	// channels are enabled, so a transfer that is already running has to be
++	// re-timed here, not only when the guest next writes the control register.
++	arm_dma_timer();
 +
- TIMER_CALLBACK_MEMBER(l7a1045_sound_device::dma_timer_callback)
- {
- 	m_drq_handler(ASSERT_LINE);
++	if (m_rec_debug)
++		osd_printf_info("mpc2000xl sampler: set_record_enable on=%d L=%d R=%d\n",
++				on ? 1 : 0, left ? 1 : 0, right ? 1 : 0);
++}
 --- a/src/mame/akai/mpc2000.cpp
 +++ b/src/mame/akai/mpc2000.cpp
 @@ -84,6 +84,7 @@
@@ -138,7 +357,26 @@
  #if ENABLE_FLASH
  	required_device_array<intel_28f016sa_16bit_device, 8> m_flash;
  #endif
-@@ -519,6 +521,19 @@
+@@ -228,6 +230,7 @@
+ 	int m_fdc_ata, m_fdc_irq, m_fdc_drq, m_ata_irq, m_ata_drq;
+ 
+ 	uint8_t m_wadcsn;
++	bool m_sample_debug = false;
+ 	uint16_t m_lcdx[2];
+ 	uint8_t m_lcdy[2], m_lcdcmd[2];
+ 	uint16_t m_vram[256*64];
+@@ -268,6 +271,10 @@
+ 	m_panel_txd_timer = timer_alloc(FUNC(mpc2000_state::panel_txd_sync), this);
+ 	m_fast_pad_timer = timer_alloc(FUNC(mpc2000_state::fast_pad_byte_tick), this);
+ 	m_fast_pad_enabled = bool(osd_getenv("MAME_MPC_MIDI_INTERNAL_PADS"));
++	// Traces every WADCSN write. Sampling is gated by a register the
++	// firmware computes at runtime, so the only way to know what it
++	// really asks for - analog vs S/PDIF, which channels - is to watch it.
++	m_sample_debug = bool(osd_getenv("MAME_MPC_SAMPLE_DEBUG"));
+ 	if (char const *const name = osd_getenv("MAME_MPC_VELOCITY_CURVE"))
+ 		for (unsigned i = 0; i < std::size(s_velocity_curve_names); i++)
+ 			if (!std::strcmp(name, s_velocity_curve_names[i]))
+@@ -519,6 +526,58 @@
  void mpc2000_state::wadcn_w(uint8_t data)
  {
  	m_wadcsn = data;
@@ -146,19 +384,74 @@
 +	// WADCSN NOW DRIVES THE SAMPLER. It was a read-back stub: writes were
 +	// stored and nothing happened, so the SAMPLE screen ran and recorded
 +	// nothing. Bits 7/6 enable right/left input, bit 3 disables analog.
++	//
 +	// Decoded by BIT, not by value: the v1.20 ROM computes its start value
 +	// at runtime and contains no constant start byte (see
-+	// docs/mpc2000xl-sampling-protocol.md). The stop constants it does
-+	// write, 0x1A/0x1B, both have 7 and 6 clear - so "a channel is
-+	// enabled" is already the firmware's own way of saying "recording".
-+	const bool left  = BIT(data, 6);
-+	const bool right = BIT(data, 7);
-+	const bool analog_ok = !BIT(data, 3);
-+	m_dsp->set_record_enable((left || right) && analog_ok, left, right);
++	// docs/mpc2000xl-sampling-protocol.md). Verified against the ROM rather
++	// than assumed - the sampling module's start path at 0x49150 does
++	//     ax = shadow; and al,0x3b; si = ax | (0x40|0x80|0xC0); out 0xC0,al
++	// so the enable write really does carry bits 6/7 set and bit 3 clear,
++	// and the stop path at 0x491bc does `and al,0x3b; or al,0x08` - bits
++	// 7/6 clear, bit 3 set. "A channel is enabled and analog is not
++	// disabled" is the firmware's own way of saying "converting".
++	const bool left    = BIT(data, 6);
++	const bool right   = BIT(data, 7);
++	const bool digital = BIT(data, 2);          // S/PDIF selected
++	const bool analog  = (left || right) && !BIT(data, 3);
++
++	// DIGITAL IS A RECORD SOURCE TOO. This gate was analog-only -
++	// (left || right) && !BIT(data, 3) - which is exactly inverted for
++	// S/PDIF. The firmware's digital path at 0x4915e does
++	//
++	//     ax = shadow; and al,0x1f; or al,0x0c
++	//
++	// setting bit 3 (analog front end disabled) AND bit 2 (S/PDIF on) in
++	// the same instruction, and the final enable at 0x49198 keeps both.
++	// So "analog is disabled" was switching capture OFF at precisely the
++	// moment the user asked for the digital input: analog recorded and
++	// digital silently did not.
++	//
++	// One capture path serves both, because there is only one to serve
++	// them with - the appliance has a single stereo input from PipeWire
++	// and no separate S/PDIF receiver to model. Selecting the digital
++	// input therefore means "record that same stream".
++	bool cap_left = left, cap_right = right;
++	if (digital && !left && !right)
++	{
++		// Defensive, and expected never to fire: the v1.20 ROM ORs the
++		// same L/R enables in on the digital path too (0x4916e: or si,di,
++		// with di = 0x40/0x80/0xC0 chosen from ds:0xd7cd). But a digital
++		// take that recorded silence because no channel was selected
++		// would be a worse failure than assuming stereo.
++		cap_left = cap_right = true;
++	}
++
++	m_dsp->set_record_enable(analog || digital, cap_left, cap_right);
++
++	if (m_sample_debug)
++		osd_printf_info("mpc2000xl wadcsn: %02x  L=%d R=%d spdif=%d analog_off=%d -> rec=%d cap=(%d,%d)\n",
++				data, left ? 1 : 0, right ? 1 : 0, digital ? 1 : 0, BIT(data, 3),
++				(analog || digital) ? 1 : 0, cap_left ? 1 : 0, cap_right ? 1 : 0);
  }
  
  INPUT_CHANGED_MEMBER(mpc2000_state::variation_changed)
-@@ -1466,6 +1481,16 @@
+@@ -1372,6 +1431,15 @@
+ 	m_maincpu->out_iow_cb<1>().set(m_fdc, FUNC(upd72069_device::dma_w));
+ 	m_maincpu->in_io16r_cb<1>().set(m_ata, FUNC(ata_interface_device::read_dma));
+ 	m_maincpu->out_io16w_cb<1>().set(m_ata, FUNC(ata_interface_device::write_dma));
++	// DMA CHANNEL 2 IS THE ADC. The firmware programs it I/O->memory,
++	// 16-bit, auto-init, into a 2KiB ring at linear 0x7F000, and the SAMPLE
++	// screen's level meter is a scan of that ring bounded by this channel's
++	// current-address register. It had no callback and no DRQ source at
++	// all, so the ring stayed zero and the address register never moved:
++	// the meter had nothing to show and could not even tell that time had
++	// passed. That - not the WADCSN stub, and not the missing input stream
++	// alone - is why the SAMPLE screen showed no input level.
++	m_maincpu->in_io16r_cb<2>().set(m_dsp, FUNC(l7a1045_sound_device::adc_dma_r16_cb));
+ 	m_maincpu->in_io16r_cb<3>().set(m_dsp, FUNC(l7a1045_sound_device::dma_r16_cb));
+ 	m_maincpu->out_io16w_cb<3>().set(m_dsp, FUNC(l7a1045_sound_device::dma_w16_cb));
+ 	m_maincpu->set_tclk(4'000'000); // FIXME: DAWCK generated by DSP (also tied to V53 DSR input)
+@@ -1466,6 +1534,16 @@
  
  	TIMER(config, "dialtimer").configure_periodic(FUNC(mpc2000_state::dial_timer_tick), attotime::from_hz(60.0));
  
@@ -175,3 +468,11 @@
  	SPEAKER(config, "speaker", 2).front();
  	if (!stereo_only)
  		SPEAKER(config, "outputs", 8).unknown();
+@@ -1474,6 +1552,7 @@
+ 	m_dsp->set_addrmap(AS_DATA, &mpc2000_state::dsp_map);
+ 	m_dsp->set_addrmap(AS_IO, &mpc2000_state::dsp_rom_map);
+ 	m_dsp->drq_handler_cb().set(m_maincpu, FUNC(v53a_device::dreq_w<3>));
++	m_dsp->adc_drq_handler_cb().set(m_maincpu, FUNC(v53a_device::dreq_w<2>));
+ 	m_dsp->add_route(l7a1045_sound_device::L6028_LEFT, "speaker", 1.0, 0);
+ 	m_dsp->add_route(l7a1045_sound_device::L6028_RIGHT, "speaker", 1.0, 1);
+ 

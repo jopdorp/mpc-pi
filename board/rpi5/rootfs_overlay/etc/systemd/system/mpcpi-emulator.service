@@ -138,6 +138,27 @@ ExecStart=/opt/mpc-pi-src/scripts/run-mpc2000xl-turbo.sh \
 # guessing how long the graph takes to publish it.
 ExecStartPost=+/bin/sh -c 'for i in $(seq 1 20); do /usr/bin/mpc-monitor-route.sh link >/dev/null 2>&1 && exit 0; sleep 2; done; true'
 
+# AND THE USB ROUTE, for exactly the reason spelled out above.
+#
+# mpcpi-usb-route.service is PartOf this unit, which covers a `systemctl
+# restart` and covers nothing else. PartOf propagates STOP and RESTART; it does
+# not propagate START. So `systemctl stop mpcpi-emulator` takes the route
+# service down with it and the following `systemctl start` leaves it down - the
+# ordinary shape of a redeploy.
+#
+# What that costs is not obvious from the outside, and it cost a whole
+# diagnosis here: the emulator comes back with a FRESH :mic node, WirePlumber
+# auto-connects it to the default source, and the default source is
+# mpcpi-clock's monitor - a null sink. The sampler is then wired to silence.
+# Everything downstream looks perfect - the node exists, the graph runs, the
+# guest's DMA drains the ADC ring at full rate - and the SAMPLE screen's level
+# meter sits at zero because the audio it is metering is a null sink's.
+#
+# So re-link the gadget return on EVERY start, the same way the monitor route
+# already is. `|| true` because audio routing must never be the reason the
+# instrument fails to start.
+ExecStartPost=+/bin/sh -c 'for i in $(seq 1 20); do /usr/bin/mpc-usb-route.sh on >/dev/null 2>&1 && exit 0; sleep 2; done; true'
+
 # Put MAME's audio threads above its emulation thread. THIS is what fixed the
 # crackle: chrt --rr 20 in run-mpc.sh applies to the process, so the sound
 # effects thread and PipeWire's client loop inherit the emulation thread's
