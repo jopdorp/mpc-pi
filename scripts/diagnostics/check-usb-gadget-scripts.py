@@ -49,16 +49,31 @@ def self_test():
     #   - the host's playback return ($gin:capture_FL -> Ardour's master)
     # They point in opposite directions and confusing them would send the
     # computer's own audio back to the computer. Check each by its variable.
-    assert route.count('"$gin:capture_FL"') == 1, \
-        "the host return must appear exactly once"
-    assert route.count('"$gin:capture_FR"') == 1
+    # The host's return now has TWO destinations, deliberately: Ardour's
+    # master (so it is audible and an armed loop records it) and the MPC's
+    # sampling input (so it can be sampled). Both, not either - that is the
+    # whole point of giving the emulated machine an audio input.
+    #
+    # So this counts 2, not 1. What still must not happen is the return
+    # reaching a GADGET playback channel, which would send the computer its
+    # own audio back.
+    assert route.count('"$gin:capture_FL"') == 2, \
+        "the host return should reach Ardour's master AND the MPC's sampler"
+    assert route.count('"$gin:capture_FR"') == 2
     # And the two must never be crossed: the ADC feeds the GADGET, the host
     # return feeds ARDOUR. If either ever pointed at the other, the computer
     # would be recording its own output.
     import re as _re
-    for m in _re.finditer(r'\$op "\$gin:capture_F[LR]" "([^"]+)"', route):
-        assert m.group(1).startswith(":Master/"), \
-            "the host return must feed Ardour's master, not %s" % m.group(1)
+    _dests = [m.group(1) for m in
+              _re.finditer(r'\$op "\$gin:capture_F[LR]" "([^"]+)"', route)]
+    for d in _dests:
+        assert d.startswith(":Master/") or d.startswith(":mic:"), \
+            "the host return must feed Ardour's master or the MPC's mic, not %s" % d
+        assert not d.startswith("$node:"), \
+            "the host return must never reach a gadget playback channel - " \
+            "that sends the computer its own audio back"
+    assert any(d.startswith(":mic:") for d in _dests), \
+        "the MPC's sampling input must be fed, or sampling has no source"
     print("PASS: mpc-usb-route.sh assigns AUX0..25 exactly once, "
           "and the 2ch return exactly once per side")
 
