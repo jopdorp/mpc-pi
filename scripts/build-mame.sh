@@ -11,52 +11,11 @@ mame_jobs=${MAME_JOBS:-4}
 mame_archopts=${MAME_ARCHOPTS:-}
 mame_lto=${MAME_LTO:-0}
 mame_sources=src/mame/akai/mpc60.cpp,src/mame/akai/mpc2000.cpp,src/mame/akai/mpc3000.cpp
-mame_patches=(
-    "$repo_root/patches/mame/0001-hd61830-guard-unconfigured-text-pitch.patch"
-    "$repo_root/patches/mame/0002-mpc60-add-vimana-3.15-bios.patch"
-    "$repo_root/patches/mame/0003-akai-dsp-reset-voice-state-on-key-on.patch"
-    "$repo_root/patches/mame/0004-pipewire-audio-clock-and-low-latency-buffer.patch"
-    "$repo_root/patches/mame/0005-skip-emulation-warning-with-skip-gameinfo.patch"
-    "$repo_root/patches/mame/0006-sdl-asynchronous-rendering.patch"
-    "$repo_root/patches/mame/0007-clock-use-periodic-timer-for-50-percent-duty.patch"
-    "$repo_root/patches/mame/0008-sdl-isolate-event-loop-from-emulation.patch"
-    "$repo_root/patches/mame/0009-pipewire-use-primary-output-as-audio-clock.patch"
-    "$repo_root/patches/mame/0010-sound-use-16-sample-host-updates.patch"
-    "$repo_root/patches/mame/0011-pipewire-keep-one-producer-update-of-margin.patch"
-    "$repo_root/patches/mame/0012-mb89371-use-direct-periodic-brg-timers.patch"
-    "$repo_root/patches/mame/0013-sdl-synchronize-async-render-shutdown.patch"
-    "$repo_root/patches/mame/0014-mb89371-batch-complete-brg-cycles.patch"
-    "$repo_root/patches/mame/0015-i8251-complete-clock-cycle.patch"
-    "$repo_root/patches/mame/0016-i8251-skip-stable-idle-high-rx-shifts.patch"
-    "$repo_root/patches/mame/0017-i8251-skip-stable-idle-transmit-callbacks.patch"
-    "$repo_root/patches/mame/0018-scheduler-cache-exact-cycle-divisors.patch"
-    "$repo_root/patches/mame/0019-mpc2000xl-event-driven-panel-uart.patch"
-    "$repo_root/patches/mame/0020-mpc2000xl-low-latency-midi-pad-input.patch"
-    "$repo_root/patches/mame/0021-mpc2000xl-event-driven-midi-baud-clocks.patch"
-    "$repo_root/patches/mame/0022-upd7810-coalesce-unconnected-timer-output.patch"
-    "$repo_root/patches/mame/0023-mpc2000xl-v53-status-service-hle.patch"
-    "$repo_root/patches/mame/0024-mpc2000xl-v53-event-service-hle.patch"
-    "$repo_root/patches/mame/0025-nec-use-concrete-opcode-cache-access.patch"
-    "$repo_root/patches/mame/0026-mpc2000xl-specialize-hot-v53-dispatch.patch"
-    "$repo_root/patches/mame/0027-render-none-skip-unused-primitives.patch"
-    "$repo_root/patches/mame/0028-sound-cache-device-interfaces.patch"
-    "$repo_root/patches/mame/0029-sdl-generate-primitives-on-emulation-thread.patch"
-    "$repo_root/patches/mame/0030-render-fixed-artwork-resolution.patch"
-    "$repo_root/patches/mame/0031-mpc2000xl-optional-stereo-output.patch"
-    "$repo_root/patches/mame/0032-mpc2000xl-v53-divide-superblock.patch"
-    "$repo_root/patches/mame/0033-mpc2000xl-skip-unchanged-lcd-frames.patch"
-    "$repo_root/patches/mame/0034-sound-derive-host-update-cadence.patch"
-    "$repo_root/patches/mame/0035-nec-v33-direct-opcode-fetch-window.patch"
-    "$repo_root/patches/mame/0036-nec-v33-direct-data-access-window.patch"
-    "$repo_root/patches/mame/0037-nec-v33-idle-iteration-skip.patch"
-    "$repo_root/patches/mame/0038-l7a1045-direct-wave-ram-window.patch"
-    "$repo_root/patches/mame/0039-mpc2000xl-lcd-frame-export.patch"
-    "$repo_root/patches/mame/0040-mpc2000xl-v53-wait-service-hles.patch"
-    "$repo_root/patches/mame/0041-upd7810-timer-event-countdown.patch"
-    "$repo_root/patches/mame/0042-mpc2000xl-panel-event-bus-hle.patch"
-    "$repo_root/patches/mame/0043-mpc2000xl-input-and-dma-latency.patch"
-    "$repo_root/patches/mame/0044-pipewire-guard-stream-format-positions.patch"
-)
+# The whole ordered stack from patches/mame/, numbered and sorted, exactly as
+# build-mame-rpi5.sh takes it. A hand-maintained list here froze at patch 0044
+# while the directory grew to 0052, so the desktop build silently lost the
+# panel-injection fixes, MIDI CC wheel/slider support and the sampling input.
+mapfile -t mame_patches < <(ls "$repo_root"/patches/mame/0*.patch | sort)
 
 if [[ ! -f "$mame_source_dir/makefile" ]]; then
     printf 'error: MAME source not found at %s; run scripts/bootstrap-mame.sh first\n' "$mame_source_dir" >&2

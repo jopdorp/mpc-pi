@@ -21,3 +21,4 @@ __pycache__/
 
 # Cross-compiled emulator binary, produced by scripts/build-mame-rpi5.sh
 board/rpi5/rootfs_overlay/usr/bin/mpc
+dist/
