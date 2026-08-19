@@ -337,7 +337,16 @@ DAW_BUTTONS = {
     "group_f":        "daw:page:FX",
     "group_g":        "daw:page:SONG",
     "group_h":        "daw:page:EDIT",
-    "duplicate":      "daw:duplicate",
+    # DUPLICATE IS NOT BOUND HERE. It sent "daw:duplicate", daw-ctl has no
+    # region ops to answer it with, and the panel printed UNKNOWN COMMAND
+    # DUPLICATE across the status line on every press. An unbound button does
+    # nothing at all, which is the documented behaviour for this surface and
+    # is strictly better than a button that reports a fault when pressed.
+    # Bind it again with the region op, not before.
+    # SELECT drills into WAVE on the focused lane, and drills back out. The
+    # way in is the way out, the same idiom SHIFT+NAVIGATE uses for the
+    # browser - and it cannot be D8, which is the surface toggle and is never
+    # rebound.
     "select":         "daw:select",
     # EDIT's snap grid, cycled: BAR / BEAT / OFF on one button, which is what
     # the key already means on the MPC side of the panel - SNAP is bar_right

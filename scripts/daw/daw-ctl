@@ -148,6 +148,9 @@ class Daw:
         self.wave_handle = 0
         self.wave_zoom = 1.0
         self.wave_gain = 1.0
+        # Which page WAVE was drilled into from, so backing out returns there
+        # rather than to a default.
+        self.drilled_from = None
 
     # --- Ardour ---
 
@@ -268,6 +271,16 @@ class Daw:
         # EDIT's snap, cycled rather than set: three values on one button.
         if verb == "snap":
             return self.cycle_snap()
+        # WAVE is a DRILL-IN, not a page in the group row: you always open it
+        # on something. SELECT opens it on the focused lane and closes it
+        # again - the way in is also the way out, the same idiom
+        # SHIFT+NAVIGATE already uses for the browser.
+        #
+        # THE WAY BACK CANNOT BE D8. That is the surface toggle and it is
+        # never rebound; a drill-in whose exit was the toggle would put the
+        # player on the MPC when they asked for the mixer.
+        if verb in ("select", "back"):
+            return self.drill(verb)
 
         # The file browser. One verb with a sub-verb rather than five top-level
         # words, because everything under it is meaningless unless the browser
@@ -581,6 +594,34 @@ class Daw:
         self.message = "TRIM %s %.3f" % ("START" if handle == 0 else "END",
                                          t[handle])
         return ["trim %d %.4f" % (handle, t[handle])]
+
+    def drill(self, verb):
+        """Open WAVE on the focused lane, or come back out.
+
+        "back" only ever leaves; "select" toggles. Where it returns TO is
+        remembered rather than defaulted, because a drill-in that always
+        dropped you on MIX would lose the page you were working on - which
+        is the same reason the FILES overlay leaves self.page alone.
+        """
+        if self.page == "WAVE":
+            self.page = self.drilled_from or "LOOP"
+            self.drilled_from = None
+            self.message = ""
+            return ["page %s" % self.page]
+        if verb == "back":
+            # Nothing to back out of. Not an error: BACK on a top-level page
+            # is a key with no job here, and this panel does not shout about
+            # those - see jog() on MIX.
+            return []
+        self.drilled_from = self.page
+        self.page = "WAVE"
+        # A fresh take is a fresh trim. Carrying the last lane's handles onto
+        # a different lane would silently apply one take's edit points to
+        # another's audio.
+        self.wave_trim = [0.0, 1.0]
+        self.wave_handle = 0
+        self.message = "WAVE %s" % self.focus
+        return ["page WAVE"]
 
     def jog(self, delta):
         """One knob, four pages, four things to move.
@@ -1191,6 +1232,35 @@ def self_test():
         d.wave_trim = [0.5, 0.5]
         d.command("knob WAVE 0 100000")
         assert d.wave_trim[0] <= d.wave_trim[1], d.wave_trim
+
+        # --- WAVE IS A DRILL-IN -----------------------------------------
+        #
+        # SELECT emitted "daw:select" from the panel and daw-ctl had never
+        # heard the word, so the button printed UNKNOWN COMMAND SELECT across
+        # the status line. It opens the take on the focused lane now, and the
+        # way back is the same key - it CANNOT be D8, which is the surface
+        # toggle and is never rebound.
+        d.command("page SONG")
+        d.command("focus LOOP4")
+        assert d.command("select") == ["page WAVE"]
+        assert d.page == "WAVE" and d.message == "WAVE LOOP4", d.message
+        # Backing out returns to the page it was opened FROM, not a default -
+        # a drill-in that always dropped you on MIX loses your place.
+        assert d.command("select") == ["page SONG"]
+        assert d.page == "SONG"
+        # A fresh drill-in starts with fresh handles: carrying the last
+        # lane's trim onto another lane applies one take's edit points to a
+        # different take's audio.
+        d.command("select")
+        d.wave_trim = [0.2, 0.7]
+        d.command("back")
+        assert d.page == "SONG"
+        d.command("select")
+        assert d.wave_trim == [0.0, 1.0], d.wave_trim
+        d.command("back")
+        # BACK on a top-level page is a key with no job, not a fault.
+        d.message = ""
+        assert d.command("back") == [] and d.message == ""
 
         # Every page the jog names must be drawable with the state it
         # produces - the EDIT page took the renderer down once already by
