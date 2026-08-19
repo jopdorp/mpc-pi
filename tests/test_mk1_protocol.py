@@ -53,12 +53,21 @@ class FakeRouter:
 
 
 def bare_mk1():
-    """An Mk1 with decoder state but no USB device."""
+    """An Mk1 with the REAL decoder state but no USB device.
+
+    __new__ skips __init__ because __init__ opens the controller, and there
+    is none in CI. What it must not skip is the state the decoders read:
+    this used to hand-set the four fields the tests of the day happened to
+    touch, which is a private copy of Mk1's own field list that nothing keeps
+    in step. It fell behind the debounce (button_raw, button_changed_at) and
+    the pad decoder's peak tracking, and both times ten tests failed with
+    AttributeError while the code under test was correct.
+
+    Mk1._init_state() is that list, owned by the class, so the shim can no
+    longer describe a different device from the one that ships.
+    """
     dev = HUB.Mk1.__new__(HUB.Mk1)
-    dev.buttons = 0
-    dev.encoders = [None] * 11
-    dev.pad_state = [0] * 16
-    dev.PAD_THRESHOLD = HUB.Mk1.PAD_THRESHOLD
+    dev._init_state()
     return dev
 
 
@@ -251,25 +260,70 @@ def pad_report(pressures):
 
 
 class TestPads(unittest.TestCase):
+    """The wire channel is not the pad number.
+
+    Channel k on the wire is scan order; the pad the player hit is
+    Mk1._pad_index(k), because the MPC numbers its grid from the BOTTOM
+    left and the report arrives top row first. These tests used to assert
+    channel == pad, which was true before the flip landed and describes an
+    upside-down instrument now: hitting the top-left pad would play the
+    bottom-left sample. The expectations go through _pad_index rather than
+    repeating its arithmetic, so the flip has exactly one definition.
+    """
+
     def test_pressure_is_12_bit_across_the_pair(self):
         dev = bare_mk1()
         r = FakeRouter()
         dev._pads(pad_report({0: 4095}), r)
         self.assertEqual(len(r.hits), 1)
         kind, index, velocity = r.hits[0]
-        self.assertEqual((kind, index), ("pad", 0))
-        self.assertEqual(velocity, 127)  # 4095 >> 5, clamped to 127
+        self.assertEqual((kind, index), ("pad", HUB.Mk1._pad_index(0)))
+        # Full scale is 127. Not "4095 >> 5" any more: the fixed shift put
+        # full scale at 4064 counts, which these pads never reach, so 127 was
+        # unplayable. It interpolates from the on-threshold to
+        # PAD_FULL_SCALE now, and anything above that clamps.
+        self.assertEqual(velocity, 127)
+
+    def test_softest_registering_hit_is_velocity_one(self):
+        """The other end of the same interpolation.
+
+        A hit one count over the threshold must still be audible - velocity
+        0 is a note-OFF in MIDI, so a pad that rounds down to zero at the
+        bottom of its range reads as a pad that swallows soft playing.
+        """
+        dev = bare_mk1()
+        r = FakeRouter()
+        dev._pads(pad_report({0: HUB.Mk1.PAD_ON_THRESHOLD + 1}), r)
+        self.assertEqual([h[2] for h in r.hits], [1])
 
     def test_pad_index_comes_from_the_high_nibble(self):
+        """Channel 11 is a real channel; which PAD it is, _pad_index says."""
         dev = bare_mk1()
         r = FakeRouter()
         dev._pads(pad_report({11: 4095}), r)
-        self.assertEqual([h[1] for h in r.hits], [11])
+        self.assertEqual([h[1] for h in r.hits], [HUB.Mk1._pad_index(11)])
+
+    def test_the_grid_is_not_upside_down(self):
+        """Bottom-left is pad 1, as it is on the MPC.
+
+        The report's first row is the TOP row, so passing the channel
+        straight through mirrors the grid vertically - which on a 4x4 of
+        identical rubber squares reads as a sample-assignment choice rather
+        than a bug, and is the reason this is asserted rather than eyeballed.
+        """
+        flip = HUB.Mk1._pad_index
+        self.assertEqual(flip(12), 0)
+        self.assertEqual(flip(15), 3)
+        self.assertEqual(sorted(flip(i) for i in range(16)), list(range(16)))
+        # Columns never move; only the row order is reversed.
+        self.assertTrue(all(flip(i) % 4 == i % 4 for i in range(16)))
 
     def test_below_threshold_is_not_a_hit(self):
         dev = bare_mk1()
         r = FakeRouter()
-        dev._pads(pad_report({0: 16}), r)   # 16, well under the 200 threshold
+        # Well under PAD_ON_THRESHOLD, read from the class rather than
+        # written out: the floor has been re-measured twice.
+        dev._pads(pad_report({0: HUB.Mk1.PAD_ON_THRESHOLD // 8}), r)
         self.assertEqual(r.hits, [])
 
     def test_release_fires_once_after_a_hit(self):
@@ -277,7 +331,7 @@ class TestPads(unittest.TestCase):
         dev._pads(pad_report({5: 3000}), FakeRouter())
         r = FakeRouter()
         dev._pads(pad_report({}), r)
-        self.assertEqual(r.hits, [("pad", 5, 0)])
+        self.assertEqual(r.hits, [("pad", HUB.Mk1._pad_index(5), 0)])
 
 
 class TestDisplayProtocol(unittest.TestCase):

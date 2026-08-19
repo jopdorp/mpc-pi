@@ -313,8 +313,12 @@ HOLD_MODES = {v["button"]: k for k, v in control_map.MODES.items()
 class Router:
     """Turns a control event into either MIDI bytes or a daw-ctl line."""
 
-    def __init__(self, lanes=None, strips=None):
-        self.lanes = lanes or ["GTR1", "GTR2", "MIC", "AUX"]
+    def __init__(self, strips=None):
+        # NO LANE LIST. This carried ["GTR1", "GTR2", "MIC", "AUX"] long after
+        # the desk became LOOP1..LOOP5 + DELAY/REVERB/MASTER, and nothing ever
+        # read it - it was left over from when the pads were the loop grid and
+        # a column was a lane. The recordable lanes are derived from
+        # control_map.STRIPS by daw-ctl, which is the side that owns them.
         # Eight knobs, eight strips. The names live in control_map.STRIPS,
         # which is the one place to change them.
         self.strips = strips or control_map.STRIPS
@@ -1067,12 +1071,7 @@ def self_test():
     # a silent no-op and its next release fired a bare key-up, which is the
     # "a previously pressed button goes off by itself" report.
     _d = Mk1.__new__(Mk1)
-    _d.buttons = 0
-    _d.button_raw = 0
-    _d.button_changed_at = [0.0] * 48
-    _d.button_bounces = 0
-    _d.leds = mk1_leds.LedBank()
-    _d._leds_dirty = False
+    _d._init_state()
     _rd = Router()
     _pos = control_map_buttons().index("play")
     _d.button_raw = 1 << _pos
@@ -1290,6 +1289,21 @@ class Mk1:
             raise RuntimeError(
                 "cannot select altsetting %d: %s - unplug and replug the "
                 "controller" % (mk1_leds.ALTSETTING, last))
+        self._init_state()
+        self.init_panel()
+
+    def _init_state(self):
+        """Every field the DECODERS touch, and nothing that needs USB.
+
+        Split out of __init__ so a caller with no controller plugged in can
+        have the real state without the real device: the tests and this
+        module's own self-test build one with __new__ and call this. They used
+        to hand-write the subset each of them happened to need, which is a
+        second copy of this list that nothing keeps in step - and it fell
+        behind twice, once when the debounce grew button_raw/button_changed_at
+        and once when the pad decoder grew its peak tracking. Both times the
+        tests failed with AttributeError on code that was working fine.
+        """
         self.pad_state = [0] * 16
         self.pad_on = [False] * 16
         self.pad_raw = [0] * 16
@@ -1317,7 +1331,6 @@ class Mk1:
         self.frames = {}
         self.leds = mk1_leds.LedBank()
         self._lamp_line = None
-        self.init_panel()
 
     def release(self):
         """Give the interface back, so the NEXT start can claim it.

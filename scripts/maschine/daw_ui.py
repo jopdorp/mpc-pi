@@ -977,7 +977,15 @@ def page_edit(f, st):
     lane_h = (area_bot - area_top - (show - 1)) // show
     draw_waves = show <= 2 and lane_h >= 10
 
-    for li in range(show):
+    # A SESSION WITH NOTHING RECORDED IS THE NORMAL STARTING STATE, so this
+    # loop must survive an empty lane list. It used to run `show` times and
+    # index lanes[first + li] - and `show` is floored at 1 so the geometry
+    # below stays sane with one lane - which meant an empty timeline raised
+    # IndexError inside render(). group_h opens this page, daw-ctl's state
+    # carries no "edit" key at all yet, so pressing it on a fresh session took
+    # daw-ui-daemon down and the right-hand screen froze on its last frame.
+    # The bar grid and the playhead still draw; there is simply nothing on it.
+    for li in range(min(show, len(lanes) - first)):
         lane = lanes[first + li]
         top = area_top + li * (lane_h + 1)
         bot = top + lane_h

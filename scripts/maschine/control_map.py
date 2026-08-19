@@ -25,23 +25,24 @@ import os
 # --- modes -----------------------------------------------------------
 #
 # One rule, no cycling: **each mode has its own button, and holding that
-# button is the mode.** Release and the pads are the MPC's again. There
-# is nothing to step through and nothing to remember, because the panel's
-# own printed labels say which button does what.
+# button is the mode.** Release and the display row is a strip selector
+# again. There is nothing to step through and nothing to remember, because
+# the panel's own printed labels say which button does what.
 #
 # Why hold rather than toggle: a held mode cannot be forgotten - the
 # muscular effort is the reminder - so a performer can never look down
-# mid-bar and wonder what the pads currently are. A latched mode can, and
+# mid-bar and wonder what the panel currently is. A latched mode can, and
 # that is how you clear a loop while reaching for a kick drum.
 #
-# Latching still exists for when you want both hands free: hold the mode
-# button and press Button 1, which the screen labels PIN. The button then
-# stays lit until you press it again. That is Maschine's own idiom, and
-# the gesture is self-documenting because the screen names it.
-#
-# Whenever a mode button is held, the screen draws that mode's 4x4 pad
-# map over the current page, so you see what the pads mean *before* you
-# hit one. Release restores the page underneath.
+# NOTHING LATCHES. The two paragraphs that used to sit here described a PIN
+# button that held a mode after release, and a 4x4 pad map drawn over the
+# page while a mode was held. Both belonged to the design where a mode took
+# the PADS: the chord needed two hands, so it had to be possible to put it
+# down, and the grid had changed meaning, so it had to be shown. A mode
+# retargets seven display buttons now and the pads never move, so there is
+# nothing to draw and nothing to pin - see PIN_BUTTON below, which is None.
+# The screen names the engaged mode in the status line, which is the whole
+# of what is left to say.
 
 # A MODE RETARGETS THE DISPLAY BUTTONS, NOT THE PADS.
 #
