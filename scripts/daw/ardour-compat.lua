@@ -91,6 +91,37 @@ function M.locate(session, sample, roll)
 	return false
 end
 
+-- How long a region's fade is - if this Ardour will say.
+--
+-- Ardour 9 binds AudioRegion:fade_in_length and fade_out_length; ARDOUR 8
+-- BINDS NEITHER, though both versions bind the SETTERS and both bind
+-- fade_in_active. Measured on the appliance (8) and the build host (9)
+-- against a real captured region:
+--
+--   set_fade_in_length   set_fade_out_length     bound on both
+--   fade_in_active       set_fade_in_active      bound on both
+--   fade_in_length       fade_out_length         Ardour 9 only
+--   fade_in()            fade_out()              Ardour 9 only
+--
+-- This is the two-versions problem this file exists for, and it is the
+-- shape that hurts most: the build host could read a fade, so the region
+-- publisher and its integration test were both green there, and on the
+-- appliance every publish died mid-file with "attempt to call a nil value
+-- (method 'fade_in_length')". The region list stopped being published the
+-- moment the first take was recorded onto it - which is the only moment it
+-- has anything to say.
+--
+-- Returns nil rather than 0 when the getter is absent, so a caller can tell
+-- "no fade" from "this Ardour will not tell you".
+function M.fade_length(ar, which)
+	if not ar or ar:isnil() then return nil end
+	local getter = (which == "out") and ar.fade_out_length or ar.fade_in_length
+	if type(getter) ~= "function" then return nil end
+	local ok, v = pcall(getter, ar)
+	if not ok or type(v) ~= "number" then return nil end
+	return v
+end
+
 -- Connect the session's master to the first physical playback pair.
 --
 -- Not cosmetic, and not only about hearing it: PipeWire schedules a node

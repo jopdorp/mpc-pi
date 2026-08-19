@@ -220,6 +220,7 @@ function M.attach(session)
 	M.rate = session:sample_rate()
 	M.loops = {}                -- [track] = { length =, layers = { ... } }
 	M.claimed = {}              -- [track] = { [region name] = true }
+	M.fades = {}                -- what we set, where this Ardour cannot say
 	-- A new session is a new history. The inverses below close over region
 	-- objects from the session being replaced, and running one of those
 	-- against a different session is the one way this stack can do harm.
@@ -513,8 +514,12 @@ function M.publish(path)
 					local gain, fi, fo = 1.0, 0, 0
 					if ar and not ar:isnil() then
 						gain = ar:scale_amplitude()
-						fi = M.samples_of(ar:fade_in_length())
-						fo = M.samples_of(ar:fade_out_length())
+						-- NOT ar:fade_in_length(). Ardour 8 does not bind it
+						-- and this used to die here, mid-file, on the
+						-- appliance only - the moment the first take gave
+						-- the publisher something to say.
+						fi = M.fade_length(r:name(), reg:name(), ar, "in")
+						fo = M.fade_length(r:name(), reg:name(), ar, "out")
 					end
 					f:write(string.format("%s\t%s\t%d\t%d\t%d\t%d\t%.4f\n",
 						r:name(), reg:name(),
@@ -605,6 +610,35 @@ function M.norm_gain(peak, target_db)
 	return (10 ^ ((target_db or -0.5) / 20)) / peak
 end
 
+-- WHAT THE FADES ARE, ON AN ARDOUR THAT WILL NOT SAY.
+--
+-- Ardour 8 - the appliance's - binds no fade_in_length (see
+-- ardour-compat.lua's fade_length for the measurements), so the only fade
+-- lengths knowable there are the ones we set ourselves. They are kept here,
+-- and the getter is preferred whenever this Ardour has one.
+--
+-- The gap this leaves is one line long and worth stating: on Ardour 8 a
+-- region nobody has faded publishes 0 rather than the short default fade
+-- Ardour gives a fresh capture, and the first undo of a fade restores 0
+-- rather than that default. Both are a few dozen samples of crossfade at
+-- one edge of one region.
+M.fades = {}
+
+function M.fade_key(track, region) return tostring(track) .. "\0" .. region end
+
+function M.fade_length(track, region, ar, which)
+	local live = M.compat and M.compat.fade_length(ar, which)
+	if live then return live end
+	local shadow = M.fades[M.fade_key(track, region)]
+	return (shadow and shadow[which]) or 0
+end
+
+function M.note_fade(track, region, which, len)
+	local key = M.fade_key(track, region)
+	M.fades[key] = M.fades[key] or {}
+	M.fades[key][which] = len
+end
+
 function M.audio_region(track, region)
 	local r, pl = M.region_by_name(track, region)
 	assert(r, "no region " .. tostring(region))
@@ -668,25 +702,31 @@ end
 
 function M.ops.fadein(track, region, len)
 	local ar = M.audio_region(track, region)
-	local was = M.samples_of(ar:fade_in_length())
+	local was = M.fade_length(track, region, ar, "in")
 	local active = ar:fade_in_active()
-	ar:set_fade_in_length(tonumber(len))
+	local want = math.floor(tonumber(len))
+	ar:set_fade_in_length(want)
 	ar:set_fade_in_active(true)
+	M.note_fade(track, region, "in", want)
 	M.remember("fadein " .. region, function()
 		ar:set_fade_in_length(was)
 		ar:set_fade_in_active(active)
+		M.note_fade(track, region, "in", was)
 	end)
 end
 
 function M.ops.fadeout(track, region, len)
 	local ar = M.audio_region(track, region)
-	local was = M.samples_of(ar:fade_out_length())
+	local was = M.fade_length(track, region, ar, "out")
 	local active = ar:fade_out_active()
-	ar:set_fade_out_length(tonumber(len))
+	local want = math.floor(tonumber(len))
+	ar:set_fade_out_length(want)
 	ar:set_fade_out_active(true)
+	M.note_fade(track, region, "out", want)
 	M.remember("fadeout " .. region, function()
 		ar:set_fade_out_length(was)
 		ar:set_fade_out_active(active)
+		M.note_fade(track, region, "out", was)
 	end)
 end
 
