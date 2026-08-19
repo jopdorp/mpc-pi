@@ -607,6 +607,195 @@ class TestTransportReachesTheInstrument(ModeMixin, unittest.TestCase):
         rig.release("shift")
 
 
+class TestRegionVerbs(unittest.TestCase):
+    """EDIT and WAVE: the button, the region, and the line between them.
+
+    Every verb here was built, exercised by hand on the appliance, and left
+    with no button - and the buttons, once bound, are exactly the kind of
+    thing that ships dead: the hub emits a word, its own self-test asserts
+    that it emitted it, and daw-ctl has never heard it. Three controls have
+    already shipped in that shape. So these press the BUTTON and assert on
+    what daw-ctl DID - the queue it wrote for the Lua side, the selection it
+    moved, the sentence it put on the status line - and never on the command
+    string in between.
+
+    Which button carries which verb is read out of control_map, so moving a
+    binding moves the test with it. What is written out is the daw-ctl
+    VOCABULARY, because that is the join being tested.
+    """
+
+    VERBS = ("daw:split", "daw:region:prev", "daw:region:next",
+             "daw:duplicate", "daw:erase", "daw:undo", "daw:norm")
+
+    def button(self, target):
+        found = [b for b, t in control_map.DAW_BUTTONS.items() if t == target]
+        self.assertEqual(len(found), 1, "%s has buttons %s" % (target, found))
+        return found[0]
+
+    def rig(self, rows=None):
+        """A DAW surface on EDIT, with a published playlist under it."""
+        rig = Rig(surface="DAW")
+        rig.regions = os.path.join(os.path.dirname(rig.queue), "daw-regions")
+        rig.daw.regions_path = rig.regions
+        self.spb = rig.daw.transport.samples_per_bar()
+        rig.press(PAGE_BUTTONS["EDIT"])
+        self.publish(rig, rows if rows is not None else [(0, 4), (4, 4)])
+        return rig
+
+    def to_page(self, rig, page):
+        """Reach a page the way a finger does, not by assignment.
+
+        WAVE has no button in the group row - it is a drill-in, and the
+        gesture is SELECT: held it opens a lane's take, tapped it opens the
+        focused one. Setting daw.page here instead would test the verbs on a
+        page the panel might have no way to reach.
+        """
+        if page == "WAVE":
+            button = control_map.MODES["SELECT"]["button"]
+            rig.hold(button)
+            rig.release(button)
+        else:
+            rig.press(PAGE_BUTTONS[page])
+        self.assertEqual(rig.daw.page, page, "could not reach %s" % page)
+
+    def publish(self, rig, bars):
+        """One frame in loop-ops.lua's own format, on the focused lane."""
+        lane = rig.daw.focus
+        with open(rig.regions, "w") as fh:
+            fh.write("# rate %d transport 0 gen 1\n" % rig.daw.transport.rate)
+            for i, (pos, length) in enumerate(bars):
+                fh.write("%s\t%s-1.%d\t%d\t%d\t0\t0\t1.0000\n"
+                         % (lane, lane, i + 1, pos * self.spb,
+                            length * self.spb))
+        rig.daw.regions_stamp = None
+        self.assertTrue(rig.daw.poll_regions(), "the frame was not read")
+
+    def queued(self, rig):
+        try:
+            with open(rig.queue) as fh:
+                return [ln.strip() for ln in fh if ln.strip()]
+        except OSError:
+            return []
+
+    def test_every_verb_reaches_daw_ctl_and_is_understood(self):
+        """The failure this whole class exists for: UNKNOWN COMMAND.
+
+        Two buttons were found sending words daw-ctl had never heard, and an
+        unbound button was judged better than one that reports a fault. So
+        every verb must come back with an answer about regions.
+        """
+        for target in self.VERBS:
+            for page in ("EDIT", "WAVE", "LOOP"):
+                with self.subTest(verb=target, page=page):
+                    rig = self.rig()
+                    self.to_page(rig, page)
+                    rig.daw.message = ""
+                    rig.press(self.button(target))
+                    self.assertNotIn("UNKNOWN", rig.daw.message.upper(),
+                                     "%s on %s: %s"
+                                     % (target, page, rig.daw.message))
+                    self.assertTrue(rig.daw.message,
+                                    "%s on %s said nothing at all"
+                                    % (target, page))
+
+    def test_the_arrows_step_the_selection_and_the_cursor(self):
+        """The cursor follows, or every verb acts off screen."""
+        rig = self.rig()
+        rig.daw.cursor = 0
+        rig.daw.resync_selection()
+        first = rig.daw.sel_region
+        rig.press(self.button("daw:region:next"))
+        self.assertNotEqual(rig.daw.sel_region, first, "NEXT selected nothing")
+        self.assertEqual(rig.daw.cursor, 4 * self.spb,
+                         "the cursor did not follow the selection")
+        rig.press(self.button("daw:region:prev"))
+        self.assertEqual(rig.daw.sel_region, first)
+        self.assertEqual(rig.daw.cursor, 0)
+
+    def test_split_cuts_the_selected_region_at_the_cursor(self):
+        rig = self.rig()
+        rig.daw.cursor = 0
+        rig.daw.resync_selection()
+        name = rig.daw.sel_region
+        rig.daw.cursor = 2 * self.spb
+        mark = len(self.queued(rig))
+        rig.press(self.button("daw:split"))
+        self.assertEqual(self.queued(rig)[mark:],
+                         ["split %s %s %d" % (rig.daw.focus, name,
+                                              2 * self.spb)])
+
+    def test_duplicate_erase_and_norm_reach_the_playlist(self):
+        for target, expect in (("daw:duplicate", "duplicate %s %s %d"),
+                               ("daw:erase", "remove %s %s"),
+                               ("daw:norm", "normalize %s %s")):
+            with self.subTest(verb=target):
+                rig = self.rig()
+                rig.daw.cursor = 9 * self.spb
+                rig.daw.resync_selection()
+                name = rig.daw.sel_region
+                mark = len(self.queued(rig))
+                rig.press(self.button(target))
+                args = ((rig.daw.focus, name, 9 * self.spb)
+                        if "%d" in expect else (rig.daw.focus, name))
+                self.assertEqual(self.queued(rig)[mark:], [expect % args])
+
+    def test_undo_pops_the_region_stack_on_edit(self):
+        rig = self.rig()
+        mark = len(self.queued(rig))
+        rig.press(self.button("daw:undo"))
+        self.assertEqual(self.queued(rig)[mark:], ["undo"])
+        self.assertEqual(rig.daw.message, "UNDO")
+
+    def test_erase_and_undo_follow_the_page(self):
+        """One key that undoes what the page in front of you does.
+
+        The panel sends the same bare word from the same button on every
+        page; daw-ctl owns the page, so daw-ctl decides whether it meant the
+        region or the take. Nothing on this side mirrors that.
+        """
+        for target in ("daw:erase", "daw:undo"):
+            with self.subTest(verb=target):
+                rig = self.rig()
+                mark = len(self.queued(rig))
+                rig.press(self.button(target))
+                on_edit = self.queued(rig)[mark:]
+                self.assertTrue(on_edit, "%s did nothing on EDIT" % target)
+                self.assertNotIn("clear %s" % rig.daw.focus, on_edit,
+                                 "%s discarded the take from EDIT" % target)
+                # The strips page: the same button, the take, and a lane
+                # holding nothing says so rather than claiming it worked.
+                rig.press(PAGE_BUTTONS["LOOP"])
+                rig.daw.message = ""
+                mark = len(self.queued(rig))
+                rig.press(self.button(target))
+                self.assertEqual(rig.daw.message,
+                                 "NO TAKE ON %s" % rig.daw.focus)
+                self.assertEqual(self.queued(rig)[mark:], [])
+
+    def test_the_screen_says_what_happened(self):
+        """A verb the player cannot see is indistinguishable from a dead key."""
+        for target in self.VERBS:
+            with self.subTest(verb=target):
+                rig = self.rig()
+                rig.daw.cursor = 2 * self.spb
+                rig.daw.resync_selection()
+                before = bytes(rig.frame().px)
+                rig.press(self.button(target))
+                self.assertNotEqual(before, bytes(rig.frame().px),
+                                    "%s changed nothing on screen" % target)
+
+    def test_none_of_them_touches_the_mpc_surface(self):
+        """Same button, other instrument: it is the MPC's key over there."""
+        for target in self.VERBS:
+            with self.subTest(verb=target):
+                button = self.button(target)
+                rig = Rig()                      # MPC surface
+                page = rig.daw.page
+                self.assertEqual(rig.midi(button),
+                                 [control_map.MPC_BUTTONS[button]])
+                self.assertEqual(rig.daw.page, page)
+
+
 class TestFrameStaysLegal(unittest.TestCase):
     """Whatever the interaction, the frame obeys the panel's rules."""
 

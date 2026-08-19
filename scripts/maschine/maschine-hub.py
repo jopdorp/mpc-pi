@@ -1224,6 +1224,70 @@ def self_test():
     for _g in "abcd":
         assert "group_" + _g not in control_map.DAW_BUTTONS
 
+    # THE REGION VERBS EACH HAVE A BARE BUTTON, and each one sends the exact
+    # line daw-ctl parses. This is the panel's half of the join; the other
+    # half - that daw-ctl acts on the line - is asserted in
+    # tests/test_interaction.py, because two green tests either side of a gap
+    # do not test the gap and this file cannot see past the FIFO.
+    #
+    # The lines are written out rather than derived from the table, so a
+    # binding that changes its spelling has to change it here too: the whole
+    # failure being guarded against is a verb the panel emits and daw-ctl has
+    # never heard.
+    _verbs = {"split": "daw:split", "region prev": "daw:region:prev",
+              "region next": "daw:region:next", "duplicate": "daw:duplicate",
+              "erase": "daw:erase", "undo": "daw:undo", "norm": "daw:norm"}
+    _by_target = {}
+    for _b, _t in control_map.DAW_BUTTONS.items():
+        _by_target.setdefault(_t, []).append(_b)
+    _rv = Router()
+    _rv.button(control_map.SURFACE_TOGGLE, True)
+    for _line, _target in _verbs.items():
+        _btns = _by_target.get(_target, [])
+        assert len(_btns) == 1, \
+            "%s needs exactly one button, has %s" % (_target, _btns)
+        _btn = _btns[0]
+        # BARE. There are two dozen free buttons, so none of these may hide
+        # behind a modifier, take a transport key, or sit on the strip row.
+        assert _btn not in control_map.ALWAYS, \
+            "%s is on transport key %s" % (_target, _btn)
+        assert _btn != control_map.SURFACE_TOGGLE and not _btn.startswith(
+            "display"), "%s is on a display button" % _target
+        assert _btn != "shift", "%s is on the modifier" % _target
+        # A key the BROWSER also uses keeps its browser job while a listing
+        # is up: the overlay is checked before this table, and the two
+        # meanings are the same gesture - step through what is in front of
+        # you. Asserted rather than assumed, because the order of those two
+        # checks is the only thing that makes it true.
+        if _btn in control_map.FILES_BUTTONS:
+            _rf = Router()
+            _rf.button(control_map.SURFACE_TOGGLE, True)
+            _rf.button("shift", True)
+            _rf.button(control_map.FILES_BUTTON, True)
+            _rf.button(control_map.FILES_BUTTON, False)
+            _rf.button("shift", False)
+            assert _rf.files, "SHIFT+NAVIGATE did not open the browser"
+            assert _rf.button(_btn, True) == \
+                [("cmd", control_map.FILES_BUTTONS[_btn])], \
+                "%s took %s away from the browser" % (_target, _btn)
+            _rf.button(_btn, False)
+        # The press sends the line, and the release sends NOTHING and leaves
+        # nothing owed - a DAW verb is not a key the machine holds down.
+        assert _rv.button(_btn, True) == [("cmd", _line)], \
+            "%s did not send %r" % (_btn, _line)
+        assert _rv.button(_btn, False) == [], "%s owes a release" % _btn
+        assert _btn not in _rv.pressed and _rv.held is None
+        # ...and on the MPC surface the same button is still the MPC's key.
+        _rm2 = Router()
+        assert sent(_rm2.button(_btn, True)) == control_map.MPC_BUTTONS[_btn], \
+            "%s stopped reaching the MPC on the MPC surface" % _btn
+        _rm2.button(_btn, False)
+    # MARK is the one verb in the specification with nothing behind it, so it
+    # stays unbound: a key that spends the status line on UNKNOWN COMMAND is
+    # worse than a key that does nothing.
+    assert "daw:mark" not in control_map.DAW_BUTTONS.values(), \
+        "MARK is bound and daw-ctl has no marker command to answer it"
+
     # REC arms; the strip buttons then punch instead of selecting, and punch
     # again to close. This is the whole reason the pads stay the MPC's.
     r.armed = False

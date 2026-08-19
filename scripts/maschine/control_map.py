@@ -363,12 +363,6 @@ DAW_BUTTONS = {
     "group_f":        "daw:page:FX",
     "group_g":        "daw:page:SONG",
     "group_h":        "daw:page:EDIT",
-    # DUPLICATE IS NOT BOUND HERE. It sent "daw:duplicate", daw-ctl has no
-    # region ops to answer it with, and the panel printed UNKNOWN COMMAND
-    # DUPLICATE across the status line on every press. An unbound button does
-    # nothing at all, which is the documented behaviour for this surface and
-    # is strictly better than a button that reports a fault when pressed.
-    # Bind it again with the region op, not before.
     # SELECT IS A HELD MODIFIER over the display row - see MODES["SELECT"].
     # Held, display 1-7 drill into that lane's take; tapped, it drills into
     # the focused lane and back out again. The way in is the way out, the
@@ -379,12 +373,6 @@ DAW_BUTTONS = {
     # the key already means on the MPC side of the panel - SNAP is bar_right
     # there, "move by the grid". It decides how far one jog detent moves the
     # edit cursor.
-    #
-    # ONLY THE VERBS THAT DO SOMETHING ARE BOUND HERE. SPLIT, ERASE,
-    # DUPLICATE, UNDO, NORM and MARK are in the specification and their region
-    # ops are not written yet; binding them now would give the player six keys
-    # that light up and change nothing, which is the failure this panel has
-    # already shipped twice.
     "snap":           "daw:snap",
     "mute":           "mode:MUTE",
     "solo":           "mode:SOLO",
@@ -392,6 +380,67 @@ DAW_BUTTONS = {
     # strip instead of selecting it - which is why the pads never needed to be
     # involved in looping at all.
     "rec":            "daw:arm",
+
+    # --- the region verbs: EDIT and WAVE ---------------------------------
+    #
+    # These were left unbound for as long as daw-ctl could not answer them.
+    # It can: every one of them edits the published playlist, so the reason
+    # for leaving them off - a key that spends the status line on UNKNOWN
+    # COMMAND is worse than a key that does nothing - has gone.
+    #
+    # THE PANEL PRINTS NONE OF THESE WORDS except two. SPLIT, NORM and UNDO
+    # are labels drawn under the RIGHT-HAND SCREEN, and the four buttons
+    # under that screen are the strip row on this surface, so each verb
+    # needs a free bare button picked here. Two dozen are free, so none of
+    # them goes on a modifier: a shifted binding is one to remember rather
+    # than read, and this panel spends its only two shift layers on
+    # SHIFT+pad and SHIFT+NAVIGATE.
+    #
+    # WHERE THE PANEL SAYS THE WORD, THE PANEL WINS. Both of these are the
+    # same verb in both worlds, so the silkscreen is true on either surface:
+    # ERASE is the MPC's ERASE key over there and deletes the region here,
+    # and DUPLICATE is GO TO over there and copies the region here.
+    "erase":          "daw:erase",
+    "duplicate":      "daw:duplicate",
+    #
+    # WHERE IT SAYS NOTHING, POSITION HAS TO CARRY IT. The remaining four
+    # go in ONE 2x3 block - the left-hand cluster that already holds SNAP -
+    # so EDIT's whole vocabulary is under one hand and can be learnt as a
+    # shape rather than as four unrelated keys:
+    #
+    #     BROWSE  -> UNDO        SAMPLING   -> SPLIT
+    #     <       -> REGION PREV >          -> REGION NEXT
+    #     SNAP    -> SNAP        AUTO WRITE -> NORM
+    #
+    # The arrows are the specification's own choice and need no defence:
+    # they are the MPC's cursor keys on the other surface and the browser's
+    # up/into while a listing is open, which is the same gesture - step
+    # through the thing in front of you. The browser is checked BEFORE this
+    # table, so opening it takes them back for as long as it is up.
+    "browse_left":    "daw:region:prev",
+    "browse_right":   "daw:region:next",
+    # SAMPLING is the least arbitrary of the three unprinted ones: it is the
+    # key that opens the sample editor on the machine whose name is on the
+    # panel, which is where audio gets chopped. AUTO WRITE is the only free
+    # key whose printed word is about a level at all, and NORM sets one.
+    # BROWSE carries UNDO because it is what is left in the block - said
+    # plainly, because a mnemonic invented after the fact is worse than
+    # admitting there is none.
+    "sampling":       "daw:split",
+    "auto_write":     "daw:norm",
+    "browse":         "daw:undo",
+    # ERASE and UNDO ARE PAGE-SENSITIVE, AND daw-ctl RESOLVES THAT - it is
+    # the side that knows which page is up. ERASE deletes the region on EDIT
+    # and WAVE and discards the take on the strips page; UNDO pops
+    # loop-ops.lua's inverse-op stack on EDIT and WAVE and takes back the
+    # take on the strips page. One key that always undoes what you were just
+    # doing beats two keys that each work on one page and fault on the other,
+    # and neither needs a modifier here to say which page it meant.
+    #
+    # MARK IS STILL NOT BOUND. The SONG page's markers are the one verb in
+    # the specification with nothing behind it - daw-ctl has no marker
+    # commands - so binding it would put back exactly the fault this block
+    # just removed.
 }
 
 # THE TOP ROW IS THE BANKS, AND THAT IS WHAT MAKES THE PADS THE MPC'S ON
