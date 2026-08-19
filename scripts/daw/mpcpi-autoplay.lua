@@ -178,19 +178,191 @@ mpcpi_lamp_notifier = emu.add_machine_frame_notifier(function()
 end)
 print("MPCPI_LAMP_EXPORT " .. lamp_path)
 
-if not autoplay then
-    return
+-- ===================================================================
+-- MOUNT THE FLOPPY THE PANEL CHOSE.
+--
+-- The other half of the FILES browser. daw-ctl walks the tree, the panel
+-- draws it, and the chosen path is published to /dev/shm/mpc-disk - and
+-- until now nothing read that file, so the screen said "LOAD BEAT02.IMG"
+-- and the drive did not change. Swapping media at runtime is MAME's side
+-- of the fence and this is MAME's side: the autoboot script is already
+-- running Lua inside the machine, so the loader is a poll loop here
+-- rather than a patch to the emulator.
+--
+-- WHY A FILE AND NOT A SOCKET. Same reason daw-ctl uses a FIFO: either
+-- side can restart without a reconnect dance, and the request survives
+-- the gap. The panel writes a path, we load it, we write back what
+-- happened - a request/response pair of two tiny files on tmpfs.
+--
+-- ANSWERING IS PART OF THE JOB. A load can fail - the file can be a
+-- directory, the wrong size, or gone by the time we look - and a panel
+-- that reports success unconditionally is worse than one that reports
+-- nothing. The status file is what lets daw-ctl replace its optimistic
+-- "LOAD X" with "LOADED X" or the emulator's own refusal.
+local DISK_REQUEST = os.getenv("MPCPI_DISK_REQUEST") or "/dev/shm/mpc-disk"
+local DISK_STATUS = os.getenv("MPCPI_DISK_STATUS") or "/dev/shm/mpc-disk-status"
+-- WHERE THE CHOICE SURVIVES A REBOOT. /dev/shm is a tmpfs, so a disk
+-- chosen on the panel is forgotten at power-off and the machine comes
+-- back with whatever -flop the unit hardcodes. The appliance's standard
+-- is that a reboot returns you to the same state, so daw-ctl also writes
+-- the choice somewhere that persists and we seed from it at startup.
+-- This costs one stat at boot and nothing afterwards.
+local DISK_MEMORY = os.getenv("MPCPI_DISK_MEMORY")
+    or ((os.getenv("MAME_RUNTIME_DIR") or "/var/lib/mpcpi") .. "/disk")
+
+-- Find the drive by INSTANCE NAME, not by a hardcoded tag.
+--
+-- The tag is ":fdc:0" on this driver, but a slot's card device is named
+-- by the slot machinery and a hardcoded tag is exactly the kind of thing
+-- that silently resolves to nil after a MAME bump - and a nil here reads
+-- as "the panel does nothing", which is the bug this whole function
+-- exists to fix. -listmedia calls it "floppydisk"; that is the contract
+-- the frontend already publishes, so match on it and say what we found.
+local function find_drive()
+    local images = manager.machine.images
+    local want = os.getenv("MPCPI_DISK_DEVICE")
+    if want then
+        local ok, dev = pcall(function() return images[want] end)
+        if ok and dev then return dev, want end
+        print("MPCPI_DISK: no image device at " .. want)
+    end
+    for tag, img in pairs(images) do
+        local ok, inst = pcall(function() return img.instance_name end)
+        if ok and (inst == "floppydisk" or inst == "flop" or inst == "flop1") then
+            return img, tag
+        end
+    end
+    return nil, nil
+end
+
+local disk_drive, disk_tag = find_drive()
+if disk_drive then
+    print("MPCPI_DISK_DRIVE " .. tostring(disk_tag))
+else
+    print("MPCPI_DISK_DRIVE none - no floppy image device on this machine")
+end
+
+local function write_status(text)
+    local f = io.open(DISK_STATUS, "w")
+    if f then
+        f:write(text .. "\n")
+        f:close()
+    end
+end
+
+local function read_path(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local line = f:read("*l")
+    f:close()
+    if not line then return nil end
+    line = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if line == "" then return nil end
+    return line
+end
+
+-- The last request we ACTED ON, successfully or not.
+--
+-- Remembering failures too is what keeps a bad path from being retried
+-- at 4 Hz forever: the file cannot change unless the player picks
+-- something else, and picking again is exactly when a retry is wanted.
+local last_request = nil
+
+local function mount(path, why)
+    if not disk_drive then
+        write_status("error no drive")
+        return
+    end
+    -- Already in the drive. Loading it again would still cost a media
+    -- change - the MPC re-reads the disk and loses its place - so a
+    -- second press of ENTER on the disk you are already running is a
+    -- no-op that says so rather than a reload.
+    local ok, current = pcall(function() return disk_drive.filename end)
+    if ok and current == path then
+        write_status("ok " .. path)
+        print("MPCPI_DISK already mounted: " .. path)
+        return
+    end
+    -- EJECT, WAIT, INSERT. A real swap has a gap in it, and the guest's
+    -- disk-change line is edge-triggered: loading straight over a
+    -- mounted image can leave the MPC believing the old directory is
+    -- still good. A quarter of a second of empty drive is what the
+    -- machine would see from a hand.
+    local had = (ok and current ~= "" and current) or nil
+    pcall(function() disk_drive:unload() end)
+    emu.wait(0.25)
+    local raised, err = pcall(function() return disk_drive:load(path) end)
+    -- load() answers nil on success and a message on failure; pcall's
+    -- first return says whether it threw at all. Both are failures and
+    -- both have to put the drive back.
+    local failure = nil
+    if not raised then
+        failure = tostring(err)
+    elseif err ~= nil then
+        failure = tostring(err)
+    end
+    if failure then
+        -- PUT BACK WHAT WAS IN THERE. The eject above already happened,
+        -- so a refused image would otherwise leave the machine with an
+        -- empty drive - strictly worse than before the player pressed
+        -- anything, and not what they asked for. The browser lists
+        -- anything disk-shaped on purpose (the emulator is the authority
+        -- on what it can mount), which makes a refusal an ordinary
+        -- outcome here rather than an exceptional one.
+        if had then
+            pcall(function() disk_drive:load(had) end)
+        end
+        write_status("error " .. failure)
+        print("MPCPI_DISK refused " .. path .. ": " .. failure)
+        return
+    end
+    write_status("ok " .. path)
+    print("MPCPI_DISK mounted (" .. why .. "): " .. path)
+end
+
+-- Seed from the remembered choice, but only when there is no live
+-- request: a request that is already sitting there is newer than memory
+-- and is handled by the first poll below.
+do
+    local live = read_path(DISK_REQUEST)
+    local remembered = read_path(DISK_MEMORY)
+    if not live and remembered then
+        last_request = remembered
+        mount(remembered, "remembered")
+    end
 end
 
 -- PLAY START rather than PLAY: it restarts from the top, so re-pressing it
 -- keeps audio flowing even after the sequence ends.
+--
+-- Resolved unconditionally so the poll loop below can be one loop. It is
+-- still only ever PRESSED when MPCPI_AUTOPLAY is set: this is a test aid,
+-- and an instrument that starts playing on its own is wrong.
 local play = field(":Y4", "Play Start")
-if not play then
+if autoplay and not play then
     print("MPCPI_AUTOPLAY: no ':Y4' / 'Play Start' field on this machine")
-    return
 end
-print("MPCPI_AUTOPLAY: holding PLAY START every 15s")
+if autoplay then
+    print("MPCPI_AUTOPLAY: holding PLAY START every 15s")
+end
+
+-- ONE loop for both jobs. The disk poll has to run whether or not the
+-- test aid is on - it is the appliance's own behaviour - and a second
+-- coroutine to hold it would be a second thing that can stop.
+local POLL_S = tonumber(os.getenv("MPCPI_DISK_POLL_S") or "0.25")
+local since_play = 0
 while true do
-    press(play)
-    emu.wait(15)
+    local want = read_path(DISK_REQUEST)
+    if want and want ~= last_request then
+        last_request = want
+        mount(want, "requested")
+    end
+    if autoplay and play then
+        since_play = since_play + POLL_S
+        if since_play >= 15 then
+            since_play = 0
+            press(play)
+        end
+    end
+    emu.wait(POLL_S)
 end

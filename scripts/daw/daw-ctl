@@ -38,14 +38,27 @@ FIFO = "/run/daw-ctl.fifo"
 QUEUE = os.environ.get("DAW_QUEUE", "/dev/shm/daw-region-queue")
 # Where a floppy chosen on the panel is published for the emulator.
 #
-# NOTHING READS THIS YET, and saying so is the point of the constant. Mounting
-# an image at runtime is MAME's side of the fence - manager.machine.images
-# ":fdc:0" and its load() - and that plugin does not exist; the emulator is
-# still handed -flop once at startup. Writing the request is still the right
-# half to build first: the panel can be finished and tested without it, and
-# when the loader lands it has one file to watch rather than a protocol to
-# invent.
+# READ BY scripts/daw/mpcpi-autoplay.lua, which runs as MAME's autoboot script
+# and therefore already lives inside the machine: it polls this path and calls
+# the drive's own load(). That is why this never needed a MAME patch - the Lua
+# image interface is the supported way to swap media at runtime, and an
+# autoboot script is a place it can be called from.
 DISK_REQUEST = os.environ.get("MPCPI_DISK_REQUEST", "/dev/shm/mpc-disk")
+# What the emulator says HAPPENED - "ok <path>" or "error <message>".
+#
+# The request alone cannot tell the player anything: a path can be a
+# directory, the wrong size, or gone by the time the drive looks at it, and a
+# panel that prints LOAD the instant a key is pressed is reporting its own
+# keypress rather than the machine's answer. This is the answer.
+DISK_STATUS = os.environ.get("MPCPI_DISK_STATUS", "/dev/shm/mpc-disk-status")
+# The same choice, somewhere that survives a power cycle.
+#
+# /dev/shm is a tmpfs, so without this the drive silently reverts to the unit's
+# hardcoded -flop on every boot and the disk the player chose last night is
+# gone. The emulator seeds from this at startup when there is no live request.
+DISK_MEMORY = os.environ.get(
+    "MPCPI_DISK_MEMORY",
+    os.path.join(os.environ.get("MAME_RUNTIME_DIR", "/var/lib/mpcpi"), "disk"))
 
 # Column order is the contract: strip N on the panel is OSC ssid N+1 and
 # the same column the UI draws. Changing this changes three things at
@@ -107,6 +120,13 @@ class Daw:
         self.files = False
         self.files_rows = []
         self.disk_request = DISK_REQUEST
+        self.disk_status = DISK_STATUS
+        self.disk_memory = DISK_MEMORY
+        # The last status line consumed from the emulator, so a change can be
+        # told from a repeat. Without it the answer to one load would be
+        # re-applied to the screen every 10 ms and no later message could ever
+        # be seen.
+        self.disk_seen = None
         self.message = ""
         self.playhead = 0
         self.xruns = 0
@@ -381,22 +401,33 @@ class Daw:
                  "size": e.size, "present": getattr(e, "present", True)}
                 for e in self.browser.rows()]
 
-    def load_disk(self, path):
-        """Publish the chosen image for the emulator to pick up.
+    def _publish(self, path, text):
+        """Write-then-rename, so a reader can never see half a path."""
+        tmp = "%s.%d.tmp" % (path, os.getpid())
+        with open(tmp, "w") as f:
+            f.write(text + "\n")
+        os.replace(tmp, path)
 
-        Write-then-rename, like every other file this process publishes, so a
-        reader can never see half a path. See DISK_REQUEST: nothing consumes
-        this yet, so the screen says LOAD and the drive does not change.
+    def load_disk(self, path):
+        """Ask the emulator for this image, and remember the choice.
+
+        Two files, because they answer two different questions. The REQUEST is
+        what the drive should hold now and lives on tmpfs, where a stale one
+        after a crash would be a lie. The MEMORY is what it should hold after a
+        power cycle and has to survive one, so it goes on the card.
+
+        The screen says LOADING, not LOADED. All that has happened here is that
+        a path was written to a file; whether a disk went in is the emulator's
+        answer, and poll_disk picks it up a frame or two later. Reporting the
+        keypress as the outcome is how the panel came to claim loads that never
+        happened.
         """
-        tmp = "%s.%d.tmp" % (self.disk_request, os.getpid())
         try:
-            with open(tmp, "w") as f:
-                f.write(path + "\n")
-            os.replace(tmp, self.disk_request)
+            self._publish(self.disk_request, path)
         except OSError as e:
             self.message = "CANNOT REQUEST DISK"
             return ["error disk-request %s" % e]
-        self.message = "LOAD %s" % os.path.basename(path).upper()
+        self.message = "LOADING %s" % os.path.basename(path).upper()
         return ["load %s" % path]
 
     # --- encoders ---
@@ -467,7 +498,51 @@ class Daw:
         self.playhead = int(int(elapsed_ms) * self.transport.rate / 1000.0)
         return bool(int(playing))
 
+    def poll_disk(self):
+        """Turn the emulator's answer about the drive into a screen message.
+
+        Only on CHANGE. The status file keeps its last line forever, so
+        applying it every tick would nail one answer to the status line and
+        make every later message - a level readout, a refusal - invisible.
+
+        A load the player did not ask for still gets reported: the emulator
+        seeds the drive from the remembered choice at startup, and "LOADED
+        BEAT02.IMG" on the first screen is exactly the confirmation that the
+        appliance came back where it was left.
+        """
+        try:
+            with open(self.disk_status) as f:
+                line = f.read().strip()
+        except OSError:
+            return None
+        if not line or line == self.disk_seen:
+            return None
+        self.disk_seen = line
+        verb, _, rest = line.partition(" ")
+        if verb == "ok":
+            self.message = "LOADED %s" % os.path.basename(rest).upper()
+            # REMEMBER ONLY WHAT LOADED. Writing the choice at keypress time
+            # instead put refused images into the boot seed: one ENTER on a
+            # file the drive cannot read and every subsequent boot came up
+            # with an empty drive and an error on the status line, with no
+            # way back except picking something else. A power cycle must not
+            # be able to inherit a failure.
+            #
+            # A failure to remember is not a failure to load - the disk is in
+            # the drive either way - so this reports and carries on.
+            try:
+                self._publish(self.disk_memory, rest)
+            except OSError as e:
+                print("daw-ctl: cannot remember disk choice: %s" % e,
+                      file=sys.stderr)
+        else:
+            # The emulator's own words, not ours. "NOT A FLOPPY IMAGE" from
+            # the drive is worth more than a generic refusal invented here.
+            self.message = rest.upper()[:40] or "DISK FAILED"
+        return line
+
     def tick(self):
+        self.poll_disk()
         return [self.perform(a) for a in self.engine.tick(self.playhead)]
 
     # Fader position from dB. This was hardcoded to 0.8 for every strip,
@@ -779,6 +854,8 @@ def self_test():
         d.browser = browserlib.Browser(
             roots=[("LIB", tmp), ("USB", os.path.join(tmp, "nope"))])
         d.disk_request = os.path.join(tmp, "request")
+        d.disk_memory = os.path.join(tmp, "memory")
+        d.disk_status = os.path.join(tmp, "status")
 
         d.command("files open")
         assert d.files and d.ui_state()["page"] == "FILES", \
@@ -813,7 +890,39 @@ def self_test():
         assert out == ["load %s" % img], out
         with open(d.disk_request) as fh:
             assert fh.read().strip() == img
-        assert d.message == "LOAD BEAT.IMG", d.message
+        # LOADING, not LOADED. Nothing has been loaded yet - a path was
+        # written to a file. Claiming the outcome at keypress time is exactly
+        # how the panel came to report loads that never happened.
+        assert d.message == "LOADING BEAT.IMG", d.message
+        assert not os.path.exists(d.disk_memory), \
+            "a choice was remembered before the drive had accepted it"
+
+        # THE EMULATOR'S ANSWER REACHES THE SCREEN. This is the half that did
+        # not exist: the request was published and nothing ever read it, so the
+        # panel could only ever report its own keypress.
+        with open(d.disk_status, "w") as fh:
+            fh.write("ok %s\n" % img)
+        d.poll_disk()
+        assert d.message == "LOADED BEAT.IMG", d.message
+        # ...and only now is it worth surviving a power cycle.
+        with open(d.disk_memory) as fh:
+            assert fh.read().strip() == img, "the disk choice was not remembered"
+        # Applied once, not every tick - otherwise one answer nails itself to
+        # the status line and no later message can ever be seen.
+        d.message = "SOMETHING ELSE"
+        assert d.poll_disk() is None
+        assert d.message == "SOMETHING ELSE", d.message
+        # And a refusal arrives in the emulator's own words - and MUST NOT be
+        # remembered. A refused image in the boot seed meant every subsequent
+        # boot came up with an empty drive and an error, with no way back
+        # except picking something else.
+        with open(d.disk_status, "w") as fh:
+            fh.write("error not a floppy image\n")
+        d.poll_disk()
+        assert d.message == "NOT A FLOPPY IMAGE", d.message
+        with open(d.disk_memory) as fh:
+            assert fh.read().strip() == img, \
+                "a refused image overwrote the remembered one"
 
         # A file that is not a disk says so, and up leaves the tree.
         d.browser.cursor = names.index("NOTES.TXT")
