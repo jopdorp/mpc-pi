@@ -1,0 +1,50 @@
+mpc2000xl: open the sampling input at machine start
+
+MAME opens the OSD capture node when the emulated machine first reads its
+input stream, so the MPC sampling input only appeared in the host graph
+once the firmware armed recording. Read both input channels on every
+stream update while the recorder is idle and discard the samples: the
+input node then exists from machine start, and routing host audio into it
+does not depend on arming sampling first.
+
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -296,6 +296,8 @@
+ 	// plays, and a voice may be reading the very RAM recording will fill.
+ 	if (m_rec_on)
+ 		record_capture(stream);
++	else
++		warm_capture_input(stream);
+ 
+ 	for (int i = 0; i < NUM_VOICES; i++)
+ 	{
+@@ -865,6 +867,19 @@
+ 	m_adc_drq_handler(want ? ASSERT_LINE : CLEAR_LINE);
+ }
+ 
++// The OSD creates its capture node when the machine first reads its input,
++// so read both channels on every update even while the recorder is idle:
++// the host-side input stream then exists from machine start, and routing
++// audio into it does not depend on arming sampling first.
++void l7a1045_sound_device::warm_capture_input(sound_stream &stream)
++{
++	for (int j = 0; j < stream.samples(); j++)
++	{
++		for (int ch = 0; ch < 2; ch++)
++			stream.get(ch, j);
++	}
++}
++
+ void l7a1045_sound_device::record_capture(sound_stream &stream)
+ {
+ 	for (int j = 0; j < stream.samples(); j++)
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.h
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.h
+@@ -148,6 +148,7 @@
+ 	u32             m_rec_reads = 0;
+ 	void update_adc_drq();
+ 	void record_capture(sound_stream &stream);
++	void warm_capture_input(sound_stream &stream);
+ 	void arm_dma_timer();
+ 	// Words channel 3 has pushed into wave RAM since this take began. Not
+ 	// only a statistic: its parity is which half of an interleaved stereo

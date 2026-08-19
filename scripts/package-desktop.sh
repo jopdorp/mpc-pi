@@ -114,10 +114,16 @@ export MPC_MAXIMIZE="\${MPC_MAXIMIZE:-1}"
 export MPC_PANEL_MODE="\${MPC_PANEL_MODE:-accurate}"
 export MPC_PANEL_TIMER_MODE="\${MPC_PANEL_TIMER_MODE:-accurate}"
 # Audio: rate-match the graph to the device (48 kHz on ACP-pinned drivers)
-# and run the verified-clean 64-frame quantum. The resampler that ACP puts
-# in the path is what stalls the audio clock at small quanta, not the
-# quantum itself; 32 frames is the untested opt-in.
-"\$here/scripts/mpcpi-audio-setup"
+# and run the verified-clean 64-frame quantum. 32 frames is the untested
+# opt-in.
+# ACP-off is OPT-IN. Measured on this workstation (Meteor Lake HDA,
+# SN6140): with ACP disabled the emulator never creates its PipeWire
+# nodes at all and stalls at ~5% CPU, old and new binaries alike;
+# restoring ACP brought it straight back. Auto-installing it turned a
+# working machine into a black window, so it ships behind a flag.
+if [ -n "\${MPCPI_DISABLE_ACP:-}" ]; then
+    "\$here/scripts/mpcpi-audio-setup"
+fi
 export PIPEWIRE_RATE_HZ="\${PIPEWIRE_RATE_HZ:-48000}"
 export MPC_PIPEWIRE_FRAMES="\${MPC_PIPEWIRE_FRAMES:-64}"
 "\$here/scripts/run-mpc2000xl-fast.sh" \\
@@ -141,7 +147,14 @@ all_cpus=\$(cat /sys/devices/system/cpu/online)
 all_cpus=\${all_cpus#0-}
 export MAME_CPUSET="\${MAME_CPUSET:-0-\${all_cpus:-0}}"
 # Audio setup and rate matching, as in mpcpi.
-"\$here/scripts/mpcpi-audio-setup"
+# ACP-off is OPT-IN. Measured on this workstation (Meteor Lake HDA,
+# SN6140): with ACP disabled the emulator never creates its PipeWire
+# nodes at all and stalls at ~5% CPU, old and new binaries alike;
+# restoring ACP brought it straight back. Auto-installing it turned a
+# working machine into a black window, so it ships behind a flag.
+if [ -n "\${MPCPI_DISABLE_ACP:-}" ]; then
+    "\$here/scripts/mpcpi-audio-setup"
+fi
 export PIPEWIRE_RATE_HZ="\${PIPEWIRE_RATE_HZ:-48000}"
 "\$here/scripts/run-mpc.sh" "\${1:-mpc2000xl}" 64 "\${@:2}" &
 fast_pid=\$!
@@ -167,7 +180,14 @@ export MAME_RUNTIME_DIR="\$here/runtime"
 all_cpus=\$(cat /sys/devices/system/cpu/online)
 all_cpus=\${all_cpus#0-}
 export MAME_CPUSET="\${MAME_CPUSET:-0-\${all_cpus:-0}}"
-"\$here/scripts/mpcpi-audio-setup"
+# ACP-off is OPT-IN. Measured on this workstation (Meteor Lake HDA,
+# SN6140): with ACP disabled the emulator never creates its PipeWire
+# nodes at all and stalls at ~5% CPU, old and new binaries alike;
+# restoring ACP brought it straight back. Auto-installing it turned a
+# working machine into a black window, so it ships behind a flag.
+if [ -n "\${MPCPI_DISABLE_ACP:-}" ]; then
+    "\$here/scripts/mpcpi-audio-setup"
+fi
 export PIPEWIRE_RATE_HZ="\${PIPEWIRE_RATE_HZ:-48000}"
 export MPC_PIPEWIRE_FRAMES="\${MPC_PIPEWIRE_FRAMES:-64}"
 
@@ -347,14 +367,17 @@ the bundle stays on the accurate path until that is fixed.
 ## Audio, and what the launcher does to it
 
 \`./mpcpi\` rate-matches the graph to your sound device (48 kHz by default)
-and runs a 64-frame quantum (~1.3 ms). On first launch it installs a
-one-time WirePlumber rule at
-\`~/.config/wireplumber/wireplumber.conf.d/50-mpcpi-no-acp.conf\` that keeps
-ALSA devices off the ACP path - ACP pins many current drivers at 48 kHz
-with a resampler that no force-setting can override, and that resampler is
-what makes the emulator's audio clock stall (silence at 32 frames, crackle
-at 64). Deleting the file restores stock behaviour after a wireplumber
-restart.
+and runs a 64-frame quantum (~1.3 ms).
+
+If your device runs through PipeWire's ACP path it may be pinned to one
+rate and period with a resampler in front of it; \`MPCPI_DISABLE_ACP=1\`
+installs a one-time WirePlumber rule at
+\`~/.config/wireplumber/wireplumber.conf.d/50-mpcpi-no-acp.conf\` that takes
+ALSA devices off it. **Try it only if you have a problem, and be ready to
+undo it**: on one machine measured here (Meteor Lake HDA, SN6140 codec)
+disabling ACP stopped the emulator creating its audio nodes at all - it
+sat at ~5% CPU with a black window - and deleting the file plus
+\`systemctl --user restart wireplumber\` brought it back immediately.
 
 The 32-frame quantum is the untested opt-in on rate-matched devices:
 
