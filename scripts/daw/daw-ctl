@@ -124,8 +124,22 @@ class Daw:
         self.rolling = set()
         # What we believe Ardour's global record-enable is. See
         # set_session_record: the OSC path is a toggle, and we cannot read it
-        # back, so a belief is the best that exists.
+        # back over OSC - but the governor publishes what it IS in the region
+        # header, so follow_ardour() reconciles the belief instead of
+        # carrying it for ever.
         self.session_record = False
+        self.record_sent = 0.0
+        self.record_fixes = 0
+        # Is the MPC playing? None until the first line of the export is
+        # read, so the first observation is always an edge and Ardour is put
+        # where it belongs whichever state the appliance came up in.
+        self.mpc_playing = None
+        self.roll_asked = 0.0
+        # What the governor last said Ardour is doing. None means "it has not
+        # said" - an older governor publishes neither field - and nothing is
+        # asserted about a transport nobody has reported on.
+        self.ardour_rolling = None
+        self.ardour_record = None
         # The file browser, opened from the panel with SHIFT+NAVIGATE. This
         # process owns the cursor and the listing because it owns every other
         # piece of screen state; two owners of one cursor is how a screen and
@@ -293,6 +307,13 @@ class Daw:
                     self.transport.rate = rate
                 self.ardour_playhead = int(kw.get("transport") or 0)
                 self.regions_gen = int(kw.get("gen") or 0)
+                # What Ardour's transport and record-enable ACTUALLY are.
+                # Absent from an older governor, and absence is not "off":
+                # follow_ardour() asserts nothing about a field nobody sent.
+                if "rolling" in kw:
+                    self.ardour_rolling = kw["rolling"] not in ("0", "")
+                if "rec" in kw:
+                    self.ardour_record = int(kw["rec"] or 0)
                 continue
             parts = line.split("\t")
             if len(parts) < 7:
@@ -540,6 +561,17 @@ class Daw:
         # is the whole reason they exist - the routing test proved the
         # hub sends this, and the panel test proved the screen can draw
         # it, and neither could notice that nothing joins them.
+        # The bar grid's tempo, when something other than the emulator knows
+        # it. The export publishes it when it can read it out of the
+        # sequencer; this is the way in for a project whose tempo the export
+        # cannot see, and for the tests.
+        if verb == "tempo" and len(parts) > 1:
+            try:
+                out = self.set_tempo(float(parts[1]))
+            except ValueError:
+                return ["error bad-tempo %s" % parts[1]]
+            self.message = "TEMPO %.1f" % (self.transport.bpm or 0)
+            return out
         if verb == "knob" and len(parts) > 3:
             page, target, delta = parts[1], parts[2], int(parts[3])
             return self.knob(page, target, delta)
@@ -668,6 +700,9 @@ class Daw:
         if on == self.session_record:
             return
         self.session_record = on
+        # Stamp it, so follow_ardour() does not read a frame the governor
+        # published before this toggle landed and "correct" it straight back.
+        self.record_sent = time.monotonic()
         self.osc.send(ardour_bindings.RECORD["session_arm"])
 
     def set_armed(self, on):
@@ -1108,15 +1143,164 @@ class Daw:
     # --- the loop ---
 
     def poll_transport(self, path=TRANSPORT):
+        """One line of the emulator's transport export. See its header.
+
+        Three fields for years - playing, elapsed ms, emulated seconds - and
+        a fourth, the sequencer's tempo, only when the export knows where to
+        read it. Parsed by POSITION with a tolerant tail rather than by an
+        exact unpack, because the appliance's emulator and this process are
+        deployed as separate files and one of them is always newer.
+        """
         try:
             with open(path) as f:
-                playing, elapsed_ms, _ = f.read().split()
-        except (OSError, ValueError):
+                fields = f.read().split()
+            playing, elapsed_ms = int(fields[0]), int(fields[1])
+        except (OSError, ValueError, IndexError):
             return False
-        self.transport.update_from_export(int(playing), int(elapsed_ms),
-                                          self.playhead)
-        self.playhead = int(int(elapsed_ms) * self.transport.rate / 1000.0)
-        return bool(int(playing))
+        if len(fields) > 3:
+            try:
+                self.set_tempo(float(fields[3]))
+            except ValueError:
+                pass
+        # THE PLAYHEAD FIRST, then the grid that is anchored to it. This ran
+        # the other way round, so the bar anchor was computed against the
+        # PREVIOUS poll's playhead: every next_bar_sample() came back one
+        # tick early and jittered by the poll interval, and a "four bar" take
+        # was four bars give or take ten milliseconds - measurably not a bar
+        # multiple, which is the one property the whole punch path is for.
+        # Both quantities are exact functions of elapsed_ms, so in this order
+        # the anchor is exactly playhead - (playhead mod bar).
+        previous = self.playhead
+        self.playhead = int(elapsed_ms * self.transport.rate / 1000.0)
+        self.transport.update_from_export(playing, elapsed_ms, self.playhead)
+        out = []
+        if self.playhead < previous and self.mpc_playing:
+            out = self.rewound(previous)
+        out += self.follow_transport(bool(playing))
+        return bool(playing)
+
+    def rewound(self, previous):
+        """The MPC's clock went backwards. Musical time is discontinuous.
+
+        The export counts milliseconds since PLAY, so STOP and PLAY START
+        both reset it - and both do so one frame BEFORE the playing flag
+        drops, which is what makes this its own case rather than part of the
+        stop below. Measured on the appliance: 6206 ms to 30 ms across a
+        press of STOP, with `playing` still 1 on that frame.
+
+        Anything recording has to close on the last bar line the OLD clock
+        passed, not on a playhead that has already jumped to a second and a
+        half. Without that a take is closed against a start sample now in the
+        future, comes out shorter than a bar, and is discarded as a mis-hit -
+        the whole take, silently, at the moment the player pressed stop.
+        """
+        out = self.apply(self.engine.close_open_takes(previous))
+        self.rolling.clear()
+        self.engine.rebase(previous - self.playhead)
+        return out
+
+    # --- Ardour follows -----------------------------------------------------
+
+    def set_tempo(self, bpm):
+        """The bar grid's only free variable, and it must be the MPC's.
+
+        Everything else in the punch path is exact arithmetic off a shared
+        hardware clock; the tempo is the one number that has to come from
+        somewhere. When the emulator publishes it, it wins - a bar grid at a
+        tempo the drums are not playing quantises punches to lines that are
+        not there, which is worse than not quantising at all.
+        """
+        if not bpm or bpm <= 0:
+            return []
+        if self.transport.bpm and abs(self.transport.bpm - bpm) < 0.05:
+            return []
+        self.transport.bpm = bpm
+        return ["tempo %.1f" % bpm]
+
+    def follow_transport(self, playing):
+        """Roll Ardour behind the MPC, and only behind it.
+
+        THE TRANSPORT BELONGS TO THE MPC. This is not a control - no button
+        reaches it - it is the consequence of what the emulator's export
+        says, which is the whole of "Ardour follows" (docs/daw-interaction
+        .md, "Recording a loop"). Nothing did this at all: a capture needs a
+        rolling transport, so every punch that reached Ardour wrote to a
+        timeline sitting still at sample 0, and loop recording could not
+        produce a take from the panel however the buttons behaved.
+
+        Edge-triggered, because the roll is a request and re-requesting one
+        Ardour is already honouring is noise. The Lua side guards it with
+        transport_rolling() anyway, and the watchdog below covers the case
+        this misses - a governor that restarted under a playing MPC.
+        """
+        if playing == self.mpc_playing:
+            return []
+        self.mpc_playing = playing
+        if playing:
+            self.enqueue("transport roll")
+            self.roll_asked = time.monotonic()
+            return ["transport roll"]
+        # A STOP ENDS THE TAKES TOO. Ardour drops a rec-enabled lane's
+        # capture when the transport stops, so a lane left rolling here
+        # would come back as an unclaimed region and be swallowed by the
+        # next finalize on that lane. Close them on the last bar line that
+        # passed - the engine owns that arithmetic - and only then stop.
+        out = self.apply(self.engine.close_open_takes(self.playhead))
+        self.rolling.clear()
+        self.enqueue("transport stop")
+        return out + ["transport stop"]
+
+    # How long to wait before believing what the governor published about
+    # Ardour, rather than what we last sent it. One publish is 500 ms and a
+    # punch-out's stop-and-reroll is 65-110 ms, so two seconds is several
+    # frames clear of both.
+    FOLLOW_SETTLE_S = 2.0
+    # How many times to correct the record-enable before giving up. A
+    # toggle is the only control there is, so an Ardour that refuses to
+    # engage would otherwise be toggled at 0.5 Hz for ever - which on a
+    # rolling transport means a stream of junk captures. Three corrections
+    # is generous for a state that normally agrees on the next frame.
+    RECORD_FIXES_MAX = 3
+
+    def follow_ardour(self, now):
+        """Assert the JOIN: the MPC is playing, so Ardour must be moving.
+
+        Two green tests either side of a gap do not test the gap, and this
+        gap has an observer - the governor publishes `rolling` and `rec` in
+        the region header, so what Ardour is actually doing is readable
+        rather than merely believed. What that buys:
+
+          * a governor that restarted while the MPC was playing comes back
+            to a stopped transport, and the edge-triggered roll above has
+            already been sent, so nothing would ever roll it again;
+          * the session record-enable is a TOGGLE with no setter, and Ardour
+            drops it itself whenever the transport stops while recording -
+            which is exactly what closing a take does. A belief that has
+            drifted turns the next press of REC into a silent disarm.
+        """
+        out = []
+        if self.ardour_rolling is False and self.mpc_playing and \
+                now - self.roll_asked > self.FOLLOW_SETTLE_S:
+            self.roll_asked = now
+            self.enqueue("transport roll")
+            out.append("transport roll")
+        if self.ardour_record is None:
+            return out
+        observed = self.ardour_record > 0
+        if observed == self.session_record:
+            self.record_fixes = 0
+            return out
+        if now - self.record_sent <= self.FOLLOW_SETTLE_S:
+            return out
+        if self.record_fixes >= self.RECORD_FIXES_MAX:
+            return out
+        self.record_fixes += 1
+        # Adopt the truth FIRST, so the toggle below is sent against what
+        # Ardour is rather than against what we hoped.
+        self.session_record = observed
+        self.set_session_record(self.armed)
+        out.append("record %d" % (1 if self.armed else 0))
+        return out
 
     def poll_disk(self):
         """Turn the emulator's answer about the drive into a screen message.
@@ -1167,6 +1351,10 @@ class Daw:
         # Knob edits that have settled go out here, so one gesture is one
         # region edit and one undo entry rather than dozens of each.
         out = self.flush(now)
+        # ...and then what the governor said Ardour is doing, against what
+        # this process asked it to do. poll_regions() above is what makes
+        # that observable, so it has to come after it.
+        out += self.follow_ardour(now if now is not None else time.monotonic())
         return out + [self.perform(a) for a in self.engine.tick(self.playhead)]
 
     # Fader position from dB. This was hardcoded to 0.8 for every strip,
@@ -1384,6 +1572,180 @@ def self_test():
     assert ("/strip/mute", (4, 1)) in o.msgs
     d.command("mute %s" % STRIPS[3])
     assert ("/strip/mute", (4, 0)) in o.msgs
+
+    # --- ARDOUR FOLLOWS THE MPC ---------------------------------------
+    #
+    # The two halves loop recording had never had on the instrument, and
+    # the reason it had never once produced a take from the panel: nothing
+    # wrote the emulator's transport export, so every punch answered
+    # `no-transport`; and nothing rolled Ardour, so a punch that did land
+    # wrote to a timeline standing still. Both are asserted here as JOINS -
+    # a file in, a queue line out - because two green tests either side of
+    # a gap do not test the gap, and this file has shipped that same shape
+    # three times.
+    d.regions_path = os.path.join(qdir, "regions")
+    tport = os.path.join(qdir, "mpc-transport")
+    follow_lane = LANES[2]
+
+    def export(playing, ms, bpm=None):
+        """One line of scripts/daw/transport-export.lua, byte for byte."""
+        with open(tport, "w") as fh:
+            fh.write("%d %d %.6f%s\n" % (playing, ms, ms / 1000.0,
+                                         (" %.1f" % bpm) if bpm else ""))
+        return d.poll_transport(tport)
+
+    # No export at all is what the appliance had: the punch verbs cannot
+    # quantise to a grid that does not exist, and they say so.
+    assert d.poll_transport(os.path.join(qdir, "nope")) is False
+    d.command("arm 1")
+    assert d.command("punch_in %s" % follow_lane) == \
+        ["error no-transport"], "a punch with no bar grid must refuse"
+    d.command("arm 0")
+
+    # The MPC starts. Ardour is rolled BEHIND it - not by a button, which
+    # would fight the one clock the system agrees on, but as a consequence
+    # of what the emulator says its sequencer is doing.
+    mark = len(queued())
+    assert export(1, 0) is True
+    assert "transport roll" in queued()[mark:], queued()[mark:]
+    mark = len(queued())
+    export(1, 250)
+    assert "transport roll" not in queued()[mark:], \
+        "the roll is an edge, not a heartbeat"
+
+    # The fourth field is the sequencer's own tempo, and it wins: a bar grid
+    # at a tempo the drums are not playing quantises to lines that are not
+    # there. Absent (three fields), whatever was configured stays.
+    export(1, 300, bpm=86.0)
+    assert abs(d.transport.bpm - 86.0) < 0.01, d.transport.bpm
+    export(1, 350)
+    assert abs(d.transport.bpm - 86.0) < 0.01, "a short line reset the tempo"
+    d.command("tempo 120")
+    assert d.transport.bpm == 120.0, d.transport.bpm
+
+    # THE GRID IS EXACT, and it is exact because the playhead is computed
+    # before the anchor that hangs off it. The other order - which is what
+    # shipped - anchored each frame to the PREVIOUS frame's playhead, so
+    # every bar line came back one tick early and a "four bar" take was four
+    # bars give or take the poll interval.
+    spb = d.transport.samples_per_bar()
+    export(1, 1234)
+    assert d.transport.bar_anchor_sample == d.playhead - d.playhead % spb, \
+        (d.transport.bar_anchor_sample, d.playhead, spb)
+    assert d.transport.next_bar_sample(d.playhead) % spb == 0
+
+    # ...and end to end: a punch in and a punch out driven by nothing but
+    # the export produce a take that is a whole number of bars. This is the
+    # property the countdown, the largest glyphs on the screen, is about.
+    d.command("arm 1")
+    export(1, 1500)
+    d.command("punch_in %s" % follow_lane)
+    for ms in range(1600, 12000, 100):
+        export(1, ms)
+        d.tick()
+    d.command("punch_out %s" % follow_lane)
+    for ms in range(12000, 22000, 100):
+        export(1, ms)
+        acts = d.tick()
+        if any(a.startswith("finalize") for a in acts):
+            break
+    taken = [a for a in queued() if a.startswith("finalize %s" % follow_lane)]
+    assert taken, queued()
+    length = int(taken[-1].split()[-1])
+    assert length % spb == 0 and length >= spb, (length, spb)
+
+    # THE MPC STOPS. Ardour has to stop with it, and a take still rolling
+    # has to be closed on the last bar line that actually passed - punch-out
+    # schedules a FUTURE bar line, and no more bar lines are coming.
+    d.command("punch_in %s" % follow_lane)
+    for ms in range(22000, 30000, 100):
+        export(1, ms)
+        d.tick()
+    assert d.engine.lanes[follow_lane].state == "recording"
+    mark = len(queued())
+    # As the hardware actually does it. STOP resets the counter to zero ONE
+    # FRAME BEFORE the playing flag drops - measured on the appliance, 6206
+    # ms to 30 ms with `playing` still 1 - so the take has to be closed
+    # against the clock that was, not against a playhead that has already
+    # jumped back to the top of the sequence.
+    export(1, 30)
+    assert d.engine.lanes[follow_lane].state == "looping", \
+        "the take was not closed against the clock that ran"
+    export(0, 30)
+    after = queued()[mark:]
+    assert "transport stop" in after, after
+    assert any(a.startswith("finalize %s" % follow_lane) for a in after), after
+    assert follow_lane not in d.rolling
+    # ...and the lane's fill mark came back into the NEW coordinates with it.
+    # Left in the old ones it sits a whole sequence away from a playhead that
+    # has restarted at zero, and the distance between them is the only thing
+    # `repetitions_needed` reads - so the loop is either never topped up
+    # again or topped up all at once.
+    filled = d.engine.lanes[follow_lane].filled_to
+    assert abs(filled - d.playhead) < 10 * spb, (filled, d.playhead)
+    d.command("arm 0")
+
+    # THE WATCHDOG. The governor publishes what Ardour is ACTUALLY doing, so
+    # a transport that is not rolling under a playing MPC - a governor that
+    # restarted, say - is visible rather than merely unlikely. The edge above
+    # has already been sent; without this nothing would ever roll it again.
+    def header(rolling, rec, gen=1):
+        with open(d.regions_path, "w") as fh:
+            fh.write("# rate %d transport 0 gen %d rolling %d rec %d\n"
+                     % (d.transport.rate, gen, rolling, rec))
+        d.regions_stamp = None
+        d.poll_regions()
+
+    export(1, 31000)
+    header(rolling=0, rec=0)
+    d.roll_asked = 0.0
+    mark = len(queued())
+    d.tick(now=time.monotonic())
+    assert "transport roll" in queued()[mark:], queued()[mark:]
+    header(rolling=1, rec=0, gen=2)
+    mark = len(queued())
+    d.tick(now=time.monotonic())
+    assert "transport roll" not in queued()[mark:], "a rolling Ardour is left alone"
+
+    # ...and the record-enable, which is the one Ardour drops BY ITSELF:
+    # stopping the transport while recording disengages it, and the OSC path
+    # is a toggle with no setter, so a belief that has drifted turns the next
+    # press of REC into a silent disarm. What is published wins.
+    d.command("arm 1")
+    assert d.session_record
+    d.record_sent = 0.0
+    header(rolling=1, rec=0, gen=3)
+    mark = len(o.msgs)
+    d.tick(now=time.monotonic())
+    assert (ardour_bindings.RECORD["session_arm"], ()) in o.msgs[mark:], \
+        "a record-enable Ardour had dropped was not put back"
+    assert d.session_record
+    # Bounded: an Ardour that will not engage must not be toggled for ever,
+    # which on a rolling transport is a stream of junk captures.
+    d.record_sent = 0.0
+    header(rolling=1, rec=0, gen=4)
+    d.tick(now=time.monotonic())
+    d.record_sent = 0.0
+    header(rolling=1, rec=0, gen=5)
+    d.tick(now=time.monotonic())
+    d.record_sent = 0.0
+    header(rolling=1, rec=0, gen=6)
+    mark = len(o.msgs)
+    d.tick(now=time.monotonic())
+    assert o.msgs[mark:] == [], "the record toggle is not bounded"
+    d.command("arm 0")
+
+    # Leave nothing of this behind: the lane goes back to idle, the queue is
+    # emptied, and nothing more is asserted about an Ardour nobody is
+    # publishing - the sections below check the queue line for line.
+    d.command("undo %s" % follow_lane)
+    d.ardour_rolling = None
+    d.ardour_record = None
+    d.mpc_playing = None
+    d.record_fixes = 0
+    open(d.queue, "w").close()
+    os.unlink(d.regions_path)
+    d.regions_stamp = None
 
     # transport export drives the bar grid; recording arms at the bar
     d.transport.update_from_export(1, 0, 0)
@@ -1976,7 +2338,11 @@ def main():
     ap.add_argument("--queue", default=QUEUE)
     ap.add_argument("--regions", default=REGIONS)
     ap.add_argument("--osc-port", type=int, default=3819)
-    ap.add_argument("--bpm", type=float, default=120.0)
+    # The bar grid's starting tempo, for a project whose tempo the emulator's
+    # transport export cannot read. When the export publishes one it wins:
+    # this is a seed, not a setting.
+    ap.add_argument("--bpm", type=float,
+                    default=float(os.environ.get("MPCPI_BPM", "120.0")))
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:

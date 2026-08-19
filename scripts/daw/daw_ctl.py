@@ -269,6 +269,68 @@ class Engine:
         lane.length_samples = None
         return ["clear %s" % name]
 
+    def close_open_takes(self, playhead):
+        """The clock stopped. Close whatever was still recording.
+
+        The MPC owns the transport, so its STOP ends the session's musical
+        time - and a lane left recording across that has nothing that can
+        ever close it: punch-out schedules a bar line, and no more bar lines
+        are coming. It would sit rec-enabled, and Ardour would open a fresh
+        capture the moment anything rolled again.
+
+        Closed on the last bar line that ACTUALLY PASSED, not the next one:
+        there is no audio after the stop to fill a bar that never played.
+        A take that never reached its first bar line is not a take at all,
+        so it is cancelled and whatever the lane held before is put back.
+        """
+        actions = []
+        spb = self.transport.samples_per_bar()
+        for lane in list(self.pending):
+            self.pending.remove(lane)
+            lane.cancel_arm()
+            actions.append("disarm %s" % lane.name)
+        for lane in self.lanes.values():
+            if lane.state != "recording":
+                continue
+            if lane in self.closing:
+                self.closing.remove(lane)
+            lane.stop_at = None
+            bars = int((playhead - lane.start_sample) // spb) if spb else 0
+            actions.append("disarm %s" % lane.name)
+            if bars < 1:
+                lane.cancel_arm()
+                continue
+            # The lane's own length still wins on an overdub, exactly as it
+            # does on a punch-out: a dub cut short by a stop must not
+            # resize the loop it was recorded over.
+            length = lane.length_samples or bars * spb
+            lane.finish(length)
+            lane.bars = max(1, int(round(length / float(spb))))
+            actions.append("finalize %s length %d" % (lane.name, length))
+        return actions
+
+    def rebase(self, delta):
+        """The MPC's clock jumped back by `delta`. Move everything with it.
+
+        The export counts milliseconds ELAPSED SINCE PLAY, so STOP and PLAY
+        START both put it back to zero - measured on the appliance: 6206 ms
+        to 30 ms across one press of STOP. Ardour's transport does not
+        rewind, and it is not supposed to: the two free-run against each
+        other by an unknown constant and always have.
+
+        What must not change is the DIFFERENCE the pacing is built on. A
+        lane's fill mark says how far ahead of the playhead its repetitions
+        are laid; leave it in the old coordinates and it sits hours ahead of
+        a playhead that restarted at zero, so `repetitions_needed` answers
+        nothing for ever and the loop simply stops being topped up - silence,
+        eventually, with no button that means anything.
+        """
+        for lane in self.lanes.values():
+            for attr in ("start_sample", "filled_to", "stop_at"):
+                value = getattr(lane, attr)
+                if value is not None:
+                    setattr(lane, attr, value - delta)
+
     def tick(self, playhead):
         """Call every UI frame: starts due recordings, tops up loops."""
         actions = []
@@ -421,6 +483,48 @@ def self_test():
     assert acts == ["disarm LOOP2", "finalize LOOP2 length 288000"], acts
     assert eng2.command("punch_out LOOP2", playhead=480_000) == \
         ["error not-recording LOOP2"]
+
+    # THE CLOCK STOPS MID-TAKE. The MPC owns the transport, so its STOP ends
+    # musical time: a lane still recording has nothing left that can close it
+    # - punch-out schedules a future bar line and no more are coming - and
+    # would sit rec-enabled for Ardour to reopen at the next roll.
+    eng3 = Engine(et)
+    eng3.add_lane("LOOP3", bars=4)
+    eng3.add_lane("LOOP4", bars=4)
+    assert eng3.command("rec LOOP3", playhead=0) == ["arm LOOP3 at 0"]
+    assert eng3.tick(0) == ["record-start LOOP3"]
+    # Armed, but its bar line never arrived: not a take, and the lane goes
+    # back to what it was rather than becoming a zero-length loop.
+    assert eng3.command("rec LOOP4", playhead=10) == ["arm LOOP4 at 96000"]
+    # Stopped two and a half bars in: closed on the SECOND bar line, the last
+    # one that actually played. There is no audio after the stop to fill the
+    # third with.
+    acts = eng3.close_open_takes(2 * 96_000 + 48_000)
+    assert "disarm LOOP4" in acts and \
+        not any(a.startswith("finalize LOOP4") for a in acts), acts
+    assert eng3.lanes["LOOP4"].state == "idle", eng3.lanes["LOOP4"].state
+    assert "finalize LOOP3 length 192000" in acts, acts
+    assert eng3.lanes["LOOP3"].state == "looping"
+    assert eng3.lanes["LOOP3"].bars == 2
+    assert eng3.pending == [] and eng3.closing == []
+    # A take stopped before its first bar line is not a take at all.
+    eng3.add_lane("LOOP5", bars=4)
+    assert eng3.command("rec LOOP5", playhead=0) == ["arm LOOP5 at 0"]
+    eng3.tick(0)
+    assert eng3.close_open_takes(1000) == ["disarm LOOP5"]
+    assert eng3.lanes["LOOP5"].state == "idle"
+
+    # A REWIND MOVES THE MARKS, NOT THE MUSIC. The export counts milliseconds
+    # since PLAY, so STOP and PLAY START both put it back to zero; what the
+    # pacing actually depends on is the DISTANCE between the fill mark and
+    # the playhead, and that must survive the jump exactly.
+    lane3 = eng3.lanes["LOOP3"]
+    was = lane3.filled_to
+    playhead = 3 * 96_000
+    ahead = was - playhead
+    eng3.rebase(playhead - 5_000)
+    assert lane3.filled_to - 5_000 == ahead, (lane3.filled_to, ahead)
+    assert eng3.lanes["LOOP4"].filled_to is None, "nothing invented a mark"
 
     print("daw-ctl self-test PASS: "
           f"spb@120={96000} anchor={940_000} lane-refill=ok "

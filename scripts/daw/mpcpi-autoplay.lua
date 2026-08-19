@@ -179,6 +179,62 @@ end)
 print("MPCPI_LAMP_EXPORT " .. lamp_path)
 
 -- ===================================================================
+-- EXPORT THE SEQUENCER'S TRANSPORT.
+--
+-- The other half of loop recording, and the reason it had never once
+-- worked from the panel: daw-ctl quantises every punch to the MPC's bar
+-- grid, the grid comes from /dev/shm/mpc-transport, and NOTHING WROTE
+-- THAT FILE on the instrument. scripts/daw/transport-export.lua existed
+-- and was correct; it was simply never loaded, because this is the
+-- autoboot script and there is only one of those. Every press of REC and
+-- a strip button answered `no-transport` and recorded nothing.
+--
+-- FROM THE FRAME NOTIFIER, not a second wait loop. The lamps already
+-- prove that shape works here, and the disk poll below runs at 4 Hz -
+-- far too coarse for a bar grid, where being a quarter of a second late
+-- is a quarter of a second bitten off the front of the take. The machine
+-- frames at ~80 Hz on this driver (measured from the lamp export's own
+-- frame counter: 241 frames in 3.0 s), i.e. 12.5 ms, which is finer than
+-- daw-ctl's own 10 ms tick can consume and costs four byte reads a frame.
+--
+-- AND ITS OWN NOTIFIER, not a line inside the lamp callback: a fault in
+-- one export must not take the other down with it. Keep the token in a
+-- global for the reason written at length above the lamp one - a
+-- discarded subscription dies at Lua's next collection.
+local function sibling(name)
+    -- A service has no useful cwd and this script is handed to MAME by
+    -- absolute path, so resolve next to ourselves. MPCPI_TRANSPORT_LUA
+    -- overrides for harnesses that keep the two files apart.
+    --
+    -- Behind a pcall of a CLOSURE, not of `debug.getinfo` directly: if this
+    -- MAME's Lua were built without the debug library, evaluating that
+    -- argument raises before pcall ever sees it, and this script is also
+    -- the panel lamps and the floppy loader. A missing transport export is
+    -- a feature that does not work; an autoboot script that dies at load is
+    -- an instrument whose disk browser and lamps go with it.
+    local ok, info = pcall(function() return debug.getinfo(1, "S") end)
+    local dir = ok and info and (info.source or ""):match("^@(.*)[/\\]")
+    return (dir or "scripts/daw") .. "/" .. name
+end
+
+local transport_lua = os.getenv("MPCPI_TRANSPORT_LUA")
+    or sibling("transport-export.lua")
+local loaded, transport = pcall(dofile, transport_lua)
+if loaded and type(transport) == "table" then
+    local ready = pcall(transport.attach)
+    if ready then
+        mpcpi_transport_notifier = emu.add_machine_frame_notifier(function()
+            pcall(transport.poll)
+        end)
+    else
+        print("MPCPI_TRANSPORT: attach failed for " .. transport_lua)
+    end
+else
+    print("MPCPI_TRANSPORT: cannot load " .. transport_lua .. ": " ..
+        tostring(transport))
+end
+
+-- ===================================================================
 -- MOUNT THE FLOPPY THE PANEL CHOSE.
 --
 -- The other half of the FILES browser. daw-ctl walks the tree, the panel

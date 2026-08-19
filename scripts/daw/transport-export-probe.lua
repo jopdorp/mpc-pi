@@ -21,5 +21,9 @@ press(field(":Y4", "Play Start"))
 emu.wait(0.5)
 print("TRANSPORT_PROBE_PLAYING")
 
-dofile(os.getenv("MPC_TRANSPORT_EXPORT_LUA")
+-- A module now, not a script: mpcpi-autoplay.lua needs to poll it from
+-- its own loop, so the infinite loop moved into run(). See its header.
+local export = dofile(os.getenv("MPC_TRANSPORT_EXPORT_LUA")
     or "scripts/daw/transport-export.lua")
+export.attach()
+export.run()

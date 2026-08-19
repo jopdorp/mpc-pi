@@ -235,6 +235,14 @@ step("the region list publishes what the playlist holds", function()
 		"the header must carry ARDOUR's rate, got " .. tostring(head.rate))
 	assert(tonumber(head.transport), "no transport position in the header")
 	assert(tonumber(head.gen) > 0, "no generation counter")
+	-- What Ardour is ACTUALLY doing, which daw-ctl can otherwise only
+	-- believe: it drives both through a send-only OSC client, and the
+	-- session record-enable is a toggle Ardour drops by itself whenever the
+	-- transport stops while recording - i.e. on every punch-out.
+	assert(tonumber(head.rolling) == 1,
+		"the header must report the transport, and it is rolling here")
+	assert(tonumber(head.rec) and tonumber(head.rec) > 0,
+		"the header must report the session record-enable, engaged here")
 	local mine = rows_of(rows, "LOOP2")
 	local truth = regions("LOOP2")
 	assert(#mine == #truth,
@@ -373,6 +381,35 @@ step("clear takes the lane off the timeline", function()
 	assert(#r == 0, "a cleared lane left " .. #r .. " regions playing")
 	assert(loop.loops["LOOP1"] == nil, "the lane is still registered")
 end)
+
+-- ARDOUR FOLLOWS THE MPC, and this is the whole of the mechanism: one
+-- queue line, idempotent, guarded by what the transport is actually doing.
+-- Nothing rolled Ardour on the appliance, which is why loop recording could
+-- never produce a take from the panel however the buttons behaved - the
+-- take that verified everything above it was rolled by hand.
+step("the transport follows the queue, and only where it needs to",
+	function()
+		assert(loop.apply("transport stop"))
+		local waited = 0
+		while waited < 2000 and session:transport_rolling() do
+			ARDOUR.LuaAPI.usleep(10 * 1000)
+			waited = waited + 10
+		end
+		assert(not session:transport_rolling(), "stop did not stop it")
+		local head = read_published()
+		assert(tonumber(head.rolling) == 0, "the header still says rolling")
+		assert(loop.apply("transport stop"), "a second stop must not fault")
+		assert(loop.apply("transport roll"))
+		waited = 0
+		while waited < 2000 and not session:transport_rolling() do
+			ARDOUR.LuaAPI.usleep(10 * 1000)
+			waited = waited + 10
+		end
+		assert(session:transport_rolling(), "roll did not roll it")
+		assert(loop.apply("transport roll"), "a second roll must not fault")
+		local ok = loop.apply("transport sideways")
+		assert(not ok, "an unknown transport request must refuse")
+	end)
 
 step("the transport survived every punch-out", function()
 	assert(session:transport_rolling(), "the transport is stopped")

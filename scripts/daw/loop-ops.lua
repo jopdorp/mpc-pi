@@ -256,6 +256,19 @@ end
 -- processed_samples is the engine's own, already in samples and needing no
 -- rate conversion; the wall clock is the fallback for a backend that does
 -- not advance it (and it is only ever used to measure a difference).
+-- The session record-enable as a small integer: 0 disabled, 1 engaged and
+-- waiting, 2 actually writing. By COMPARISON with the enum rather than by
+-- casting it - the numeric values are Ardour's business and have moved
+-- between versions, and a wrong number here would tell daw-ctl to toggle
+-- recording off at the worst possible moment.
+function M.record_state()
+	local ok, st = pcall(function() return M.session:record_status() end)
+	if not ok then return 0 end
+	if st == ARDOUR.Session.RecordState.Recording then return 2 end
+	if st == ARDOUR.Session.RecordState.Enabled then return 1 end
+	return 0
+end
+
 function M.engine_samples()
 	local ok, n = pcall(function()
 		return M.session:engine():processed_samples()
@@ -501,9 +514,25 @@ function M.publish(path)
 	local f = io.open(path .. ".tmp", "w")
 	if not f then return false end
 	M.gen = (M.gen or 0) + 1
-	f:write(string.format("# rate %d transport %d gen %d\n",
+	-- THE TRANSPORT AND THE RECORD-ENABLE COME BACK UP THIS CHANNEL TOO.
+	--
+	-- Both are things daw-ctl can only ever have believed. It drives them
+	-- through a send-only OSC client, and the session record-enable is a
+	-- TOGGLE with no setter (/rec_enable_toggle, Lua's
+	-- maybe_enable_record), so a belief that drifts from the truth turns
+	-- every second press of REC into a silent disarm. Ardour drops the
+	-- record-enable itself when the transport stops while recording -
+	-- which is exactly what a punch-out does - so the drift is not
+	-- hypothetical, it is the normal case.
+	--
+	-- Publishing what IS lets daw-ctl reconcile instead of guess. Same
+	-- reasoning as the region gain feeding WAVE's knob: the channel closes
+	-- when the answer comes back, not when the request goes out.
+	f:write(string.format("# rate %d transport %d gen %d rolling %d rec %d\n",
 		M.session:sample_rate(),
-		M.samples_of(M.session:transport_sample()), M.gen))
+		M.samples_of(M.session:transport_sample()), M.gen,
+		M.session:transport_rolling() and 1 or 0,
+		M.record_state()))
 	for r in M.session:get_routes():iter() do
 		local t = r:to_track()
 		if t and not t:isnil() then
@@ -791,6 +820,49 @@ end
 
 function M.ops.save()
 	M.session:save_state("", false, false, false, false, false)
+end
+
+-- ---- ARDOUR FOLLOWS THE MPC ------------------------------------------
+--
+--   transport roll | stop
+--
+-- A capture needs a rolling transport, and NOTHING ROLLED IT. That is the
+-- second half of why loop recording had never produced a take from the
+-- panel: the punch reached Ardour, the lane rec-enabled, and the timeline
+-- sat at sample 0 with nothing to write. The take used to verify the
+-- region path was made by rolling the transport from a Lua console by
+-- hand.
+--
+-- WHY IT LIVES HERE AND NOT ON THE OSC WIRE. This is not a user-facing
+-- control - the transport belongs to the MPC and Ardour follows it, so
+-- binding PLAY to Ardour would fight the one clock the system agrees on
+-- (docs/daw-interaction.md, "Recording a loop"). What daw-ctl sends is a
+-- consequence of what the emulator's transport export says. And it
+-- belongs on this side because this side is the only one that can READ
+-- Ardour's transport: osc.Client is send-only, so a roll sent over OSC is
+-- a request nobody can confirm, while request_roll() here is guarded by
+-- transport_rolling() and is therefore idempotent. finalize_stop() below
+-- already owns stopping and re-rolling for a punch-out; one owner.
+--
+-- The locate that finalize_stop does is deliberately NOT done here. A
+-- resume after the player stopped the MPC is not a hole punched in a
+-- running timeline - nothing was playing across it - so there is no phase
+-- to make up, and locating would only throw away where the loops are.
+function M.ops.transport(what)
+	if what == "roll" then
+		if not M.session:transport_rolling() then
+			M.session:request_roll(ARDOUR.TransportRequestSource.TRS_UI)
+			M.say("GOVERNOR_TRANSPORT roll")
+		end
+	elseif what == "stop" then
+		if M.session:transport_rolling() then
+			M.session:request_stop(false, false,
+				ARDOUR.TransportRequestSource.TRS_UI)
+			M.say("GOVERNOR_TRANSPORT stop")
+		end
+	else
+		error("transport takes roll or stop, not " .. tostring(what))
+	end
 end
 
 -- Apply one queue line. Returns ok, err - the caller counts and reports.
