@@ -11,7 +11,7 @@ out_dir=${1:-"$repo_root/dist"}
 # The packaging host may not be the binary's host (cross builds), so the
 # architecture is a parameter rather than uname.
 arch=${MPCPI_ARCH:-$(uname -m)}
-version=${MPCPI_VERSION:-"$(date -u +%Y%m%d)-$(git -C "$repo_root" rev-parse --short HEAD)"}
+version=${MPCPI_VERSION:-"$(date -u +%Y%m%d)-$(git -C "$repo_root" rev-parse --short --dirty HEAD)"}
 name="mpcpi-$version-linux-$arch"
 repo_url=$(git -C "$repo_root" remote get-url origin | sed 's/\.git$//')
 
@@ -56,6 +56,12 @@ fi
 
 cp -- "$repo_root/scripts/run-mpc.sh" "$repo_root/scripts/run-mpc2000xl-fast.sh" \
     "$repo_root/scripts/run-mpc2000xl-turbo.sh" "$staging/scripts/"
+# The appliance's ExecStartPost fix: MAME's audio threads inherit the
+# emulation thread's SCHED_RR and starve behind it (9.7% -> 101.6% of
+# realtime audio when raised). The bundle runs it right after launch, as
+# docs/audio-chain.md prescribes.
+cp -- "$repo_root/board/rpi5/rootfs_overlay/usr/bin/mpc-audio-thread-priority.sh" \
+    "$staging/scripts/"
 # The Maschine MK1 hub stack. Appliance-proven; the desktop wiring is provided
 # by mpcpi-maschine but marked experimental in the README until it has been
 # verified with hardware attached to a desktop.
@@ -75,9 +81,27 @@ here=\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)
 export MAME_BIN="\$here/bin/mpc"
 export MAME_ROM_DIR="\$here/roms"
 export MAME_RUNTIME_DIR="\$here/runtime"
-# The repo launcher defaults to this workstation's 12 performance cores; a
-# bundle must not assume any particular host, so default to everything.
-export MAME_CPUSET="\${MAME_CPUSET:-0-\$(( \$(nproc) - 1 ))}"
+# The full CPU range comes from the kernel, not nproc: nproc reports the
+# caller's affinity mask, which can be narrower than the machine (agent
+# shells, cgroup limits) and silently excludes cores. On hybrid CPUs pin to
+# the P-cores for the tuned latency (MPC_CPUSET=0-11 on a Core Ultra).
+all_cpus=\$(cat /sys/devices/system/cpu/online)
+all_cpus=\${all_cpus#0-}
+export MAME_CPUSET="\${MAME_CPUSET:-0-\${all_cpus:-0}}"
+# Raise MAME's audio threads above the emulation thread once it is up;
+# without the realtime rlimit this is skipped with a warning.
+raise_audio_threads()
+{
+    local mpid=
+    for (( i = 0; i < 20; i++ )); do
+        mpid=\$(pgrep -x mpc | head -1) && [ -n "\$mpid" ] && break
+        sleep 1
+    done
+    [ -n "\$mpid" ] || return 0
+    if ! "\$here/scripts/mpc-audio-thread-priority.sh"; then
+        printf 'warning: could not raise audio thread priority (chrt); audio may underrun\n' >&2
+    fi
+}
 # The full panel, maximized: the fast preset's LCD-only 1240x300 view is a
 # diagnostic shape, not what a player wants to look at.
 export MPC_VIEW_NAME="\${MPC_VIEW_NAME:-Default Layout}"
@@ -89,8 +113,11 @@ export MPC_MAXIMIZE="\${MPC_MAXIMIZE:-1}"
 # appliance is unaffected: it runs the panel HLE, a different path.
 export MPC_PANEL_MODE="\${MPC_PANEL_MODE:-accurate}"
 export MPC_PANEL_TIMER_MODE="\${MPC_PANEL_TIMER_MODE:-accurate}"
-exec "\$here/scripts/run-mpc2000xl-fast.sh" \\
-    -pluginspath "\$here/plugins" -plugin layout "\$@"
+"\$here/scripts/run-mpc2000xl-fast.sh" \\
+    -pluginspath "\$here/plugins" -plugin layout "\$@" &
+fast_pid=\$!
+raise_audio_threads
+wait "\$fast_pid"
 WRAPPER
 
 # Stock-accurate paths, and the entry for the other machines (the fast
@@ -102,8 +129,17 @@ here=\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)
 export MAME_BIN="\$here/bin/mpc"
 export MAME_ROM_DIR="\$here/roms"
 export MAME_RUNTIME_DIR="\$here/runtime"
-export MAME_CPUSET="\${MAME_CPUSET:-0-\$(( \$(nproc) - 1 ))}"
-exec "\$here/scripts/run-mpc.sh" "\$@"
+# See mpcpi for why the CPU range comes from the kernel, not nproc.
+all_cpus=\$(cat /sys/devices/system/cpu/online)
+all_cpus=\${all_cpus#0-}
+export MAME_CPUSET="\${MAME_CPUSET:-0-\${all_cpus:-0}}"
+"\$here/scripts/run-mpc.sh" "\$@" &
+fast_pid=\$!
+# The audio-thread starvation fix applies to the accurate path too.
+if "\$here/scripts/mpc-audio-thread-priority.sh"; then :; else
+    printf 'warning: could not raise audio thread priority (chrt); audio may underrun\n' >&2
+fi
+wait "\$fast_pid"
 WRAPPER
 chmod +x "$staging/mpcpi" "$staging/mpcpi-accurate"
 
@@ -118,7 +154,9 @@ here=\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)
 export MAME_BIN="\$here/bin/mpc"
 export MAME_ROM_DIR="\$here/roms"
 export MAME_RUNTIME_DIR="\$here/runtime"
-export MAME_CPUSET="\${MAME_CPUSET:-0-\$(( \$(nproc) - 1 ))}"
+all_cpus=\$(cat /sys/devices/system/cpu/online)
+all_cpus=\${all_cpus#0-}
+export MAME_CPUSET="\${MAME_CPUSET:-0-\${all_cpus:-0}}"
 
 virmidi_card=\$(grep -l '^VirMIDI ' /proc/asound/card*/name 2>/dev/null | head -1 | grep -o 'card[0-9]*' | grep -o '[0-9]*' || true)
 if [[ -z "\$virmidi_card" ]]; then
@@ -151,7 +189,13 @@ hub_pid=\$!
 # export the hub reads, plus a visible LCD.
 export MPC_VIDEO_MODE="\${MPC_VIDEO_MODE:-opengl}"
 export MPC_LCD_EXPORT_PATH="\${MPC_LCD_EXPORT_PATH:-/dev/shm/mpc-lcd}"
-"\$here/scripts/run-mpc2000xl-turbo.sh" -midiin1 "\$midi_port" "\$@"
+"\$here/scripts/run-mpc2000xl-turbo.sh" -midiin1 "\$midi_port" "\$@" &
+fast_pid=\$!
+# The audio-thread starvation fix applies here too.
+if "\$here/scripts/mpc-audio-thread-priority.sh"; then :; else
+    printf 'warning: could not raise audio thread priority (chrt); audio may underrun\n' >&2
+fi
+wait "\$fast_pid"
 WRAPPER
 chmod +x "$staging/mpcpi-maschine"
 
@@ -239,7 +283,12 @@ Unpack the bundle, put your own MPC ROM sets in \`roms/\` (see
     ./mpcpi -flop project.img   # any MAME argument passes straight through
 
 The default entry temporarily forces the PipeWire graph to 44.1 kHz/32
-frames while it runs and restores the previous global settings on exit.
+frames while it runs and restores the previous global settings on exit,
+and raises MAME's audio threads above its emulation thread once started -
+without that, SCHED_RR starvation cracks the audio at small quanta (see
+the project's audio-chain notes). On a hybrid CPU (P+E cores), pin to the
+P-cores for the tuned latency: \`MAME_CPUSET=0-11 ./mpcpi\` on a Core
+Ultra 7 155H.
 
 Pads, buttons and the data wheel follow MAME's default input for these
 machines; press Tab in the window for MAME's input menu. The panel's knobs
