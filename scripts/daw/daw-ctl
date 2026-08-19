@@ -130,6 +130,24 @@ class Daw:
         self.message = ""
         self.playhead = 0
         self.xruns = 0
+        # --- what the jog points at ---
+        #
+        # One knob, four pages, four different things to move - so the target
+        # cannot live in the knob, it has to live in the page. See jog().
+        #
+        # The EDIT cursor is in SAMPLES, like the playhead, because that is
+        # what every position on the wire already is; converting at the edges
+        # is what keeps a bar count from being compared against a sample count
+        # somewhere in the middle.
+        self.cursor = 0
+        self.snap = self.SNAPS[0]
+        # WAVE's two trim handles as fractions of the take, and which one the
+        # jog and K1/K2 are holding. Fractions because the renderer draws them
+        # that way and a take's length is not known until there is one.
+        self.wave_trim = [0.0, 1.0]
+        self.wave_handle = 0
+        self.wave_zoom = 1.0
+        self.wave_gain = 1.0
 
     # --- Ardour ---
 
@@ -238,6 +256,18 @@ class Daw:
             return self.set_armed(parts[1] not in ("0", "off", "false"))
         if verb in ("punch_in", "punch_out") and len(parts) > 1:
             return self.punch(verb == "punch_in", parts[1])
+
+        # THE JOG. maschine-hub has surface-gated the big knob to this verb
+        # since the DAW jog was specified - MPC surface it is the DATA wheel,
+        # DAW surface it is "jog %+d" - and nothing here understood the word,
+        # so it fell through to the loop engine and came back as UNKNOWN
+        # COMMAND JOG on every page. The panel half was built and reported as
+        # built; the knob moved nothing on any page.
+        if verb == "jog" and len(parts) > 1:
+            return self.jog(int(parts[1]))
+        # EDIT's snap, cycled rather than set: three values on one button.
+        if verb == "snap":
+            return self.cycle_snap()
 
         # The file browser. One verb with a sub-verb rather than five top-level
         # words, because everything under it is meaningless unless the browser
@@ -483,7 +513,129 @@ class Daw:
                 self.osc.send("/locate", self.playhead, 0)
                 return ["locate %d" % self.playhead]
             return ["view %s %+d" % (target, delta)]
+        if page == "WAVE":
+            # K1/K2 are the two trim handles, K3 zoom, K4 gain. Turning a
+            # trim knob also SELECTS that handle, so the jog picks up
+            # whichever one the hand last touched without a separate key to
+            # choose with.
+            if target in ("0", "1"):
+                return self.trim(int(target), delta * self.KNOB_FX_STEP)
+            if target == "2":
+                self.wave_zoom = max(1.0, min(64.0, self.wave_zoom *
+                                              (1.0 + delta * 0.002)))
+                self.message = "WAVE ZOOM %.1fX" % self.wave_zoom
+                return ["wave zoom %.2f" % self.wave_zoom]
+            if target == "3":
+                self.wave_gain = max(0.0, min(4.0, self.wave_gain +
+                                              delta * self.KNOB_FX_STEP * 2))
+                self.message = "WAVE GAIN %.2f" % self.wave_gain
+                return ["wave gain %.2f" % self.wave_gain]
+            return ["error no-knob WAVE %s" % target]
         return ["error no-knob %s" % page]
+
+    # --- the jog, and the pages it points at -------------------------------
+
+    # EDIT's snap, in the order the button cycles. The spec's three values,
+    # and BAR first because a loop lands on bars and that is the cut you
+    # make most.
+    SNAPS = ("BAR", "BEAT", "OFF")
+
+    def snap_samples(self):
+        """How far one jog detent moves the EDIT cursor.
+
+        OFF is not "no snap unit" - the cursor still has to move by
+        SOMETHING per detent, and a sample per detent would need forty
+        thousand turns to cross a bar. It is a sixteenth, which is the
+        finest musical unit the panel can show, and the reason the label
+        says OFF rather than 1/16 is that it is the grid that is off: the
+        cursor is no longer being rounded onto one.
+        """
+        bar = self.transport.samples_per_bar()
+        if not bar:
+            return 0
+        if self.snap == "BAR":
+            return bar
+        beat = bar // max(1, self.transport.beats_per_bar)
+        return beat if self.snap == "BEAT" else max(1, beat // 4)
+
+    def cycle_snap(self):
+        i = (self.SNAPS.index(self.snap) + 1) % len(self.SNAPS)
+        self.snap = self.SNAPS[i]
+        self.message = "SNAP %s" % self.snap
+        return ["snap %s" % self.snap]
+
+    def trim(self, handle, amount):
+        """Move one WAVE trim handle, and keep the two in order.
+
+        Clamped against each other, not just against 0..1: a start handle
+        dragged past the end produces an inside-out region that Ardour will
+        accept and no one can see, which is a worse outcome than a handle
+        that stops.
+        """
+        self.wave_handle = handle
+        t = list(self.wave_trim)
+        t[handle] = max(0.0, min(1.0, t[handle] + amount))
+        if t[0] > t[1]:
+            t[handle] = self.wave_trim[handle]
+        self.wave_trim = t
+        self.message = "TRIM %s %.3f" % ("START" if handle == 0 else "END",
+                                         t[handle])
+        return ["trim %d %.4f" % (handle, t[handle])]
+
+    def jog(self, delta):
+        """One knob, four pages, four things to move.
+
+        THE TARGET LIVES IN THE PAGE, not in the knob. The master-knob
+        handler in maschine-hub used to end with a hardcoded "master %+d",
+        so the moment a second DAW target existed the jog would have moved
+        the master fader instead of the cursor; the same mistake on this
+        side would be a single verb that always meant the playhead.
+        """
+        # Defensive: the hub routes the wheel to the browser itself while a
+        # listing is up, so this should not arrive. If it ever does, the
+        # listing is what is under the hand and moving the playhead behind it
+        # would be the surprise.
+        if self.files:
+            self.browser.move(delta)
+            self.files_rows = self.browser_rows()
+            return []
+        if self.page == "SONG":
+            # Snapped to the bar, and it moves ARDOUR'S VIEW, not the clock:
+            # the MPC owns the transport, so this is a locate, and the drums
+            # keep playing through it.
+            step = self.transport.samples_per_bar()
+            if not step:
+                self.message = "NO TEMPO YET"
+                return ["error no-tempo"]
+            self.playhead = max(0, self.playhead + delta * step)
+            self.osc.send("/locate", self.playhead, 0)
+            self.message = "BAR %d" % (self.playhead // step + 1)
+            return ["locate %d" % self.playhead]
+        if self.page == "EDIT":
+            step = self.snap_samples()
+            if not step:
+                self.message = "NO TEMPO YET"
+                return ["error no-tempo"]
+            self.cursor = max(0, self.cursor + delta * step)
+            bar = self.transport.samples_per_bar()
+            self.message = "CURSOR %.2f  SNAP %s" % (
+                self.cursor / float(bar) + 1, self.snap)
+            return ["cursor %d" % self.cursor]
+        if self.page == "WAVE":
+            # Sample-accurate, so the detent is the finest move on the panel
+            # - this is the knob you reach for after the trim knob has got
+            # you close.
+            return self.trim(self.wave_handle,
+                             delta / float(self.WAVE_JOG_DIVISOR))
+        # MIX: nothing, by specification. Not an error - a knob that has no
+        # job on this page is not a fault, and saying UNKNOWN COMMAND about
+        # it is how a working panel comes to look broken.
+        return []
+
+    # A jog detent on WAVE, as a fraction of the take. One turn of the knob
+    # (WHEEL_UNITS_PER_STEP-scaled by the hub) crosses about a fiftieth of
+    # it, which is the "last few samples" move the trim knob cannot make.
+    WAVE_JOG_DIVISOR = 2000.0
 
     # --- the loop ---
 
@@ -619,6 +771,34 @@ class Daw:
             "master": {"name": "MSTR", "db": "0.0", "gain": 0.85,
                        "level_l": 0.0, "level_r": 0.0},
         }
+        # THE PAGES THE JOG POINTS AT have to report where their cursor is, or
+        # turning the knob moves a number nobody can see. These carry the
+        # positions only; the REGIONS are the Lua side's to publish and are
+        # not wired yet, so EDIT draws its grid, its snap and its cursor over
+        # an empty timeline rather than over takes.
+        bar = self.transport.samples_per_bar() or 1
+        st["edit"] = {
+            "snap": self.snap,
+            # The renderer's window and playhead are in BARS; the cursor is
+            # kept in samples for the same reason the playhead is.
+            "cursor": self.cursor / float(bar),
+            "playhead": self.playhead / float(bar),
+            "window": (max(0.0, self.cursor / float(bar) - 4.0),
+                       max(8.0, self.cursor / float(bar) + 4.0)),
+            "lanes": [],
+        }
+        st["wave"] = {
+            "lane": self.focus,
+            "region": "-",
+            "trim": tuple(self.wave_trim),
+            "handle": self.wave_handle,
+            "zoom": self.wave_zoom,
+            "gain": self.wave_gain,
+            "peaks": [],
+        }
+        st["song"] = {"position": self.playhead / float(bar),
+                      "bars": max(1, int(self.playhead / float(bar)) + 8),
+                      "zoom": 0.5, "sections": []}
         # The browser is an OVERLAY: it reports itself as the page so the
         # renderer draws it, and self.page is left alone so closing puts back
         # the page that was underneath rather than a remembered default.
@@ -950,6 +1130,75 @@ def self_test():
         d.command("files close")
         assert not d.files and d.ui_state()["page"] == "LOOP"
         assert "files" not in d.ui_state()
+
+        # --- THE JOG ---------------------------------------------------
+        #
+        # maschine-hub has surface-gated the big knob to "jog %+d" since the
+        # DAW jog was specified, and nothing here parsed the word: it fell
+        # through to the loop engine and came back UNKNOWN COMMAND JOG on
+        # every page. The panel test proved the hub sends it and the panel
+        # test was green, which is the third time that exact shape of gap has
+        # shipped a dead control here - so this asserts the JOIN, page by
+        # page, against the table in docs/daw-interaction.md.
+        d.transport.bpm = 120.0
+        spb = d.transport.samples_per_bar()
+
+        # MIX: nothing, and specifically not an error. A knob with no job on
+        # this page is not a fault, and answering UNKNOWN COMMAND to it is how
+        # a working panel comes to look broken.
+        d.command("page LOOP")
+        d.message = ""
+        assert d.command("jog +1") == [], "the jog must be silent on MIX"
+        assert d.message == "", "MIX's idle jog reported something"
+
+        # SONG: the playhead, snapped to the bar - and it is a LOCATE, not a
+        # transport action. The MPC owns the clock.
+        d.command("page SONG")
+        d.playhead = 0
+        out = d.command("jog +2")
+        assert out == ["locate %d" % (2 * spb)], out
+        assert d.playhead == 2 * spb
+        assert ("/locate", (2 * spb, 0)) in o.msgs, \
+            "SONG's jog did not reach Ardour"
+        d.command("jog -99")
+        assert d.playhead == 0, "the playhead ran off the front of the session"
+
+        # EDIT: the cursor, snapped per SNAP - and SNAP cycles through the
+        # three the spec names.
+        d.command("page EDIT")
+        d.cursor = 0
+        assert d.snap == "BAR"
+        d.command("jog +1")
+        assert d.cursor == spb, (d.cursor, spb)
+        assert d.command("snap") == ["snap BEAT"]
+        d.cursor = 0
+        d.command("jog +1")
+        assert d.cursor == spb // 4, "BEAT snap did not move by one beat"
+        assert d.command("snap") == ["snap OFF"]
+        assert d.command("snap") == ["snap BAR"], "SNAP must cycle, not stick"
+
+        # WAVE: the selected trim handle, and the handle is whichever trim
+        # knob was last touched - so there is no separate key to choose with.
+        d.command("page WAVE")
+        d.wave_trim = [0.0, 1.0]
+        d.command("knob WAVE 1 100")          # K2 = the END handle
+        assert d.wave_handle == 1
+        before = d.wave_trim[1]
+        d.command("jog -5")
+        assert d.wave_trim[1] < before, "the jog did not move the held handle"
+        # The handles cannot cross. An inside-out region is one Ardour will
+        # accept and nobody can see.
+        d.wave_trim = [0.5, 0.5]
+        d.command("knob WAVE 0 100000")
+        assert d.wave_trim[0] <= d.wave_trim[1], d.wave_trim
+
+        # Every page the jog names must be drawable with the state it
+        # produces - the EDIT page took the renderer down once already by
+        # being opened on a session that had no "edit" key at all.
+        for _page in ("LOOP", "SONG", "EDIT", "WAVE"):
+            d.command("page %s" % _page)
+            _st = dict(daw_ui.sample_state(_page), **d.ui_state())
+            assert len(daw_ui.render(_st).px) == 255 * 64, _page
     finally:
         shutil.rmtree(tmp)
     shutil.rmtree(qdir, ignore_errors=True)

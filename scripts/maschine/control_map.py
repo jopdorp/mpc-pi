@@ -339,6 +339,17 @@ DAW_BUTTONS = {
     "group_h":        "daw:page:EDIT",
     "duplicate":      "daw:duplicate",
     "select":         "daw:select",
+    # EDIT's snap grid, cycled: BAR / BEAT / OFF on one button, which is what
+    # the key already means on the MPC side of the panel - SNAP is bar_right
+    # there, "move by the grid". It decides how far one jog detent moves the
+    # edit cursor.
+    #
+    # ONLY THE VERBS THAT DO SOMETHING ARE BOUND HERE. SPLIT, ERASE,
+    # DUPLICATE, UNDO, NORM and MARK are in the specification and their region
+    # ops are not written yet; binding them now would give the player six keys
+    # that light up and change nothing, which is the failure this panel has
+    # already shipped twice.
+    "snap":           "daw:snap",
     "mute":           "mode:MUTE",
     "solo":           "mode:SOLO",
     # Arms loop recording. While armed, display 1-7 punch in and out on their
