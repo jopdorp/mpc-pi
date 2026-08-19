@@ -586,6 +586,56 @@ class Router:
                 return []
             if not target.startswith("mpc:"):
                 return [("cmd", "action %s" % target.split(":", 1)[1])]
+            # THE SAME GESTURE MUST REACH THE SAME KEY FROM EITHER SURFACE.
+            #
+            # It did not. SHIFT is only sent to the MPC on the MPC surface -
+            # DAW_BUTTONS has no "shift" - but this layer fired on both, so
+            # one gesture meant two things and neither the panel nor the
+            # screen said which:
+            #
+            #   MPC surface: SHIFT held + 1/SONG  -> SONG mode
+            #   DAW surface:             1/SONG   -> types "1" into whatever
+            #                                        field the cursor is on
+            #
+            # Both verified on the appliance against the exported LCD. The
+            # DAW-surface case is the worse of the two: it silently EDITS the
+            # machine - a sequence number, a tempo, a program - on a gesture
+            # whose whole purpose is to change screen.
+            #
+            # So the modifier is reconciled here rather than left to whatever
+            # the surface happened to send. The machine wants SHIFT held for
+            # its ten numeric mode keys and refuses every other key while
+            # SHIFT is down (control_map.SHIFT_PADS_SHIFTED has the
+            # measurements), so:
+            #
+            #   a mode key, SHIFT not already down  ->  press it, tap, release
+            #   a bare key, SHIFT already down      ->  lift it, tap, press
+            #
+            # WHETHER THE MACHINE HOLDS SHIFT IS READ OFF self.pressed, never
+            # off the surface. self.pressed is the record of what we actually
+            # sent; the surface is where the panel is pointing NOW, and the
+            # two disagree the moment a player holds SHIFT across a D8. Every
+            # stuck-modifier bug in this file came from asking the second
+            # question when the first was meant.
+            #
+            # Every borrow is a matched pair inside ONE event list, so the
+            # modifier is put back before anything else can be dispatched and
+            # nothing can strand it - not a surface change, not a release
+            # arriving out of order, not a lost pad-up.
+            key = target.split(":", 1)[1]
+            if not SEND_KEY_RELEASE:
+                # Without releases none of the above can be undone, so do not
+                # start: this escape hatch keeps the old press-only behaviour.
+                return [("midi", target)]
+            wants_shift = key in control_map.SHIFT_PADS_SHIFTED
+            machine_holds_shift = "shift" in self.pressed
+            if wants_shift and not machine_holds_shift:
+                borrow, restore = ("midi", "mpc:shift"), ("midi_up", "mpc:shift")
+            elif machine_holds_shift and not wants_shift:
+                borrow, restore = ("midi_up", "mpc:shift"), ("midi", "mpc:shift")
+            else:
+                borrow = restore = None
+            out = [borrow] if borrow else []
             # TAPPED - PRESS AND RELEASE - LIKE EVERY OTHER MPC KEY.
             #
             # This sent the key DOWN and nothing else, ever. Not "the release
@@ -613,9 +663,10 @@ class Router:
             # number before the modifier. Waiting for the pad to fall would put
             # it after the SHIFT release whenever the modifier is let go first,
             # and would strand the key again if the pad's release is ever lost.
-            if SEND_KEY_RELEASE:
-                return [("midi", target), ("midi_up", target)]
-            return [("midi", target)]
+            out += [("midi", target), ("midi_up", target)]
+            if restore:
+                out.append(restore)
+            return out
         # THE PADS ARE ALWAYS THE MPC'S. On both surfaces, in every mode.
         #
         # They used to be re-targeted by mode - hold MUTE and the grid became a
@@ -880,6 +931,59 @@ def self_test():
     assert _rs.pad(_first - 1, 0) == [], \
         "SHIFT+pad must do nothing on the release - it double-pressed the key"
     _rs.shift = False
+
+    # SHIFT+PAD MUST REACH THE MACHINE THE SAME WAY FROM EITHER SURFACE.
+    #
+    # It did not. SHIFT is only sent to the MPC on the MPC surface, so the
+    # same gesture that opened SONG mode there typed a bare "1" into the
+    # field under the cursor on the DAW surface - both measured against the
+    # exported LCD. What has to match is not the byte stream (on the MPC
+    # surface the player's own SHIFT press is in it) but WHAT THE MACHINE
+    # SEES: which key, and whether SHIFT was down when it arrived.
+    if SEND_KEY_RELEASE:
+        def _delivery(surface):
+            """{pad: (key, was SHIFT down when it landed)} for one surface."""
+            rp = Router()
+            if surface == "DAW":
+                rp.button(control_map.SURFACE_TOGGLE, True)
+            rp.button("shift", True)
+            seen = {}
+            for n, t in control_map.SHIFT_PADS.items():
+                if not t.startswith("mpc:"):
+                    continue
+                down = "shift" in rp.pressed
+                key = at_key = None
+                for kind, payload in rp.pad(n - 1, 100):
+                    if payload == "mpc:shift":
+                        down = kind == "midi"
+                    elif kind == "midi":
+                        key, at_key = payload, down
+                assert key is not None, "%s: pad %d sent no key" % (surface, n)
+                # A BORROWED MODIFIER IS ALWAYS PUT BACK, in the same event
+                # list that borrowed it, or the next gesture inherits a shift
+                # nobody is holding.
+                assert down == ("shift" in rp.pressed), \
+                    "%s: pad %d left SHIFT %s" % (surface, n,
+                                                  "down" if down else "up")
+                seen[n] = (key, at_key)
+            rp.button("shift", False)
+            assert "shift" not in rp.pressed
+            return seen
+
+        _mpc_side, _daw_side = _delivery("MPC"), _delivery("DAW")
+        assert _mpc_side == _daw_side, \
+            "SHIFT+pad differs between surfaces: %s" % sorted(
+                n for n in _mpc_side if _mpc_side[n] != _daw_side[n])
+        # ...and the modifier is the one that key needs. The ten mode keys
+        # arrive with SHIFT DOWN; every other key arrives with it UP, because
+        # the firmware ignores a key that has no shifted function while SHIFT
+        # is held - which is why ENTER and MAIN SCREEN, real keys with real
+        # keycodes, did nothing at all on the MPC surface.
+        for _n, (_key, _shifted) in _mpc_side.items():
+            _name = _key.split(":", 1)[1]
+            assert _shifted == (_name in control_map.SHIFT_PADS_SHIFTED), \
+                "pad %d delivers %s with SHIFT %s" % (
+                    _n, _name, "down" if _shifted else "up")
 
     # THE PADS STAY THE MPC'S, whatever mode is held and whichever surface is
     # up. This is the property the whole mixer redesign exists to protect.

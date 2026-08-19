@@ -227,12 +227,33 @@ class TestRouting(unittest.TestCase):
             # as the machine's own panel reports a number let go before its
             # modifier. It used to send the press alone, which latched a panel
             # key in the MPC for good.
+            #
+            # The modifier around it is the hub's to arrange, not the
+            # surface's: pad 7 is a numeric MODE key, which the machine only
+            # answers with SHIFT held, and only the MPC surface sends SHIFT of
+            # its own. So on the DAW surface the tap is wrapped in a borrowed
+            # SHIFT, and what this asserts is the thing that has to be equal -
+            # the key, and that SHIFT was down when it landed.
             key = control_map.SHIFT_PADS[7]
-            self.assertEqual(events, [("midi", key), ("midi_up", key)], where)
+            keys = [(k, p) for k, p in events if p == key]
+            self.assertEqual(keys, [("midi", key), ("midi_up", key)], where)
+            self.assertTrue(self.shift_was_down_at(events, key),
+                            "%s: a mode key arrived without SHIFT" % where)
             self.assertEqual(r.pad(6, 0), [],
                              "%s: the pad release fired the key again" % where)
         else:
             self.assertEqual(events, [("midi", "pad:6:100")], where)
+
+    @staticmethod
+    def shift_was_down_at(events, key, already_down=True):
+        """Was the MPC's SHIFT key down when `key` was delivered?"""
+        down = already_down
+        for kind, payload in events:
+            if payload == "mpc:shift":
+                down = kind == "midi"
+            elif payload == key and kind == "midi":
+                return down
+        return False
 
     # --- transport ---
 

@@ -375,6 +375,39 @@ SHIFT_PADS = {
     15: "mpc:octave_down",   16: "mpc:octave_up",
 }
 
+# WHICH OF THESE THE MACHINE WANTS SHIFT HELD FOR - AND WHICH IT REFUSES
+# WHILE SHIFT IS DOWN.
+#
+# Measured on the appliance with MAME_MPC_LCD_EXPORT as the oracle, one key
+# per line, bare and then with the SHIFT key held:
+#
+#   1/SONG        types "1" into the field under the cursor   ->  SONG mode
+#   MAIN SCREEN   the MAIN screen                             ->  NOTHING
+#   WINDOW        the parameter window                        ->  NOTHING
+#   ERASE         the ERASE screen                            ->  NOTHING
+#   DATA wheel    moves the field under the cursor            ->  NOTHING
+#
+# One fact, two consequences. The firmware only answers SHIFT on the keys
+# that have a shifted function printed on them - the ten numeric mode keys -
+# and IGNORES every other key while SHIFT is down. So the ten digits MUST
+# arrive with SHIFT held or they type digits, and everything else MUST arrive
+# without it or it arrives nowhere at all.
+#
+# This is why pads 11 and 12 did nothing on the MPC surface: ENTER and MAIN
+# SCREEN are real keys with real keycodes, the bytes went out, and the
+# machine dropped them because our own SHIFT was down. They only ever worked
+# on the DAW surface, where SHIFT was not being sent - which is the same
+# silent split that made the ten digits type numbers there instead of
+# changing mode.
+#
+# The panel's SHIFT button is both our pad modifier and the machine's own
+# SHIFT key, so the hub reconciles the two: it presses SHIFT for a mode key
+# when the machine is not already holding it, and lifts it for a bare key
+# when it is. Both are matched pairs inside one gesture - see Router.pad.
+SHIFT_PADS_SHIFTED = frozenset((
+    "song", "misc", "load", "sample", "trim", "program", "mixer", "other",
+    "midi_sync", "zero"))
+
 # --- encoders --------------------------------------------------------
 #
 # The MK1 has exactly eleven, in two physically distinct groups, and they
