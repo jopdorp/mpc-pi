@@ -48,6 +48,8 @@ staging_dir="$br_output/staging"
 # (aarch64-buildroot-linux-gnu- vs aarch64-linux-), so discover it.
 cross_gcc=$(ls "$host_dir"/bin/aarch64-*-gcc 2>/dev/null | grep -v '\.br_real$' | head -1 || true)
 cross_prefix=${cross_gcc%gcc}
+# The toolchain's bin directory - it holds the cross ld that -B must find.
+cross_bin=$(dirname "$cross_gcc")
 
 for required in "$host_dir" "$staging_dir" "$cross_gcc"; do
     if [[ -z "$required" || ! -e "$required" ]]; then
@@ -126,7 +128,21 @@ if [ -d "$MPC_SYSROOT/usr/lib/aarch64-linux-gnu" ]; then
     # <sysroot>/usr/lib and <sysroot>/lib. -B adds a startfile prefix,
     # -L the library search path, and -rpath-link lets ld resolve the
     # DT_NEEDED of a shared library without recording a host path.
-    ldextra="-B$MPC_SYSROOT/usr/lib/aarch64-linux-gnu"
+    # -B ALSO REDIRECTS THE SEARCH FOR ld, NOT JUST FOR LIBRARIES.
+    #
+    # This pointed only at the sysroot's library directory, which contains
+    # no linker, so gcc fell through to the host's and tried to link
+    # aarch64 objects with /usr/bin/x86_64-linux-gnu-ld.bfd:
+    #
+    #   ld.bfd: version.o: Relocations in generic ELF (EM: 183)
+    #   ld.bfd: version.o: error adding symbols: file in wrong format
+    #
+    # EM 183 is AArch64 - every object was compiled correctly and only the
+    # link was wrong, which is why the failure arrives after twenty minutes
+    # of successful compilation rather than immediately.
+    #
+    # The toolchain's own bin directory goes first so its ld wins.
+    ldextra="-B$cross_bin -B$MPC_SYSROOT/usr/lib/aarch64-linux-gnu"
     for d in usr/lib/aarch64-linux-gnu lib/aarch64-linux-gnu usr/lib; do
         ldextra="$ldextra -L$MPC_SYSROOT/$d -Wl,-rpath-link,$MPC_SYSROOT/$d"
     done
