@@ -107,7 +107,14 @@ Environment=MPC_OUTPUT_MODE=stereo
 Environment=MAME_TIMING_MASTER=audio
 Environment=MPC_THROTTLE_MODE=nothrottle
 Environment=MPCPI_PROJECT=/opt/mpc-media/mpc-tutor-logic-mpc2000xl.img
-Environment=MPCPI_AUTOPLAY=1
+# NO AUTOPLAY. This was =1, so the emulator started a beat every time the
+# service came up - and every deploy restarts the service, so the loop kept
+# starting under the player unasked. mpcpi-autoplay.lua is explicit that the
+# flag is a TEST aid and that unset is "boot and sit there, which is the
+# appliance": the unit was simply shipping the test setting.
+#
+# Set MPCPI_AUTOPLAY=1 in a drop-in for a smoke test; do not put it back here.
+# Environment=MPCPI_AUTOPLAY=1
 Environment=XDG_RUNTIME_DIR=/run/user/1001
 
 ExecStart=/opt/mpc-pi-src/scripts/run-mpc2000xl-turbo.sh \
