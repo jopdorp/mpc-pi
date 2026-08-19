@@ -101,6 +101,7 @@ raise_audio_threads()
     if ! "\$here/scripts/mpc-audio-thread-priority.sh"; then
         printf 'warning: could not raise audio thread priority (chrt); audio may underrun\n' >&2
     fi
+    "\$here/scripts/mpcpi-sampler-input" || true
 }
 # The full panel, maximized: the fast preset's LCD-only 1240x300 view is a
 # diagnostic shape, not what a player wants to look at.
@@ -162,6 +163,7 @@ fast_pid=\$!
 if "\$here/scripts/mpc-audio-thread-priority.sh"; then :; else
     printf 'warning: could not raise audio thread priority (chrt); audio may underrun\n' >&2
 fi
+"\$here/scripts/mpcpi-sampler-input" || true
 wait "\$fast_pid"
 WRAPPER
 chmod +x "$staging/mpcpi" "$staging/mpcpi-accurate"
@@ -228,6 +230,7 @@ fast_pid=\$!
 if "\$here/scripts/mpc-audio-thread-priority.sh"; then :; else
     printf 'warning: could not raise audio thread priority (chrt); audio may underrun\n' >&2
 fi
+"\$here/scripts/mpcpi-sampler-input" || true
 wait "\$fast_pid"
 WRAPPER
 chmod +x "$staging/mpcpi-maschine"
@@ -264,6 +267,105 @@ systemctl --user restart wireplumber || true
 sleep 3
 AUDIOSETUP
 chmod +x "$staging/scripts/mpcpi-audio-setup"
+
+# A RATE-MATCHED SINK IN FRONT OF THE SAMPLER INPUT.
+#
+# Linking a browser (or any app) straight into :mic sounds broken, and the
+# reason is measurable: with the graph at 64 frames / 48 kHz, Chrome's own
+# node sat at 1024 frames / 44.1 kHz and was the only node in the graph
+# accumulating errors - :speaker and :mic both read zero. An app adapting
+# its buffer AND resampling directly against the emulator's audio clock is
+# what crackles.
+#
+# So give it something to adapt into: a null sink at the graph's own rate,
+# whose monitor feeds :mic. The app meets a well-behaved node, the emulator
+# sees one clean stream, and the bridge survives the app restarting -
+# a direct app->:mic link dies with the app's stream and has to be redone
+# by hand every time.
+cat >"$staging/scripts/mpcpi-sampler-input" <<'SAMPLERIN'
+#!/usr/bin/env bash
+# Publish "MPC-Sampler-Input" and wire it into the emulator's sampling input.
+# Select it as the output device for whatever you want to sample.
+set -uo pipefail
+sink=mpc_sampler_in
+rate=${PIPEWIRE_RATE_HZ:-48000}
+
+if ! command -v pactl >/dev/null || ! command -v pw-link >/dev/null; then
+    printf 'mpcpi-sampler-input: pactl/pw-link not found; skipping\n' >&2
+    exit 0
+fi
+
+# Idempotent: a second launch must not stack another module.
+if ! pactl list sinks short 2>/dev/null | grep -q "[[:space:]]$sink[[:space:]]"; then
+    # Hyphens, not spaces: pactl splits sink_properties on whitespace, and
+    # every escaping tried here still arrived truncated - the sink came up
+    # described as plain "MPC".
+    if ! pactl load-module module-null-sink sink_name="$sink" \
+            sink_properties=device.description=MPC-Sampler-Input \
+            rate="$rate" >/dev/null 2>&1; then
+        printf 'mpcpi-sampler-input: could not create the sink; skipping\n' >&2
+        exit 0
+    fi
+fi
+
+# :mic exists from machine start (patch 0053), but the machine still has to
+# get there - wait rather than race it.
+for _ in $(seq 30); do
+    pw-link -i 2>/dev/null | grep -q '^:mic:input_FL$' && break
+    sleep 1
+done
+if ! pw-link -i 2>/dev/null | grep -q '^:mic:input_FL$'; then
+    printf 'mpcpi-sampler-input: :mic never appeared; not bridging\n' >&2
+    exit 0
+fi
+
+for ch in FL FR; do
+    pw-link "$sink:monitor_$ch" ":mic:input_$ch" 2>/dev/null
+done
+
+# ANYTHING ELSE ON :mic IS A SECOND COPY. The session manager auto-connects
+# the default capture device to any free capture node - that is the room
+# microphone landing on the sampler input, and with the monitor up it is a
+# feedback loop. It also re-links an application that was pointed here
+# directly, so the same audio arrives twice, summed. Leave only the bridge.
+keep="$sink:monitor_"
+# Node names contain spaces ("Google Chrome:output_FL"), so this cannot
+# field-split: take everything after the arrow, and carry the pair on a tab.
+pw-link -l 2>/dev/null | awk -v keep="$keep" '
+    /^:mic:input_(FL|FR)$/ { dst = $1; next }
+    dst && /^[[:space:]]*\|<-[[:space:]]/ {
+        src = $0
+        sub(/^[[:space:]]*\|<-[[:space:]]*/, "", src)
+        sub(/[[:space:]]+$/, "", src)
+        if (index(src, keep) != 1) print src "\t" dst
+        next
+    }
+    /^[^[:space:]]/ { dst = "" }
+' | while IFS=$'\t' read -r src dst; do
+    [ -n "$src" ] && [ -n "$dst" ] && pw-link -d "$src" "$dst" 2>/dev/null
+done
+
+# AND NOTHING SHOULD TAP :mic's MONITOR. Observed live: the session manager
+# linked :mic:monitor_FL straight to the speakers' RIGHT channel, so the raw
+# input reached the ears cross-channel, bypassing the machine and summing
+# with the MPC's own monitor. Monitoring is the emulated machine's job.
+pw-link -l 2>/dev/null | awk '
+    /^:mic:monitor_(FL|FR)$/ { src = $1; next }
+    src && /^[[:space:]]*\|->[[:space:]]/ {
+        dst = $0
+        sub(/^[[:space:]]*\|->[[:space:]]*/, "", dst)
+        sub(/[[:space:]]+$/, "", dst)
+        print src "\t" dst
+        next
+    }
+    /^[^[:space:]]/ { src = "" }
+' | while IFS=$'\t' read -r src dst; do
+    [ -n "$src" ] && [ -n "$dst" ] && pw-link -d "$src" "$dst" 2>/dev/null
+done
+
+printf 'mpcpi-sampler-input: MPC-Sampler-Input -> the sampler; select it as the output device of whatever you want to sample\n'
+SAMPLERIN
+chmod +x "$staging/scripts/mpcpi-sampler-input"
 
 # The MPC2000XL panel layout is drawn for the layout helper plugin: without
 # it the knobs and sliders render a warning string and are not mouse-driven.
