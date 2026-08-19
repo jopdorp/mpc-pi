@@ -246,9 +246,9 @@ Nothing is on a modifier and nothing is on a pad. `SPLIT`, `NORM` and
 `UNDO` are printed nowhere on this panel — they are labels drawn under the
 right-hand screen, and the four buttons under that screen are the strip
 row here — so where the silkscreen says nothing, **position carries it**:
-the last four sit in one 2×3 block on the left of the panel, the block
-that already held `SNAP`, so EDIT's whole vocabulary is one shape under
-one hand.
+the other five keys sit in one 2×3 block on the left of the panel,
+alongside the `SNAP` that was already there, so EDIT's whole vocabulary
+is one shape under one hand.
 
     BROWSE -> UNDO          SAMPLING   -> SPLIT
     ◀      -> REGION PREV   ▶          -> REGION NEXT
