@@ -82,12 +82,34 @@ mkdir -p "$(dirname "$SESSION_DIR")"
 # calling it, so the governor found no session, tried to create a bare one,
 # failed, and restarted twelve times in a row.
 if [ ! -f "$SESSION_DIR/$SESSION_NAME.ardour" ]; then
-	echo "no session at $SESSION_DIR/$SESSION_NAME.ardour - building it"
-	# An empty directory left by a previous failed attempt is enough to make
-	# create_session refuse. Remove it if it is empty; never if it is not.
-	[ -d "$SESSION_DIR" ] && rmdir "$SESSION_DIR" 2>/dev/null || true
-	pw-jack "$LUASESSION" "$SRC/scripts/daw/session-template.lua" ||
-		{ echo "session-template failed" >&2; exit 1; }
+	# A missing state with rescue candidates: RESTORE, do not rebuild. The
+	# governor's own recovery renames an unloadable live state to
+	# .broken-<stamp> ("moved an unloadable session aside") and Ardour keeps
+	# a .bak of the previous save, but nothing ever put either back - and
+	# create_session below cannot rebuild into this non-empty directory, so
+	# the service looped for two days between "no session" and "Session
+	# already exists" while the takes sat intact on disk. The newest
+	# quarantine is the state the machine itself chose to save last; copy
+	# rather than move so the evidence stays whatever happens to the copy.
+	# If the state is genuinely dead the governor re-quarantines the copy
+	# and this restarts the search - visible in the journal as the same
+	# candidate coming back, which is the operator's cue to intervene.
+	cand=$(ls -t "$SESSION_DIR/$SESSION_NAME.ardour.broken-"* \
+		"$SESSION_DIR/$SESSION_NAME.ardour.bak" 2>/dev/null | head -1)
+	if [ -n "$cand" ]; then
+		echo "no live state at $SESSION_DIR/$SESSION_NAME.ardour" \
+			"- restoring $cand"
+		cp -p "$cand" "$SESSION_DIR/$SESSION_NAME.ardour" ||
+			echo "WARNING: restore of $cand failed" >&2
+	else
+		echo "no session at $SESSION_DIR/$SESSION_NAME.ardour - building it"
+		# An empty directory left by a previous failed attempt is enough to
+		# make create_session refuse. Remove it if it is empty; never if it
+		# is not.
+		[ -d "$SESSION_DIR" ] && rmdir "$SESSION_DIR" 2>/dev/null || true
+		pw-jack "$LUASESSION" "$SRC/scripts/daw/session-template.lua" ||
+			{ echo "session-template failed" >&2; exit 1; }
+	fi
 fi
 
 # pw-jack, so Ardour's JACK backend lands on PipeWire instead of hunting for
