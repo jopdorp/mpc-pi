@@ -16,9 +16,10 @@ click without affecting panel inputs underneath it.
 diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
 --- a/src/mame/akai/mpc2000.cpp
 +++ b/src/mame/akai/mpc2000.cpp
-@@ -1724,5 +1724,12 @@ static INPUT_PORTS_START( mpc2000 )
- 	PORT_BIT(0x100, IP_ACTIVE_HIGH, IPT_KEYBOARD) PORT_NAME("DATA Wheel -") PORT_CODE(KEYCODE_MINUS)
- 	PORT_BIT(0x200, IP_ACTIVE_HIGH, IPT_KEYBOARD) PORT_NAME("DATA Wheel +") PORT_CODE(KEYCODE_EQUALS)
+@@ -1767,6 +1767,13 @@
+ 	// hides and captures the pointer.
+ 	PORT_START("MPCPI_WHEEL")
+ 	PORT_BIT(0x01, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("DATA Wheel Drag")
 +
 +	PORT_START("MPCPI_MENU")
 +	PORT_BIT(0x01, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("Device Settings")
@@ -60,13 +61,13 @@ diff --git a/src/mame/layout/mpc2000xl.lay b/src/mame/layout/mpc2000xl.lay
  	<!-- Box and Screen -->
  	<element ref="box-topedge"><bounds x="0" y="0" width="6000" height="180" /></element>
 +	<element ref="menu-device-settings" inputtag="MPCPI_MENU" inputmask="0x01">
-+		<bounds x="120" y="25" width="1180" height="125" /></element>
++		<bounds x="3755" y="48" width="787" height="83" /></element>
 +	<element ref="menu-disk" inputtag="MPCPI_MENU" inputmask="0x02">
-+		<bounds x="1320" y="25" width="650" height="125" /></element>
++		<bounds x="4555" y="48" width="433" height="83" /></element>
 +	<element ref="menu-midi" inputtag="MPCPI_MENU" inputmask="0x04">
-+		<bounds x="1990" y="25" width="650" height="125" /></element>
++		<bounds x="5001" y="48" width="433" height="83" /></element>
 +	<element ref="menu-audio" inputtag="MPCPI_MENU" inputmask="0x08">
-+		<bounds x="2660" y="25" width="650" height="125" /></element>
++		<bounds x="5447" y="48" width="433" height="83" /></element>
  	<element ref="rect"><bounds x="0" y="180" width="6000" height="4146" /><color red="0.87" green="0.858" blue="0.847"/></element>
  	<collection name="script warning">
  		<element ref="script_warning" id="warning"><bounds x="3000" y="40" width="2900" height="100"/><color red="1" green="0" blue="0" /></element>
