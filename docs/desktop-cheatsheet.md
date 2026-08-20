@@ -11,12 +11,28 @@ Anything typed after `./mpcpi` is handed straight to MAME: the wrapper appends
 its `exec` line with `"$@"`. So every MAME option works, and the launcher's
 tuning still applies.
 
-Launch through `./mpcpi`, not `./bin/mpc`. The raw binary skips the wrapper's
-audio tuning and realtime setup, and it also stops twice at boot on MAME's
-press-any-key screens (system info, then known problems) — both hang off the
-same `skip_gameinfo` option in MAME's UI, which the wrapper passes and a bare
-`./bin/mpc` does not. A raw launch that seems frozen at ~5% CPU with no sound
-is usually sitting on one of those screens.
+Launch through `./mpcpi`, not `./bin/mpc`: the raw binary skips the wrapper's
+graph tuning, its realtime setup and the sampler input.
+
+MAME also stops twice at boot on press-any-key screens — system information,
+then known problems. **Neither launcher skips them.** Both screens hang off
+MAME's `skip_gameinfo` option, `./bin/mpc -showconfig` reports it as `0`, and
+`skip_gameinfo` appears nowhere in `mpcpi`, `run-mpc2000xl-fast.sh` or
+`run-mpc.sh`. Pass it yourself if you want them gone:
+
+    ./mpcpi -skip_gameinfo -flop project.img
+
+That passes through cleanly (checked); whether the two screens are then gone
+from a windowed launch is **[verify by hand]**, because the screens are
+suppressed automatically under `-video none`, under `-seconds_to_run` below 300,
+and under the debugger — which is also why scripted runs never see them and no
+check from here can. A windowed launch that looks frozen with no sound is
+usually sitting on one of them.
+
+If you see `-skip_gameinfo` in a running instance's `ps` line, that is the
+person or script who launched it appending the flag, not the wrapper. Reading
+one live command line and generalising it to the launcher is exactly how the
+wrong version of this paragraph got written.
 
 A handful of steps are keypresses in the focused emulator window and could not
 be executed from here. They are marked **[verify by hand]** and collected at the
@@ -310,3 +326,6 @@ desktop's settings:
    MPC-Sampler-Input. (Shift + `3 / Load` for the LOAD screen is verified.)
 8. Tab → **Input Settings → Input Assignments (this system)** lists the panel
    bindings.
+9. `./mpcpi -skip_gameinfo` really does remove the two press-any-key screens
+   from a normal windowed launch. (The flag passing through the wrapper is
+   verified; the screens cannot appear in any run that could be scripted here.)
