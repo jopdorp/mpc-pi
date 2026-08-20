@@ -1,0 +1,147 @@
+sound: a node that is absent right now is not a stale mapping
+
+The MPC's sampling input did not exist in the host graph on a cold start.
+Not late, not silent - absent: no :mic node at all, so the launcher's
+bridge had nothing to link the sampler sink into and gave up, and every
+"route host audio into the sampler" attempt was aimed at a node that was
+never created.
+
+The cause is in sound_manager::generate_mapping(). A saved mapping that
+names a specific host node is resolved with find_node(); when the name
+does not resolve the entry was not skipped, it was DELETED from the
+configuration - collected into node_to_remove and passed to
+internal_config_remove_sound_io_connection_node(). This machine's saved
+configuration maps :mic to o:MPC-Sampler-Input, the null sink the
+launcher publishes, and on a cold start that sink does not exist yet. So
+the mapping was destroyed on the first pass, the microphone was left with
+no mapping at all, update_osd_streams() therefore never called
+sound_stream_source_open() for it, and no capture node was created.
+Nothing recovered when the sink appeared two seconds later, because the
+entry it would have bound to was gone.
+
+Measured on this workstation, all three with the emulator killed and the
+sink unloaded first so nothing was pre-existing. Before: :mic still
+absent three and a half minutes in, with the sink up and waiting. With
+the sink created BEFORE launch, so the name resolved on the first pass:
+:mic up in 1.0 s. After this change, sink created by the launcher as
+usual, after the machine: :mic up in 1.55 s, and the bridge linked
+mpc_sampler_in's monitor into it without help.
+
+Also settled what the DSP had nothing to do with it. The previous
+explanation was that MAME opens a capture node when the machine first
+READS its input stream, and patch 0053 had the sound device read and
+discard both input channels while idle to force it open. That was wrong:
+a binary carrying that read shows the same empty graph in the same cold
+start. The read never created anything, and it is gone.
+
+Host nodes come and go - an interface plugged in late, a headset that
+connects, a virtual sink published by a companion script - and absence on
+one pass is not consent to forget where the user pointed the device.
+Skipping the unresolved name leaves the entry in the configuration and
+the next generation binds it, which is also what makes the recovery above
+work. Removal stays in the sound menu, where it was asked for.
+--- a/src/emu/sound.cpp
++++ b/src/emu/sound.cpp
+@@ -1412,13 +1412,33 @@
+ 				return 0;
+ 			};
+ 
++	// A NODE THAT IS NOT IN THE GRAPH RIGHT NOW IS NOT A STALE ENTRY.
++	//
++	// A mapping that names a node the host cannot currently resolve used to
++	// be deleted from the configuration here. Host nodes come and go - a USB
++	// interface is plugged in late, a Bluetooth headset connects, a virtual
++	// sink is published by a companion script after the emulator is already
++	// up - and deleting the entry on the first pass that cannot see the node
++	// throws away routing the user chose, permanently: nothing puts it back
++	// when the node appears a second later.
++	//
++	// It also costs the device its host stream entirely. A microphone whose
++	// only mapping has just been deleted has no mapping at all, so
++	// update_osd_streams() never calls sound_stream_source_open() for it and
++	// no capture node is created - measured on the MPC2000XL, whose sampling
++	// input is mapped to a null sink the launcher publishes: the capture node
++	// was still missing three and a half minutes in, long after the sink had
++	// appeared. Skipping the unresolved name instead leaves the entry in the
++	// configuration, and the next generation - the host bumps one when a node
++	// is added - binds it. The same measurement then had the capture node up
++	// one second after the sink existed. Removal stays where the user asked
++	// for it, in the sound menu.
+ 	m_mappings.clear();
+ 	for(speaker_info &speaker : m_speakers) {
+ 		auto &config = config_get_sound_io(&speaker.m_dev);
+ 		m_mappings.emplace_back(mapping{ &speaker.m_dev });
+ 		auto &omap = m_mappings.back();
+ 
+-		std::vector<std::string> node_to_remove;
+ 		for(auto &nmap : config.m_node_mappings) {
+ 			if(nmap.first == "") {
+ 				if(m_osd_info.m_default_sink)
+@@ -1427,15 +1447,9 @@
+ 				u32 node_id = find_node(nmap.first);
+ 				if(node_id != 0)
+ 					omap.m_node_mappings.emplace_back(mapping::node_mapping{ node_id, nmap.second, false });
+-				else
+-					node_to_remove.emplace_back(nmap.first);
+ 			}
+ 		}
+ 
+-		for(auto &nmap: node_to_remove)
+-			internal_config_remove_sound_io_connection_node(&speaker.m_dev, nmap);
+-
+-		std::vector<std::tuple<u32, std::string, u32>> channel_map_to_remove;
+ 		for(auto &cmap : config.m_channel_mappings) {
+ 			if(std::get<1>(cmap) == "") {
+ 				if(m_osd_info.m_default_sink)
+@@ -1444,13 +1458,8 @@
+ 				u32 node_id = find_node(std::get<1>(cmap));
+ 				if(node_id != 0)
+ 					omap.m_channel_mappings.emplace_back(mapping::channel_mapping{ std::get<0>(cmap), node_id, std::get<2>(cmap), std::get<3>(cmap), false });
+-				else
+-					channel_map_to_remove.emplace_back(std::get<0>(cmap), std::get<1>(cmap), std::get<2>(cmap));
+ 			}
+ 		}
+-
+-		for(auto &cmap : channel_map_to_remove)
+-			internal_config_remove_sound_io_channel_connection_node(&speaker.m_dev, std::get<0>(cmap), std::get<1>(cmap), std::get<2>(cmap));
+ 	}
+ 
+ 	for(microphone_info &mic : m_microphones) {
+@@ -1458,7 +1467,6 @@
+ 		m_mappings.emplace_back(mapping{ &mic.m_dev });
+ 		auto &omap = m_mappings.back();
+ 
+-		std::vector<std::string> node_to_remove;
+ 		for(auto &nmap : config.m_node_mappings) {
+ 			if(nmap.first == "") {
+ 				if(m_osd_info.m_default_source)
+@@ -1467,15 +1475,9 @@
+ 				u32 node_id = find_node(nmap.first);
+ 				if(node_id != 0)
+ 					omap.m_node_mappings.emplace_back(mapping::node_mapping{ node_id, nmap.second, false });
+-				else
+-					node_to_remove.emplace_back(nmap.first);
+ 			}
+ 		}
+ 
+-		for(auto &nmap: node_to_remove)
+-			internal_config_remove_sound_io_connection_node(&mic.m_dev, nmap);
+-
+-		std::vector<std::tuple<u32, std::string, u32>> channel_map_to_remove;
+ 		for(auto &cmap : config.m_channel_mappings) {
+ 			if(std::get<1>(cmap) == "") {
+ 				if(m_osd_info.m_default_source)
+@@ -1484,13 +1486,8 @@
+ 				u32 node_id = find_node(std::get<1>(cmap));
+ 				if(node_id != 0)
+ 					omap.m_channel_mappings.emplace_back(mapping::channel_mapping{ std::get<0>(cmap), node_id, std::get<2>(cmap), std::get<3>(cmap), false });
+-				else
+-					channel_map_to_remove.emplace_back(std::get<0>(cmap), std::get<1>(cmap), std::get<2>(cmap));
+ 			}
+ 		}
+-
+-		for(auto &cmap : channel_map_to_remove)
+-			internal_config_remove_sound_io_channel_connection_node(&mic.m_dev, std::get<0>(cmap), std::get<1>(cmap), std::get<2>(cmap));
+ 	}
+ }
+ 
