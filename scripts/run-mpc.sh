@@ -673,6 +673,14 @@ if [[ "$video_mode" != none ]]; then
     )
 fi
 
+# DATAENTRY is an IPT_DIAL_V on the MPC2000XL.  Enable its mouse axis without
+# global -mouse, which would hide and capture the pointer needed by the panel
+# and Device Settings menu.
+dial_options=()
+if [[ "$system_name" == mpc2000xl ]]; then
+    dial_options=(-dial_device mouse)
+fi
+
 printf 'Video: %s, async=%s, event-loop-isolation=%s, view=%s, window-resolution=%s, artwork-resolution=%s, screen-filter=%s, ogl-vbo=%s\n' \
     "$video_mode" "$async_present" "$external_event_loop" "$view_name" \
     "$window_resolution" "$artwork_resolution" "$filter_mode" "$gl_vbo"
@@ -707,5 +715,6 @@ exec taskset --cpu-list "$mame_cpuset" nice -n "$mame_nice" "${scheduler_prefix[
     -state_directory "$runtime_dir/sta" \
     -video "$video_mode" \
     "${window_options[@]}" \
+    "${dial_options[@]}" \
     "$throttle_option" \
     "$@"
