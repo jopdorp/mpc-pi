@@ -1,0 +1,245 @@
+l7a1045: the wave transfer trails the ADC instead of overtaking it
+
+This is the crackle that survived 0055. Stereo sampling was correct at every
+stage by then and still every take came back with a buzz on it, the input
+meters twitched, and - the detail that turned out to name the fault - the
+monitor sounded clean until RECORD was pressed.
+
+TWO CHANNELS, ONE STREAM OF WORDS, TWO DIFFERENT SHAPES. A take moves through
+the guest's 0x7F000 ring twice. DMA channel 2 writes the ADC into it; channel 3
+reads it back out into wave RAM. The header already stated the invariant that
+makes that work - "channel 3's Nth word is channel 2's Nth word" - but nothing
+enforced it. Channel 2 is driven by data: update_adc_drq() holds DRQ while the
+capture ring has words, so the DMAC empties it at bus speed. Channel 3 is
+driven by a timer at the ADC rate. On the real machine both are paced by the
+one 44.1kHz audio clock and the invariant is free. Here the ADC clock is the
+sound stream, which hands over fifteen frames at a time, once every 333us. So
+channel 2's write pointer stands still and then leaps thirty words, while
+channel 3's advances evenly. Identical words per second, opposite shape.
+
+They crossed on every block. Instrumenting the phase - (channel 2 words in)
+minus (channel 3 words out), sampled at every wave word and reported twice a
+second - measured it directly:
+
+    PHASE block=15 depth_min=0 starved=0 held=0 lag=[-25,3]
+
+Channel 3 ran up to twenty-six words AHEAD of channel 2 and spent most of every
+333us copying ring slots the ADC had not filled yet, about three thousand times
+a second. What sat in those slots was the previous lap of the 2KiB ring, so the
+take was not merely late in places, it had stale audio spliced into it at the
+block rate. That is audible as a buzz, not as clicks, and it is why it appears
+on RECORD: while the machine is only metering, the firmware polls the DSP
+constantly and every poll calls m_stream->update(), which splits production into
+one- and two-frame blocks and leaves nothing to cross. The take stops the
+polling, blocks go to their full fifteen frames, and the sawtooth appears.
+
+The spectrum says the same thing without any reference to the emulator's
+internals. The probe is a pure tone per channel, and both captures carry
+sidebands at the tone plus and minus 3kHz - the sound-update block rate, and
+nothing in the audio path has any other reason to produce it.
+
+SO GATE THE TICK ON CHANNEL 2 BEING AHEAD. Channel 3 keeps its own even timer,
+which is what makes the wave-RAM write pointer advance smoothly for the voice
+monitoring the take and for the meter scan; it simply may not run until the
+words it is about to copy exist. The lead is one sound-update block, taken from
+the largest block the machine has actually handed over during this take rather
+than chosen: one block is the whole amplitude of the sawtooth, so one block of
+lead is what stops the gate biting again. Note the gate is a floor and not a
+pace - any lead at all makes the crossing impossible, and the size only decides
+whether channel 3 runs evenly or stutters.
+
+MEASURED, A/B, ON ONE BINARY. Both arms are the same build with the same reset
+of the audio graph before each; the switch that bypassed the gate existed only
+for this comparison and is not in the diff. Phase, per half-second report:
+
+                       before              after
+    lag            [-25,+3]            [+29,+62]
+    crossings      every block         none
+    held           n/a                 55 in the first report, then 0
+    starved        0                   0
+
+"starved" is reads that found the capture ring empty. It is zero in both arms,
+which settles a standing question: the held-last-value path in adc_dma_r16_cb
+is unreachable, level DRQ really does stop the DMAC rather than let it invent
+audio, and depth_min=0 is the level DRQ working as designed and not a fault.
+
+Sideband power at the tone plus/minus k*3kHz, as a fraction of the tone:
+
+                   L before   L after     R before   R after
+    MONITOR           1.31%     0.00%       18.73%     0.00%
+    RECORD            2.61%     0.00%       46.06%     0.00%
+    PLAYBACK          1.44%     0.00%       26.82%     0.00%
+    PAD               1.44%     0.00%       58.66%     0.01%
+
+And the same result with no assumption about where the artefact sits - total
+energy from 2kHz to 20kHz as a fraction of all energy:
+
+                   L before   L after     R before   R after
+    MONITOR           2.84%     0.12%       29.71%     0.27%
+    RECORD            6.74%     0.24%       52.00%     0.46%
+    PLAYBACK          4.29%     0.34%       40.62%     0.54%
+    PAD               3.79%     0.57%       53.24%     1.01%
+
+Stereo separation is unchanged - 18.2x to 31.4x across the stages in the
+before arm, 11.5x to 33.8x across the stages of three separate after runs, on
+a measure that varies that much run to run because the PAD stage is a single
+one-shot and the window that catches it moves. The take length is unchanged too: the ADC
+word count per run is identical, and the wave word count moves from twenty-six
+ahead to twenty-nine behind, which is exactly the lead and a third of a
+millisecond of extra take.
+
+Two other repairs were considered and rejected on the same reading of the
+phase, not benchmarked. Calling m_stream->update() from the timer would pull
+production forward, but the timer runs at 88.2kHz and every call is a full
+thirty-two voice update. Slaving channel 3 to channel 2 word for word enforces
+the invariant exactly, and is wrong for the reason the free-running timer is
+right: it would make the wave-RAM write pointer as bursty as channel 2, and
+the voice reading the take back would then overtake it between blocks. The
+rate arithmetic in
+arm_dma_timer() was checked and is correct for stereo - 33.8688MHz/768 is 44100
+exactly, so production and consumption match to the attosecond and a lead once
+established never drifts away.
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.h
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.h
+@@ -141,6 +141,25 @@
+ 	u64             m_adc_words = 0;
+ 	u32             m_rec_peak = 0;
+ 	u64             m_rec_report_at = 0;
++	// PHASE, not just depth. An average rate that matches proves nothing: the
++	// two DMA channels can each move the right number of words per second and
++	// still cross each other inside every block. depth_min is how close the
++	// ADC ring came to running dry; starved counts the reads that found it
++	// dry; lag_min/lag_max bracket (channel 2 words in) - (channel 3 words
++	// out), which is how far channel 3 trails the audio it is copying. A
++	// lag that reaches zero means channel 3 read wave data channel 2 had not
++	// written yet.
++	u32             m_rec_depth_min = 0;
++	u32             m_rec_starved = 0;
++	u32             m_rec_held = 0;
++	int64_t         m_rec_lag_min = 0;
++	int64_t         m_rec_lag_max = 0;
++	// The largest sound-update block the machine has handed over during this
++	// take, in frames. Not a statistic: dma_timer_callback() takes the lead
++	// channel 3 must keep behind channel 2 from it, so the transfer is paced
++	// against the granularity the audio actually arrives at rather than
++	// against a number somebody picked.
++	u32             m_rec_block = 0;
+ 	// Register-0 reads since the take began. The take-length poll is the one
+ 	// piece of this protocol that cannot be inferred from the outside - it is
+ 	// a read, so it leaves no trace in memory - and the first few are the ones
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -1061,10 +1061,59 @@
+ 
+ 	vptr.pos++;
+ 	m_wave_words++;
++
++	if (m_rec_debug && m_rec_on)
++	{
++		const int64_t lag = int64_t(m_adc_words) - int64_t(m_wave_words);
++		if (lag < m_rec_lag_min) m_rec_lag_min = lag;
++		if (lag > m_rec_lag_max) m_rec_lag_max = lag;
++	}
+ }
+ 
+ TIMER_CALLBACK_MEMBER(l7a1045_sound_device::dma_timer_callback)
+ {
++	// CHANNEL 3 TRAILS CHANNEL 2; IT MUST NOT RACE IT.
++	//
++	// The two record channels move the same words through the guest's
++	// 0x7F000 ring - channel 2 writes them in, channel 3 reads them out into
++	// wave RAM - and on the real machine both are paced by the one 44.1kHz
++	// audio clock, so channel 3 always reads behind channel 2's pen.
++	//
++	// Here they have the same average rate and nothing else in common. The
++	// ADC clock is the sound stream, which hands over a whole update block at
++	// a time: fifteen frames, thirty stereo words, once every 333us. Channel
++	// 2's DRQ is level and drains that block in a few microseconds, so the
++	// write pointer stands still and then leaps. Channel 3's timer is even.
++	// Same words per second, opposite shape - and measured on a real take the
++	// two crossed on every block: the phase of (channel 2 words in) minus
++	// (channel 3 words out) ran from +4 down to -25 and back, once per block,
++	// which is channel 3 spending most of every 333us copying ring slots the
++	// ADC had not reached yet. What it copied there was the previous lap of
++	// the ring, a whole buffer of audio out of date, and the take came out
++	// with a 3kHz buzz on it - the block rate - which is the crackle.
++	//
++	// So gate the tick on channel 2 being ahead. This is a floor and not a
++	// pace: while channel 2 leads, channel 3 keeps its own even rate and the
++	// wave-RAM write pointer advances smoothly, which is what the voice
++	// monitoring the take and the firmware's level meter both read. The gate
++	// only bites while the lead is being established, and it can never be
++	// crossed, whatever the lead is set to.
++	//
++	// One update block of lead is what makes the gate stop biting, because
++	// one update block is the whole of the sawtooth. It is measured, not
++	// chosen: record_capture() records the largest block the machine has
++	// handed over during this take.
++	if (m_rec_on)
++	{
++		const u32 channels = (m_rec_left && m_rec_right) ? 2 : 1;
++		const u64 lead = u64(std::max(m_rec_block, 1u)) * channels;
++		if (m_adc_words < m_wave_words + lead)
++		{
++			m_rec_held++;
++			return;
++		}
++	}
++
+ 	m_drq_handler(ASSERT_LINE);
+ }
+ 
+@@ -1114,6 +1163,8 @@
+ 						p0, p1, m_rec_left ? 1 : 0, m_rec_right ? 1 : 0);
+ 		}
+ 	}
++	if (u32(stream.samples()) > m_rec_block)
++		m_rec_block = stream.samples();
+ 	for (int j = 0; j < stream.samples(); j++)
+ 	{
+ 		for (int ch = 0; ch < 2; ch++)
+@@ -1170,7 +1221,15 @@
+ 		osd_printf_info("mpc2000xl sampler:   key=%08x v0(start %08x end %08x step %04x) vR(start %08x end %08x step %04x)\n",
+ 				m_key, m_voice[0].start, m_voice[0].end, m_voice[0].step,
+ 				m_voice[REC_RIGHT_VOICE].start, m_voice[REC_RIGHT_VOICE].end, m_voice[REC_RIGHT_VOICE].step);
++		osd_printf_info("mpc2000xl sampler:   PHASE block=%u depth_min=%u starved=%u held=%u lag=[%lld,%lld]\n",
++				m_rec_block, m_rec_depth_min, m_rec_starved, m_rec_held,
++				(long long)m_rec_lag_min, (long long)m_rec_lag_max);
+ 		m_rec_peak = 0;
++		m_rec_depth_min = ~u32(0);
++		m_rec_starved = 0;
++		m_rec_held = 0;
++		m_rec_lag_min = INT64_MAX;
++		m_rec_lag_max = INT64_MIN;
+ 	}
+ }
+ 
+@@ -1197,8 +1256,15 @@
+ {
+ 	if (m_rec_rd != m_rec_wr)
+ 		m_rec_last = m_rec_ring[m_rec_rd++ & (REC_RING - 1)];
++	else if (m_rec_debug)
++		m_rec_starved++;
+ 
+ 	m_adc_words++;
++	if (m_rec_debug)
++	{
++		const u32 depth = m_rec_wr - m_rec_rd;
++		if (depth < m_rec_depth_min) m_rec_depth_min = depth;
++	}
+ 	update_adc_drq();
+ 	return uint16_t(m_rec_last);
+ }
+@@ -1263,6 +1329,12 @@
+ 		m_rec_peak = 0;
+ 		m_rec_report_at = 0;
+ 		m_rec_reads = 0;
++		m_rec_depth_min = ~u32(0);
++		m_rec_starved = 0;
++		m_rec_held = 0;
++		m_rec_lag_min = INT64_MAX;
++		m_rec_lag_max = INT64_MIN;
++		m_rec_block = 0;
+ 	}
+ 	if (!on && m_rec_on)
+ 		dump_take();
