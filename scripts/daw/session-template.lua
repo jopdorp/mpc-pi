@@ -3,10 +3,11 @@
 -- Creates the whole desk the panel expects, so daw-ctl and the Maschine
 -- UI find a session whose strip order matches the columns they draw:
 --
---   1 MPC        the emulator's stereo out
---   2 GTR1  3 GTR2  4 MIC          input channels, each with its chain
---   5 GTR1+ 6 GTR2+ 7 MIC+         overdub partners for the layer pairs
---   8 AUX                          spare input / returns
+--   1-5 LOOP1..LOOP5             the record lanes; each takes the
+--                                 emulator's stereo out, so any lane can
+--                                 record what is being played
+--   6 DELAY  7 REVERB             send buses
+--   8 MASTER                      the desk output
 --   + MPC1..MPC8                   the emulator's individual outs
 --   + FX A (reverb), FX B (delay)  send buses
 --
@@ -390,11 +391,40 @@ step("connect the emulator", function()
 		if n:find("outputs") then outs[#outs + 1] = n end
 	end
 	if #speaker >= 2 then
-		for ch = 0, 1 do
-			tracks["MPC"]:input():audio(ch):connect(speaker[ch + 1])
+		-- THE LOOP LANES ARE WHERE THE INSTRUMENT LANDS.
+		--
+		-- This addressed tracks["MPC"], a strip the desk stopped having
+		-- when it became LOOP1..5 + DELAY/REVERB/MASTER, so the index
+		-- returned nil and the step died - but only when the emulator was
+		-- actually running, because with no speaker ports the else branch
+		-- below takes over. The integration suite was therefore green
+		-- whenever nothing was playing and red the moment something was,
+		-- which reads as a flaky test rather than a stale name.
+		--
+		-- Every loop lane takes the stereo out, because any lane may record
+		-- the instrument - that is what the five of them are for. A lane
+		-- that is missing is named rather than skipped silently; a strip
+		-- list that has drifted again should say so on the first run, not
+		-- crash on a nil three steps later.
+		local fed, absent = 0, {}
+		for _, nm in ipairs(STRIP_NAMES) do
+			local route = tracks[nm]
+			if route then
+				for ch = 0, 1 do
+					route:input():audio(ch):connect(speaker[ch + 1])
+				end
+				fed = fed + 1
+			else
+				absent[#absent + 1] = nm
+			end
+		end
+		say(string.format("  emulator stereo -> %d loop lane(s)", fed))
+		if #absent > 0 then
+			say("  WARNING: named strips absent from the desk: "
+				.. table.concat(absent, " "))
 		end
 	else
-		say("  note: emulator not running, MPC input left unconnected")
+		say("  note: emulator not running, loop inputs left unconnected")
 	end
 	if individual_tracks then
 		for i = 1, math.min(8, #outs) do
