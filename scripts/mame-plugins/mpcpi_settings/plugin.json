@@ -1,0 +1,10 @@
+{
+  "plugin": {
+    "name": "mpcpi_settings",
+    "description": "MPC-Pi device settings",
+    "version": "0.0.1",
+    "author": "MPC-Pi",
+    "type": "plugin",
+    "start": "false"
+  }
+}

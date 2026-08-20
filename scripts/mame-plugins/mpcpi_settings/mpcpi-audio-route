@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Where the emulator's stereo output goes, and how to move it.
+#
+# The audio DEVICE is not an emulator setting: MAME opens one PipeWire
+# stream and the graph decides which sink it lands in. So the Device
+# Settings menu asks this script, and this script talks to the graph. It
+# lives beside the plugin that calls it so the two ship and version
+# together; the ./mpcpi wrapper calls it too, with --wait, to restore the
+# saved choice at startup - :speaker only exists once the machine is up.
+set -uo pipefail
+
+self=${0##*/}
+speaker=':speaker:output_'
+
+if ! command -v pw-link >/dev/null 2>&1; then
+    printf '%s: pw-link not found\n' "$self" >&2
+    exit 2
+fi
+
+# Every link that leaves one of the emulator's two output ports, as
+# "source<TAB>destination". pw-link -l prints the port at column zero and
+# its links indented under it, and node names contain spaces ("Family
+# 17h/19h HD Audio Controller"), so this cannot field-split the link lines.
+links_from_speaker()
+{
+    pw-link -l 2>/dev/null | awk -v pre="$speaker" '
+        index($0, pre) == 1 { src = $0; sub(/[[:space:]]+$/, "", src); next }
+        src && /^[[:space:]]*\|->[[:space:]]/ {
+            dst = $0
+            sub(/^[[:space:]]*\|->[[:space:]]*/, "", dst)
+            sub(/[[:space:]]+$/, "", dst)
+            print src "\t" dst
+            next
+        }
+        /^[^[:space:]]/ { src = "" }'
+}
+
+case "${1:-}" in
+--list)
+    # Name first, description second, in that order per sink; pair them up
+    # rather than trying to parse pactl's indented blocks properly.
+    #
+    # mpc_sampler_in is not an output device: it is the null sink that
+    # carries other applications INTO the sampler, so sending the machine
+    # there is a feedback loop offered as a menu entry.
+    command -v pactl >/dev/null 2>&1 || exit 2
+    pactl list sinks 2>/dev/null \
+        | sed -n 's/^[[:space:]]*Name: /N\t/p; s/^[[:space:]]*Description: /D\t/p' \
+        | awk -F'\t' '
+            $1 == "N" { n = $2; next }
+            $1 == "D" && n != "" && n != "mpc_sampler_in" { print n "\t" $2; n = "" }
+            $1 == "D" { n = "" }'
+    exit 0
+    ;;
+--current)
+    # The node the left channel currently reaches, with the port stripped.
+    links_from_speaker | head -1 | cut -f2 | sed 's/:[^:]*$//'
+    exit 0
+    ;;
+--help|-h)
+    printf 'usage: %s [--wait SECONDS] <sink-node-name> | --current | --list\n' "$self" >&2
+    exit 0
+    ;;
+esac
+
+wait_secs=0
+if [ "${1:-}" = "--wait" ]; then
+    wait_secs=${2:-30}
+    shift 2 || true
+fi
+sink=${1:-}
+if [ -z "$sink" ]; then
+    printf 'usage: %s [--wait SECONDS] <sink-node-name> | --current | --list\n' "$self" >&2
+    exit 2
+fi
+
+for (( i = 0; ; i++ )); do
+    pw-link -o 2>/dev/null | grep -qxF "${speaker}FL" && break
+    (( i >= wait_secs )) && break
+    sleep 1
+done
+if ! pw-link -o 2>/dev/null | grep -qxF "${speaker}FL"; then
+    printf '%s: no :speaker output ports; the emulator is not up\n' "$self" >&2
+    exit 1
+fi
+
+# Not every sink is called playback_FL/FR - pro-audio profiles publish
+# playback_AUX0.. instead - so take the named pair when it exists and the
+# first two input ports otherwise.
+mapfile -t ports < <(pw-link -i 2>/dev/null | grep -F "$sink:" | sed "s/^.*$sink://")
+left= ; right=
+for p in "${ports[@]}"; do
+    [ "$p" = FL ] || [ "$p" = playback_FL ] && left=$p
+    [ "$p" = FR ] || [ "$p" = playback_FR ] && right=$p
+done
+if [ -z "$left" ] || [ -z "$right" ]; then
+    left=${ports[0]:-}
+    right=${ports[1]:-$left}
+fi
+if [ -z "$left" ]; then
+    printf '%s: sink "%s" has no input ports\n' "$self" "$sink" >&2
+    exit 1
+fi
+
+# ADDING A LINK DOES NOT REPLACE ONE. Leaving the old link up sends the
+# machine to both devices at once, which reads as "the setting did
+# nothing" on the device you were listening to.
+while IFS=$'\t' read -r src dst; do
+    [ -n "$src" ] && [ -n "$dst" ] && pw-link -d "$src" "$dst" 2>/dev/null
+done < <(links_from_speaker)
+
+status=0
+pw-link "${speaker}FL" "$sink:$left" 2>/dev/null || status=1
+pw-link "${speaker}FR" "$sink:$right" 2>/dev/null || status=1
+if (( status )); then
+    printf '%s: could not link :speaker to %s\n' "$self" "$sink" >&2
+fi
+exit "$status"

@@ -102,6 +102,12 @@ raise_audio_threads()
         printf 'warning: could not raise audio thread priority (chrt); audio may underrun\n' >&2
     fi
     "\$here/scripts/mpcpi-sampler-input" || true
+    # The output device the Device Settings menu last chose. It is a graph
+    # link, not an emulator setting, so it has to be remade after each
+    # launch - and only once :speaker exists, hence --wait.
+    if [ -n "\${MPCPI_AUDIO_SINK:-}" ]; then
+        "\$MPCPI_AUDIO_ROUTE" --wait 30 "\$MPCPI_AUDIO_SINK" || true
+    fi
 }
 # The full panel, maximized: the fast preset's LCD-only 1240x300 view is a
 # diagnostic shape, not what a player wants to look at.
@@ -125,14 +131,39 @@ export MPC_PANEL_TIMER_MODE="\${MPC_PANEL_TIMER_MODE:-accurate}"
 if [ -n "\${MPCPI_DISABLE_ACP:-}" ]; then
     "\$here/scripts/mpcpi-audio-setup"
 fi
-export PIPEWIRE_RATE_HZ="\${PIPEWIRE_RATE_HZ:-48000}"
-export MPC_PIPEWIRE_FRAMES="\${MPC_PIPEWIRE_FRAMES:-64}"
-"\$here/scripts/run-mpc2000xl-fast.sh" \\
-    -pluginspath "\$here/plugins" -plugin layout "\$@" &
-fast_pid=\$!
-raise_audio_threads
+# The Device Settings menu (the menu key, or Scroll Lock then Tab ->
+# Plugin Options -> Device Settings). Disk, MIDI port and output device it
+# changes live; the quantum and the rate are read once, when the audio
+# stream is created and when the graph is forced, so it writes them here
+# and asks for a fresh launch by leaving a marker behind.
+mpcpi_conf="\${XDG_CONFIG_HOME:-\$HOME/.config}/mpcpi"
+mkdir -p "\$mpcpi_conf"
+export MPCPI_SETTINGS_FILE="\$mpcpi_conf/settings.env"
+export MPCPI_RELAUNCH_FILE="\$mpcpi_conf/relaunch"
+export MPCPI_AUDIO_ROUTE="\$here/plugins/mpcpi_settings/mpcpi-audio-route"
+# An explicit MPC_PIPEWIRE_FRAMES=128 ./mpcpi is this launch's deliberate
+# choice and outranks a menu press from last week, so the caller's values
+# are put back after the file is sourced.
+mpcpi_overrides=\$(export -p | grep -E '^declare -x (MPC_PIPEWIRE_FRAMES|PIPEWIRE_RATE_HZ|MPCPI_AUDIO_SINK)=' || true)
 trap '"\$here/scripts/mpcpi-sampler-input" --stop 2>/dev/null || true' EXIT INT TERM
-wait "\$fast_pid"
+while :; do
+    rm -f "\$MPCPI_RELAUNCH_FILE"
+    unset MPC_PIPEWIRE_FRAMES PIPEWIRE_RATE_HZ MPCPI_AUDIO_SINK
+    # shellcheck source=/dev/null
+    [ -r "\$MPCPI_SETTINGS_FILE" ] && . "\$MPCPI_SETTINGS_FILE"
+    eval "\$mpcpi_overrides"
+    export PIPEWIRE_RATE_HZ="\${PIPEWIRE_RATE_HZ:-48000}"
+    export MPC_PIPEWIRE_FRAMES="\${MPC_PIPEWIRE_FRAMES:-64}"
+    "\$here/scripts/run-mpc2000xl-fast.sh" \\
+        -pluginspath "\$here/plugins" -plugin layout,mpcpi_settings "\$@" &
+    fast_pid=\$!
+    raise_audio_threads
+    status=0
+    wait "\$fast_pid" || status=\$?
+    [ -e "\$MPCPI_RELAUNCH_FILE" ] || break
+    printf 'mpcpi: applying the new audio settings; relaunching\n'
+done
+exit "\$status"
 WRAPPER
 
 # Stock-accurate paths, and the entry for the other machines (the fast
@@ -387,6 +418,11 @@ chmod +x "$staging/scripts/mpcpi-sampler-input"
 # The plugins tree ships in the bundle because the mpc-named binary does not
 # find an executable-relative plugins directory on its own.
 cp -r -- "$mame_source_dir/plugins" "$staging/plugins"
+# MAME has no menu bar, so the device settings a player wants at hand -
+# the disk in the drive, the MIDI ports, the output device and the audio
+# buffer - are a plugin menu of our own.
+cp -r -- "$repo_root/scripts/mame-plugins/mpcpi_settings" "$staging/plugins/"
+chmod +x "$staging/plugins/mpcpi_settings/mpcpi-audio-route"
 
 cat >"$staging/roms/PUT-YOUR-ROMS-HERE.txt" <<'ROMS'
 This bundle ships no ROMs: the Akai firmware is copyrighted and may not be
@@ -476,6 +512,25 @@ machines; press Tab in the window for MAME's input menu. The panel's knobs
 and sliders are mouse-controlled through the bundled layout helper plugin,
 which \`./mpcpi\` enables; \`./mpcpi-accurate\` does not pass it, so add
 \`-pluginspath plugins -plugin layout\` there if you want it.
+
+## Device settings
+
+Press the menu key (the one beside right Ctrl) for **Device Settings**: the
+disk in the drive, the MIDI in and out ports, the audio output device and
+the audio buffer. Set \`MPCPI_SETTINGS_HOTKEY\` to MAME sequence tokens -
+\`MPCPI_SETTINGS_HOTKEY=KEYCODE_F14 ./mpcpi\` - for a keyboard without one.
+The same menu is under Plugin Options in MAME's own menu, but these
+machines have a keyboard, so Tab belongs to the MPC panel until you press
+Scroll Lock to hand the UI its keys back.
+
+Disk, MIDI port and output device change immediately. The audio buffer and
+the sample rate are read once, when the audio stream is created and when
+the PipeWire graph is forced, so those two rows say "relaunch to apply" and
+**Apply and relaunch** starts the emulator over with them. Every choice is
+written to \`~/.config/mpcpi/settings.env\` as plain \`KEY=VALUE\`, which
+\`./mpcpi\` sources before each launch - edit it by hand if you prefer, and
+delete it to go back to the defaults. An explicit environment variable on
+the command line still wins over the file.
 
 The default panel path is the accurate one: the faster event-driven panel
 UART still ghosts button presses on desktop (presses revert or skip), so
