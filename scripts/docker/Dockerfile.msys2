@@ -4,12 +4,27 @@
 # Linux through Wine and carries the official prebuilt mingw-w64 packages,
 # so no MXE-style source bootstrap is needed. Package signature checks are
 # disabled upstream in this image - acceptable for a build box.
+#
+# PortAudio is rebuilt from source with the ASIO host API, because MSYS2's
+# package is built without it. The ASIO SDK (2.3.4, proprietary or GPLv3 at
+# the builder's choice) arrives via the build context at /asio-sdk and is
+# never committed to the repository.
 FROM ghcr.io/msys2/msys2-docker-experimental:latest
 
-RUN msys2 -c "pacman -Syu --noconfirm \
-        make \
-        mingw-w64-ucrt-x86_64-gcc \
-        mingw-w64-ucrt-x86_64-SDL2 \
-        mingw-w64-ucrt-x86_64-SDL2_ttf \
-        mingw-w64-ucrt-x86_64-python \
-    && pacman -Scc --noconfirm"
+COPY asio-sdk /pa/asio-sdk
+COPY portaudio /pa/portaudio
+
+# One command line throughout: the wine-based msys2 wrapper does not
+# preserve multi-line scripts, and network operations under it can hang
+# without a TTY - sources arrive via COPY, not git clone. Linux paths are
+# not visible to the MSYS shell (its / is the Wine C: drive), so the
+# build works from the inherited working directory with relative paths
+# only; /ucrt64 is the MSYS-side install prefix.
+WORKDIR /pa/portaudio
+RUN msys2 -c "pacman -Syu --noconfirm make git mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-SDL2 mingw-w64-ucrt-x86_64-SDL2_ttf mingw-w64-ucrt-x86_64-python && pacman -Scc --noconfirm"
+
+RUN msys2 -c "mkdir -p src/hostapi/asio/ASIOSDK && cp -r ../asio-sdk/asio ../asio-sdk/common ../asio-sdk/driver ../asio-sdk/host src/hostapi/asio/ASIOSDK/ && cmake -B build -G 'MSYS Makefiles' -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DPA_BUILD_SHARED=OFF -DPA_BUILD_STATIC=ON -DPA_BUILD_ASIO=ON -DCMAKE_INSTALL_PREFIX=/ucrt64 && cmake --build build --parallel 16 && cmake --install build"
+# No global -DPA_USE_ASIO: the generated options_cmake.h defines it when
+# the ASIO SDK is found (verified in the archive: pa_win_hostapis.c.obj
+# references PaAsio_Initialize). Forcing the define globally breaks
+# pa_win_hostapis.c's include ordering instead.

@@ -129,8 +129,12 @@ TrueType rendering is compiled in.
 
 The Linux bundle paces the emulator from a patched PipeWire audio clock;
 Windows has no equivalent port yet, so this build runs stock MAME timing
-(video-throttled) with the default audio module. A WASAPI-exclusive audio
-clock is the planned follow-up.
+(video-throttled). Audio modules available: WASAPI, XAudio2, and
+PortAudio - with the ASIO host API compiled in (PortAudio 19.7.0 built
+against the ASIO SDK 2.3.4, whose GPLv3 option this GPL-2.0-or-later
+combination takes). Select it with \`-sound portaudio\`; ASIO devices
+appear automatically where drivers exist. A WASAPI-exclusive audio clock
+is the planned follow-up.
 
 ## Pad controllers
 
