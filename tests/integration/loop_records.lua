@@ -375,6 +375,56 @@ step("an empty history refuses rather than pretending", function()
 	assert(tostring(err):find("nothing to undo"), tostring(err))
 end)
 
+-- MARK is the one op whose whole mechanism is Ardour's: add_mark is not
+-- bound in Lua on either version this project runs, so the marker is a
+-- zero-length range from add_range - and only a real session can prove
+-- that stand-in actually lands, publishes and removes. The position is
+-- stamped HERE, from the session's own transport, which is why the wire
+-- carries no number to check against - only a window read either side.
+step("MARK lands at Ardour's own playhead, publishes, and UNDO removes it",
+	function()
+		local _, rows = read_published()
+		assert(#rows_of(rows, "mark") == 0, "a fresh session has markers")
+		local t0 = session:transport_sample()
+		assert(loop.apply("mark"))
+		local t1 = session:transport_sample()
+		_, rows = read_published()
+		local marks = rows_of(rows, "mark")
+		assert(#marks == 1, "expected one marker, got " .. #marks)
+		assert(marks[1].name == "M1", "first marker is " .. marks[1].name)
+		-- A window, not an equality: the audio thread advances the
+		-- transport between any two Lua reads (measured five samples
+		-- past both), so the claim is "at the playhead", not "at the
+		-- sample this test happened to read".
+		assert(marks[1].pos >= t0 - RATE and marks[1].pos <= t1 + RATE,
+			string.format("marker at %d, transport was %d..%d",
+				marks[1].pos, t0, t1))
+		-- WAIT FOR THE TRANSPORT TO VISIBLY MOVE before the second mark.
+		-- The Lua-visible transport advances coarsely under Dummy - the
+		-- same value can come back for tens of milliseconds - and a
+		-- second mark inside that window lands on the first one's tick
+		-- and is refused as a duplicate, correctly and flakily.
+		local waited = 0
+		while waited < 3000 and
+				session:transport_sample() < marks[1].pos + 2000 do
+			ARDOUR.LuaAPI.usleep(10 * 1000)
+			waited = waited + 10
+		end
+		assert(loop.apply("mark"))
+		_, rows = read_published()
+		marks = rows_of(rows, "mark")
+		assert(#marks == 2 and marks[2].name == "M2",
+			"the second marker did not follow the first")
+		assert(marks[1].pos < marks[2].pos,
+			string.format("markers published out of order: %s@%d %s@%d",
+				marks[1].name, marks[1].pos, marks[2].name, marks[2].pos))
+		assert(loop.apply("undo"))
+		_, rows = read_published()
+		marks = rows_of(rows, "mark")
+		assert(#marks == 1 and marks[1].name == "M1",
+			"undo did not remove the marker it made")
+	end)
+
 step("clear takes the lane off the timeline", function()
 	assert(loop.apply("clear LOOP1"))
 	local r = regions("LOOP1")

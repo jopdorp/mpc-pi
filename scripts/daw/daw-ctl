@@ -43,6 +43,29 @@ QUEUE = os.environ.get("DAW_QUEUE", "/dev/shm/daw-region-queue")
 # See session-governor.lua's publish() for the format and for why the
 # header carries Ardour's sample rate and transport position.
 REGIONS = os.environ.get("DAW_REGIONS", "/dev/shm/daw-regions")
+# The plugin chains, from the same file session-template.lua instantiates
+# the session from. chains.py promises "the chips drawn on the FX page are
+# literally this list", and reading the builder's own input is what makes
+# that true: a chain hardcoded here would drift from the session the first
+# time chains.py changed, and the FX page would browse plugins that are
+# not there.
+CHAINS_JSON = os.environ.get("CHAINS_JSON", os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "chains.json"))
+
+
+def load_chains(path=CHAINS_JSON):
+    """{track: [{name, kind, bypass...}]} - or nothing, said plainly.
+
+    An unreadable chain file is a session this process cannot describe,
+    not a reason to refuse to mix: every FX verb answers NO CHAIN and the
+    other five pages work untouched.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, list)}
 # Where a floppy chosen on the panel is published for the emulator.
 #
 # READ BY scripts/daw/mpcpi-autoplay.lua, which runs as MAME's autoboot script
@@ -93,7 +116,7 @@ class Daw:
     RATE = int(os.environ.get("MPCPI_RATE", "44100"))
 
     def __init__(self, client, strips=None, lanes=None, bpm=120.0,
-                 queue=QUEUE, regions=REGIONS):
+                 queue=QUEUE, regions=REGIONS, chains=None):
         self.osc = client
         self.queue = queue
         self.strips = list(strips or STRIPS)
@@ -208,6 +231,31 @@ class Daw:
         # times a second and each report would otherwise be one queue line
         # and one region edit, so they settle first.
         self.deferred = {}
+        # --- the FX page's place in the chain ----------------------------
+        #
+        # Which slot of the focused strip's chain the knobs and BYP act on.
+        # One integer, reset when focus moves, because the chain it indexes
+        # changes with it - a slot carried across a refocus would point at
+        # whatever plugin happens to share its position.
+        self.chains = load_chains() if chains is None else chains
+        self.fx_slot = 0
+        # What we believe each slot's bypass is, seeded from the chain
+        # definition's own bypass flags - the state session-template builds.
+        # Optimistic like the mutes: osc.Client is send-only, so believed
+        # is all this can ever be.
+        self.fx_bypass = {name: {i for i, s in enumerate(ch)
+                                 if s.get("bypass")}
+                          for name, ch in self.chains.items()}
+        # Accumulated plugin parameter values, keyed (strip, slot, knob).
+        # The OSC path takes an ABSOLUTE 0..1 value and the encoder reports
+        # deltas, so somebody has to hold the running value - and it opens
+        # at 0.5 because a send-only client cannot ask the plugin.
+        self.fx_values = {}
+        # --- the markers, as published by the Lua side -------------------
+        #
+        # (position, name), sorted, in ARDOUR's timeline like the regions:
+        # they come off the same file and jumping to one is a /locate.
+        self.markers = []
 
     # --- Ardour ---
 
@@ -294,6 +342,7 @@ class Daw:
     def load_regions(self, text):
         """Parse one published frame. See session-governor.lua's publish()."""
         found = {}
+        marks = []
         for line in text.splitlines():
             if line.startswith("#"):
                 words = line[1:].split()
@@ -316,6 +365,15 @@ class Daw:
                     self.ardour_record = int(kw["rec"] or 0)
                 continue
             parts = line.split("\t")
+            # A marker is a three-field row on purpose: a daw-ctl older
+            # than markers requires seven fields and skips these, so the
+            # two sides can be deployed in either order.
+            if len(parts) == 3 and parts[0] == "mark":
+                try:
+                    marks.append((int(parts[2]), parts[1]))
+                except ValueError:
+                    pass
+                continue
             if len(parts) < 7:
                 continue
             try:
@@ -328,6 +386,7 @@ class Daw:
         for rows in found.values():
             rows.sort(key=lambda r: (r["pos"], r["name"]))
         self.regions = found
+        self.markers = sorted(marks)
         self.resync_selection()
         self.adopt_region_gain()
         return found
@@ -500,6 +559,102 @@ class Daw:
         """
         return self.region_op("undo", "UNDO")
 
+    # --- the FX chain's slot -----------------------------------------------
+
+    def chain(self, track=None):
+        return self.chains.get(track or self.focus, [])
+
+    def no_chain(self):
+        # Same reasoning as no_region: naming the empty lane beats a key
+        # that appears to do nothing, which reads as a key that broke.
+        self.message = "NO CHAIN ON %s" % self.focus
+        return ["error no-chain %s" % self.focus]
+
+    def step_slot(self, way):
+        """browse_left / browse_right on FX: the previous or next slot."""
+        ch = self.chain()
+        if not ch:
+            return self.no_chain()
+        i = self.fx_slot + (1 if way == "next" else -1)
+        self.fx_slot = max(0, min(len(ch) - 1, i))
+        self.message = "%s %d/%d %s" % (
+            self.focus, self.fx_slot + 1, len(ch),
+            ch[self.fx_slot].get("name", "?"))
+        return ["slot %d" % self.fx_slot]
+
+    def toggle_bypass(self):
+        """BYP: the focused slot, in and out of the signal path.
+
+        Ardour's OSC has a path per direction rather than a toggle, which
+        for once is the good shape: what is sent states the outcome, so a
+        double-press cannot invert the belief the way /rec_enable_toggle
+        can. The plugin id is the slot index + 1 - the chain is built from
+        the same list this process reads, in order, so the two counts
+        cannot disagree without the session builder disagreeing with its
+        own input.
+        """
+        ch = self.chain()
+        if not ch:
+            return self.no_chain()
+        book = self.fx_bypass.setdefault(self.focus, set())
+        name = ch[self.fx_slot].get("name", "?")
+        off = self.fx_slot not in book
+        if off:
+            book.add(self.fx_slot)
+            self.osc.send("/strip/plugin/deactivate",
+                          self.ssid(self.focus), self.fx_slot + 1)
+        else:
+            book.discard(self.fx_slot)
+            self.osc.send("/strip/plugin/activate",
+                          self.ssid(self.focus), self.fx_slot + 1)
+        self.message = "%s %s" % (name, "BYP" if off else "ON")
+        return ["byp %s %d %d" % (self.focus, self.fx_slot, 1 if off else 0)]
+
+    # --- the markers --------------------------------------------------------
+
+    def drop_marker(self):
+        """MARK: a section marker, stamped by the side that owns the clock.
+
+        The verb goes down the queue with NO position, the same shape as
+        normalize: this process's playhead is the MPC's clock and Ardour's
+        transport free-runs against it, so any position sent from here
+        would be in the wrong coordinates by an unknown constant. The
+        governor stamps the marker at Ardour's own transport sample and
+        the published list brings it back within one drain.
+        """
+        return self.region_op("mark", "MARK BAR %d" % (
+            self.ardour_playhead // (self.transport.samples_per_bar() or 1)
+            + 1))
+
+    def step_marker(self, way):
+        """browse_left / browse_right on SONG: the neighbouring marker.
+
+        A locate, like the jog: it moves Ardour's view and the MPC's clock
+        is untouched. Strictly before / strictly after, off the position
+        the governor last published, and the belief is advanced to the
+        marker so a second press keeps walking rather than re-finding the
+        same neighbour for two publish intervals.
+        """
+        if not self.markers:
+            self.message = "NO MARKERS"
+            return ["error no-markers"]
+        here = self.ardour_playhead
+        if way == "next":
+            ahead = [m for m in self.markers if m[0] > here]
+            target = ahead[0] if ahead else None
+        else:
+            behind = [m for m in self.markers if m[0] < here]
+            target = behind[-1] if behind else None
+        if target is None:
+            self.message = "NO MARKER %s" % \
+                ("AHEAD" if way == "next" else "BEFORE")
+            return ["error no-marker %s" % way]
+        pos, name = target
+        self.ardour_playhead = pos
+        self.osc.send("/locate", pos, 0)
+        self.message = "MARKER %s" % name
+        return ["locate %d" % pos]
+
     # --- take-level ERASE and UNDO -----------------------------------------
 
     def take_undo(self, what):
@@ -618,8 +773,22 @@ class Daw:
         # nothing published the region list - so the buttons were left
         # deliberately unbound rather than wired to a verb that would answer
         # UNKNOWN COMMAND. They address what poll_regions read, by name.
+        #
+        # The browse pair is page vocabulary, the same shape as ERASE and
+        # UNDO below: the hub sends one word and the page decides what the
+        # previous/next THING is. On FX it is a chain slot, on SONG a
+        # marker, everywhere else the region selection the EDIT and WAVE
+        # verbs act on.
         if verb == "region" and len(parts) > 1:
+            if self.page == "FX":
+                return self.step_slot(parts[1])
+            if self.page == "SONG":
+                return self.step_marker(parts[1])
             return self.step_region(parts[1])
+        if verb == "byp":
+            return self.toggle_bypass()
+        if verb == "mark":
+            return self.drop_marker()
         if verb == "split":
             return self.split_region()
         if verb == "duplicate":
@@ -671,6 +840,10 @@ class Daw:
             self.message = "NO STRIP %s" % name
             return ["error no-strip %s" % name]
         self.focus = name
+        # A new strip is a new chain; slot 3 of the old one is nothing on
+        # this one. Bypass and parameter beliefs are keyed by strip, so
+        # they keep; only the position resets.
+        self.fx_slot = 0
         # Ardour has to agree about what is focused: /select/* - which is what
         # the FX page edits - addresses "the selected strip". If focus were
         # only a panel idea, the FX knobs would edit whichever strip was last
@@ -870,22 +1043,31 @@ class Daw:
             self.message = "%s %.1f DB" % (target, db)
             return ["gain %s %.1f" % (target, db)]
         if page == "FX":
-            # Parameter index comes from the focused plugin; the panel
-            # sends the column and daw-ctl holds the focus. That focus was
-            # hardcoded to strips[0] while nothing set it - so every FX knob
-            # edited LOOP1 whatever the player had selected. It is a real
-            # value now that "focus" is a command (see set_focus).
-            self.message = "FX %s %+d" % (target, delta)
+            # Two fixes with one shape. The plugin id was hardcoded to 1,
+            # so every knob edited the first slot whatever chip the browse
+            # keys had focused; and the DELTA went on the wire as the
+            # value, so a turn set the parameter to within a whisker of
+            # zero - the path takes an absolute 0..1 and the encoder
+            # reports movement, and nothing held the running value between
+            # them. It is held here now, per (strip, slot, knob), opening
+            # at 0.5 because a send-only client cannot ask the plugin
+            # where it really is.
+            ch = self.chain()
+            if not ch:
+                return self.no_chain()
+            key = (self.focus, self.fx_slot, int(target))
+            value = self.fx_values.get(key, 0.5)
+            value = max(0.0, min(1.0, value + delta * self.KNOB_FX_STEP))
+            self.fx_values[key] = value
+            self.message = "%s P%d %.2f" % (
+                ch[self.fx_slot].get("name", "FX"), int(target) + 1, value)
             self.osc.send("/strip/plugin/parameter",
-                          self.ssid(self.focus), 1, int(target) + 1,
-                          delta * self.KNOB_FX_STEP)
-            return ["fx %s %+d" % (target, delta)]
+                          self.ssid(self.focus), self.fx_slot + 1,
+                          int(target) + 1, value)
+            return ["fx %s %.4f" % (target, value)]
         if page == "SONG":
             if target == "0":
-                self.playhead = max(0, self.playhead +
-                                    delta * self.transport.samples_per_bar())
-                self.osc.send("/locate", self.playhead, 0)
-                return ["locate %d" % self.playhead]
+                return self.scrub(delta)
             return ["view %s %+d" % (target, delta)]
         if page == "WAVE":
             # K1/K2 are the two trim handles, K3 zoom, K4 gain. Turning a
@@ -1078,6 +1260,32 @@ class Daw:
             self.message = "WAVE %s %s" % (self.focus, r["name"])
         return ["page WAVE"]
 
+    def scrub(self, delta):
+        """SONG's scrub, off the jog and K1 both.
+
+        Snapped to the bar, and it moves ARDOUR'S VIEW, not the clock: the
+        MPC owns the transport, so this is a locate and the drums keep
+        playing through it.
+
+        In ARDOUR'S coordinates, where it used to move this process's
+        mirror of the MPC's clock. The markers and sections on this page
+        come off the published list in Ardour's timeline, and a playhead
+        scrubbed in another clock's coordinates sits outside the section
+        it is playing by the offset between the two - it also snapped
+        straight back on the next transport poll, which rewrites the
+        MPC-clock mirror every 10 ms. The scrub advances the same belief
+        the governor's publish reconciles, so what the knob moves is what
+        the page draws.
+        """
+        step = self.transport.samples_per_bar()
+        if not step:
+            self.message = "NO TEMPO YET"
+            return ["error no-tempo"]
+        self.ardour_playhead = max(0, self.ardour_playhead + delta * step)
+        self.osc.send("/locate", self.ardour_playhead, 0)
+        self.message = "BAR %d" % (self.ardour_playhead // step + 1)
+        return ["locate %d" % self.ardour_playhead]
+
     def jog(self, delta):
         """One knob, four pages, four things to move.
 
@@ -1096,17 +1304,7 @@ class Daw:
             self.files_rows = self.browser_rows()
             return []
         if self.page == "SONG":
-            # Snapped to the bar, and it moves ARDOUR'S VIEW, not the clock:
-            # the MPC owns the transport, so this is a locate, and the drums
-            # keep playing through it.
-            step = self.transport.samples_per_bar()
-            if not step:
-                self.message = "NO TEMPO YET"
-                return ["error no-tempo"]
-            self.playhead = max(0, self.playhead + delta * step)
-            self.osc.send("/locate", self.playhead, 0)
-            self.message = "BAR %d" % (self.playhead // step + 1)
-            return ["locate %d" % self.playhead]
+            return self.scrub(delta)
         if self.page == "EDIT":
             step = self.snap_samples()
             if not step:
@@ -1494,9 +1692,45 @@ class Daw:
             "gain": self.wave_gain,
             "peaks": [],
         }
-        st["song"] = {"position": self.playhead / float(bar),
-                      "bars": max(1, int(self.playhead / float(bar)) + 8),
-                      "zoom": 0.5, "sections": []}
+        # THE FX PAGE'S CHAIN, four chips windowed around the focused slot
+        # so the chip the knobs act on is always one of the four drawn -
+        # browsing into a fifth slot off the right edge would be the same
+        # bug as a selection the cursor did not follow. Bypass is the LIVE
+        # belief, not the chain file's opening flag: the chip must dim when
+        # BYP is pressed, not when the config was written.
+        ch = self.chain()
+        first = max(0, self.fx_slot - 3)
+        bypassed = self.fx_bypass.get(self.focus, set())
+        st["fx"] = {
+            "track": self.focus,
+            "chain": [{"name": s.get("name", "?"),
+                       "bypass": (first + i) in bypassed}
+                      for i, s in enumerate(ch[first:first + 4])],
+            "slot": self.fx_slot - first,
+            "kind": ch[self.fx_slot].get("kind", "params") if ch else "params",
+            "knobs": [{"name": "P%d" % (k + 1),
+                       "norm": self.fx_values.get(
+                           (self.focus, self.fx_slot, k), 0.5)}
+                      for k in range(4)],
+        }
+        # SONG in Ardour's coordinates throughout - playhead, markers and
+        # the sections between them - for the reason at scrub(): one page,
+        # one clock. Sections are what the markers imply, each running to
+        # the next marker and the last to the edge of the drawn ribbon,
+        # which also grows to keep every marker on it.
+        song_pos = self.ardour_playhead / float(bar)
+        total = max(1, int(song_pos) + 8)
+        marks = [(p / float(bar), n) for p, n in self.markers]
+        if marks:
+            total = max(total, int(marks[-1][0]) + 4)
+        sections = []
+        for i, (at, name) in enumerate(marks):
+            end = marks[i + 1][0] if i + 1 < len(marks) else float(total)
+            sections.append({"start": at, "length": max(0.0, end - at),
+                             "name": name,
+                             "current": at <= song_pos < end})
+        st["song"] = {"position": song_pos, "bars": total,
+                      "zoom": 0.5, "sections": sections}
         # The browser is an OVERLAY: it reports itself as the page so the
         # renderer draws it, and self.page is left alone so closing puts back
         # the page that was underneath rather than a remembered default.
@@ -2024,16 +2258,24 @@ def self_test():
         assert d.message == "", "MIX's idle jog reported something"
 
         # SONG: the playhead, snapped to the bar - and it is a LOCATE, not a
-        # transport action. The MPC owns the clock.
+        # transport action. The MPC owns the clock. What moves is the
+        # ARDOUR-side belief, not the MPC-clock mirror: the mirror is
+        # rewritten by every transport poll, so a scrub kept there snapped
+        # back within 10 ms - and the markers this page jumps between are
+        # published in Ardour's timeline, so the scrub must live in the
+        # same coordinates or PREV lands outside the section on screen.
         d.command("page SONG")
-        d.playhead = 0
+        d.ardour_playhead = 0
+        mpc_clock = d.playhead
         out = d.command("jog +2")
         assert out == ["locate %d" % (2 * spb)], out
-        assert d.playhead == 2 * spb
+        assert d.ardour_playhead == 2 * spb
+        assert d.playhead == mpc_clock, "the scrub touched the MPC's clock"
         assert ("/locate", (2 * spb, 0)) in o.msgs, \
             "SONG's jog did not reach Ardour"
         d.command("jog -99")
-        assert d.playhead == 0, "the playhead ran off the front of the session"
+        assert d.ardour_playhead == 0, \
+            "the playhead ran off the front of the session"
 
         # EDIT: the cursor, snapped per SNAP - and SNAP cycles through the
         # three the spec names.
@@ -2109,7 +2351,7 @@ def self_test():
         d.command("focus LOOP1")
         spb = d.transport.samples_per_bar()
 
-        def publish(rows, transport=0, rate=None):
+        def publish(rows, transport=0, rate=None, marks=()):
             """Write one frame exactly as session-governor.lua's publish()."""
             with open(regions_file, "w") as fh:
                 fh.write("# rate %d transport %d gen 1\n"
@@ -2117,6 +2359,8 @@ def self_test():
                 for track, name, pos, ln, fi, fo, gain in rows:
                     fh.write("%s\t%s\t%d\t%d\t%d\t%d\t%.4f\n"
                              % (track, name, pos, ln, fi, fo, gain))
+                for name, pos in marks:
+                    fh.write("mark\t%s\t%d\n" % (name, pos))
             # The stat-based poll must not be fooled by a same-second write.
             d.regions_stamp = None
             assert d.poll_regions(), "a changed file was not picked up"
@@ -2293,6 +2537,112 @@ def self_test():
         # BACK still leaves, and D8 is still not involved.
         d.command("back")
         assert d.page == "LOOP"
+
+        # --- FX: THE CHAIN'S SLOT ----------------------------------------
+        #
+        # The knobs edited plugin slot 1 whatever chip the player meant,
+        # and sent the encoder's DELTA where the OSC path takes an ABSOLUTE
+        # 0..1 - so the first turn of any FX knob set the parameter to a
+        # whisker above zero. Asserted as one join: hub verb in, OSC out,
+        # chip state published.
+        d.chains = {"LOOP1": [{"name": "OD", "kind": "drive"},
+                              {"name": "AMP", "kind": "amp"},
+                              {"name": "EQ", "kind": "eq"},
+                              {"name": "COMP", "kind": "comp",
+                               "bypass": True},
+                              {"name": "CHOR", "kind": "mod"}]}
+        d.fx_bypass = {"LOOP1": {3}}
+        d.command("focus LOOP1")
+        d.command("page FX")
+        assert d.fx_slot == 0
+        # browse on FX steps the slot, not the region selection.
+        assert d.command("region next") == ["slot 1"]
+        assert d.command("region prev") == ["slot 0"]
+        assert d.command("region prev") == ["slot 0"], \
+            "the first slot is the first slot, not an error"
+        d.command("region next")
+        d.command("region next")                       # slot 2, the EQ
+        mark = len(o.msgs)
+        d.command("knob FX 0 +200")
+        path, sent = o.msgs[-1]
+        assert path == "/strip/plugin/parameter"
+        assert sent[0] == d.ssid("LOOP1") and sent[1] == 3, \
+            "the knob edited a slot the browse keys did not choose"
+        assert sent[2] == 1, sent
+        assert 0.5 < sent[3] <= 0.7, sent
+        d.command("knob FX 0 +100")
+        assert o.msgs[-1][1][3] > sent[3], "the value did not accumulate"
+        d.command("knob FX 0 +999999")
+        assert o.msgs[-1][1][3] == 1.0, "the value must clamp, not wrap"
+        # BYP states the outcome on the wire, both directions - a path per
+        # direction, so a double press cannot invert the belief the way a
+        # toggle can.
+        assert d.command("byp") == ["byp LOOP1 2 1"]
+        assert o.msgs[-1] == ("/strip/plugin/deactivate",
+                              (d.ssid("LOOP1"), 3)), o.msgs[-1]
+        assert d.message == "EQ BYP", d.message
+        assert d.command("byp") == ["byp LOOP1 2 0"]
+        assert o.msgs[-1] == ("/strip/plugin/activate",
+                              (d.ssid("LOOP1"), 3)), o.msgs[-1]
+        # The published chain is windowed around the slot, carries the LIVE
+        # bypass, and the focused chip is always one of the four drawn.
+        fx = d.ui_state()["fx"]
+        assert fx["track"] == "LOOP1"
+        assert [c["name"] for c in fx["chain"]] == \
+            ["OD", "AMP", "EQ", "COMP"], fx["chain"]
+        assert fx["slot"] == 2 and fx["kind"] == "eq", fx
+        assert fx["chain"][3]["bypass"] is True, "the seeded bypass is lost"
+        d.command("region next")
+        d.command("region next")                       # slot 4, off the edge
+        fx = d.ui_state()["fx"]
+        assert [c["name"] for c in fx["chain"]] == \
+            ["AMP", "EQ", "COMP", "CHOR"], fx["chain"]
+        assert fx["slot"] == 3, fx
+        # A strip with no chain says so instead of doing nothing, and a
+        # refocus resets the slot - slot 4 of another chain is nothing on
+        # this one.
+        d.command("focus LOOP2")
+        assert d.fx_slot == 0, "focus did not reset the slot"
+        d.chains.pop("LOOP2", None)
+        assert d.command("byp")[0].startswith("error no-chain")
+        assert d.message == "NO CHAIN ON LOOP2", d.message
+        assert d.command("knob FX 0 +100")[0].startswith("error no-chain")
+
+        # --- SONG: THE MARKERS -------------------------------------------
+        #
+        # MARK goes down the queue BARE - the governor stamps it at
+        # Ardour's own transport, for the same reason NORM sends no factor:
+        # the side that owns the number supplies it. The markers come back
+        # as three-field rows an older daw-ctl skips unread, and browse on
+        # SONG steps between them.
+        d.command("focus LOOP1")
+        d.command("page SONG")
+        assert d.command("region next") == ["error no-markers"]
+        assert d.message == "NO MARKERS", d.message
+        publish([], transport=6 * spb,
+                marks=[("M1", 2 * spb), ("M2", 8 * spb)])
+        assert d.markers == [(2 * spb, "M1"), (8 * spb, "M2")], d.markers
+        assert d.command("region next") == ["locate %d" % (8 * spb)]
+        assert d.message == "MARKER M2", d.message
+        assert ("/locate", (8 * spb, 0)) in o.msgs
+        assert d.command("region prev") == ["locate %d" % (2 * spb)]
+        assert d.message == "MARKER M1", d.message
+        assert d.command("region prev") == ["error no-marker prev"]
+        assert d.message == "NO MARKER BEFORE", d.message
+        mark = len(queued())
+        assert d.command("mark") == ["mark"]
+        assert queued()[mark:] == ["mark"], queued()[mark:]
+        assert d.message.startswith("MARK BAR"), d.message
+        # The sections the page draws are what the markers imply, each
+        # running to the next and the last to the ribbon's edge, current
+        # where the playhead the page draws actually is.
+        song = d.ui_state()["song"]
+        assert [s["name"] for s in song["sections"]] == ["M1", "M2"]
+        assert song["sections"][0]["start"] == 2.0, song["sections"]
+        assert song["sections"][0]["length"] == 6.0, song["sections"]
+        assert song["sections"][0]["current"] is True, song["sections"]
+        assert song["sections"][1]["current"] is False, song["sections"]
+        d.command("page LOOP")
 
         # THE PAGE DRAWS WHAT THE CHANNEL PUBLISHED. Positions, not just a
         # count: this is what the EDIT renderer stacks into lanes.

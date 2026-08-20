@@ -25,6 +25,8 @@
 --     gain      <track> <region> <factor>
 --     normalize <track> <region> [target dB]
 --     remove    <track> <region>
+--     mark                                      drop a section marker at
+--                                               Ardour's own playhead
 --     undo
 --     save
 --

@@ -1254,7 +1254,8 @@ def self_test():
     # never heard.
     _verbs = {"split": "daw:split", "region prev": "daw:region:prev",
               "region next": "daw:region:next", "duplicate": "daw:duplicate",
-              "erase": "daw:erase", "undo": "daw:undo", "norm": "daw:norm"}
+              "erase": "daw:erase", "undo": "daw:undo", "norm": "daw:norm",
+              "byp": "daw:byp", "mark": "daw:mark"}
     _by_target = {}
     for _b, _t in control_map.DAW_BUTTONS.items():
         _by_target.setdefault(_t, []).append(_b)
@@ -1300,11 +1301,14 @@ def self_test():
         assert sent(_rm2.button(_btn, True)) == control_map.MPC_BUTTONS[_btn], \
             "%s stopped reaching the MPC on the MPC surface" % _btn
         _rm2.button(_btn, False)
-    # MARK is the one verb in the specification with nothing behind it, so it
-    # stays unbound: a key that spends the status line on UNKNOWN COMMAND is
-    # worse than a key that does nothing.
-    assert "daw:mark" not in control_map.DAW_BUTTONS.values(), \
-        "MARK is bound and daw-ctl has no marker command to answer it"
+    # MARK and BYP ride the same loop above now that daw-ctl answers them
+    # - the guard that kept MARK off this table while it had nothing
+    # behind it flipped into membership the moment that stopped being
+    # true, so an unbinding cannot pass silently either.
+    assert "daw:mark" in control_map.DAW_BUTTONS.values(), \
+        "MARK lost its button"
+    assert "daw:byp" in control_map.DAW_BUTTONS.values(), \
+        "BYP lost its button"
 
     # THE PAGE KNOBS COUNT FROM THE RIGHT SCREEN. daw-ctl's page handlers
     # take targets 0-3 and the page's encoder bar is drawn on screen R, so

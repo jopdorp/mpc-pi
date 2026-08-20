@@ -558,6 +558,19 @@ function M.publish(path)
 			end
 		end
 	end
+	-- THE MARKERS RIDE THE SAME FILE, as three-field rows. Three fields
+	-- and not seven on purpose: an older daw-ctl requires seven and skips
+	-- anything shorter, so a governor that learned markers first cannot
+	-- confuse a panel that has not. A tab inside a name would fake a
+	-- fourth field, so it is flattened - names written by ops.mark never
+	-- carry one, but an imported session's might.
+	for l in M.session:locations():list():iter() do
+		if M.is_marker(l) then
+			f:write(string.format("mark\t%s\t%d\n",
+				(l:name() or ""):gsub("\t", " "),
+				M.samples_of(l:start())))
+		end
+	end
 	f:close()
 	return os.rename(path .. ".tmp", path) ~= nil
 end
@@ -807,6 +820,70 @@ function M.ops.remove(track, region)
 	end)
 end
 
+-- Which locations the panel sees. Ardour keeps its own machinery in the
+-- same list - the loop range, the punch range, the session extent - and
+-- every one of them would read as a section to a panel that cannot see
+-- flags. What is left is what a player put there: marks, and the
+-- zero-length ranges the op below creates.
+function M.is_marker(l)
+	return not (l:is_session_range() or l:is_auto_loop()
+		or l:is_auto_punch() or l:is_hidden())
+end
+
+-- DROP A SECTION MARKER where Ardour's playhead is right now.
+--
+--   mark
+--
+-- No position on the wire, deliberately. daw-ctl's playhead is the MPC's
+-- clock and the two transports free-run against each other (see publish
+-- above), so any position it sent would be in the wrong coordinates by
+-- an unknown constant. The side that owns the timeline stamps the
+-- marker, the same shape as normalize: send the verb, let the authority
+-- decide the number, read the answer back off the published list.
+--
+-- A ZERO-LENGTH RANGE, not a mark, because a mark cannot be made from
+-- here: neither Ardour 8.6 nor 9.0 binds Locations:add_mark or the
+-- Location constructor to Lua (probed on the build host's 9, read in
+-- 8.6's luabindings.cc), while add_range, set_name and remove are bound
+-- on both. A range whose start is its end jumps and publishes exactly
+-- like the mark it stands in for.
+function M.ops.mark()
+	local locs = M.session:locations()
+	local at = M.samples_of(M.session:transport_sample())
+	local names, count = {}, 0
+	for l in locs:list():iter() do
+		if M.is_marker(l) then
+			names[l:name()] = true
+			count = count + 1
+		end
+	end
+	local n = count + 1
+	while names["M" .. n] do n = n + 1 end
+	local name = "M" .. n
+	local loc = locs:add_range(Temporal.timepos_t(at),
+		Temporal.timepos_t(at))
+	assert(loc, "add_range refused")
+	loc:set_name(name)
+	-- THE DUPLICATE CHECK IS AGAINST WHERE IT LANDED, not where it was
+	-- aimed. Ardour stores the new location in the BEATS domain whatever
+	-- domain the position we pass is in (measured: aimed 5120, stored
+	-- b410, read back 5125), so a sample compared before creating is
+	-- never equal to anything and the guard it was in never fired. Two
+	-- presses inside one tick would stack markers at one published
+	-- position - a stack that reads as one marker PREV can never step
+	-- past - so the second is taken back out and refused.
+	local landed = math.floor(M.samples_of(loc:start()))
+	for l in locs:list():iter() do
+		if M.is_marker(l) and l:name() ~= name and
+				math.floor(M.samples_of(l:start())) == landed then
+			locs:remove(loc)
+			error("marker already at " .. landed)
+		end
+	end
+	M.remember("mark " .. name, function() locs:remove(loc) end)
+	M.say("GOVERNOR_MARK " .. name .. " " .. landed)
+end
+
 -- Put the last region edit back. Takes no arguments: one stack, in the
 -- order the edits happened, whichever page they came from.
 function M.ops.undo()
@@ -955,7 +1032,7 @@ function M.self_test()
 	-- come back "unknown op" from a governor that looks perfectly healthy
 	for _, verb in ipairs({ "split", "move", "fadein", "fadeout", "trim",
 	                        "gain", "remove", "duplicate", "normalize",
-	                        "undo", "save" }) do
+	                        "undo", "save", "mark" }) do
 		assert(type(M.ops[verb]) == "function", "no op " .. verb)
 	end
 

@@ -426,10 +426,24 @@ DAW_BUTTONS = {
     # doing beats two keys that each work on one page and fault on the other,
     # and neither needs a modifier here to say which page it meant.
     #
-    # MARK IS STILL NOT BOUND. The SONG page's markers are the one verb in
-    # the specification with nothing behind it - daw-ctl has no marker
-    # commands - so binding it would put back exactly the fault this block
-    # just removed.
+    # THE BROWSE PAIR IS PAGE VOCABULARY THE SAME WAY: one word on the wire,
+    # and daw-ctl steps whatever the page in front of you steps through -
+    # chain slots on FX, markers on SONG, the region selection everywhere
+    # else. Same gesture, pointed at the thing under the hand.
+    #
+    # --- FX's bypass and SONG's marker -----------------------------------
+    #
+    # Bound now that daw-ctl answers them; both were left off this table
+    # for as long as they would have spent the status line on UNKNOWN
+    # COMMAND. CONTROL heads the same left-hand cluster the browse pair
+    # lives in, so the FX gesture is one hand shape - step to a slot with
+    # < and >, take it in and out of the path with the key above them -
+    # and its printed word is the nearest thing this panel has to a
+    # plugin-control key. SCENE is the printed word nearest to what a
+    # section marker is - a scene of the arrangement. On the MPC surface
+    # they stay what they were, BAR< and UP; nothing is lost over there.
+    "control":        "daw:byp",
+    "scene":          "daw:mark",
 }
 
 # THE TOP ROW IS THE BANKS, AND THAT IS WHAT MAKES THE PADS THE MPC'S ON
@@ -529,7 +543,7 @@ KNOBS_LEFT = ("mpc:data_wheel", "mpc:note_variation", "mpc:rec_gain",
 
 KNOBS_RIGHT_BY_PAGE = {
     "LOOP": "strip level - all eight knobs, all eight strips, no banking",
-    "FX": "focused parameter bank (EQ: freq/gain/Q/type per band)",
+    "FX": "the focused slot's parameters P1-P4, absolute",
     "SONG": "scrub",
     "WAVE": "trim start / trim end / zoom / gain",
     "EDIT": "move region / fade in / fade out / region gain",

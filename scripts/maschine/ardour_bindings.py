@@ -58,8 +58,9 @@ KNOBS = {
     ] * KNOB_COUNT,
     "FX": [
         ("plugin parameter", "osc",
-         "/strip/plugin/parameter {ssid} {plugin} {param} {value}",
-         "param index comes from /strip/plugin/descriptor at focus time"),
+         "/strip/plugin/parameter {ssid} {slot+1} {knob+1} {value}",
+         "the focused slot's first four parameters; daw-ctl accumulates "
+         "the encoder's deltas and sends the absolute 0..1 the path takes"),
     ] * KNOB_COUNT,
     "SONG": [
         ("scrub", "osc", "/locate {samples} 0", "0 = do not roll"),
@@ -128,15 +129,20 @@ BUTTONS = {
         ("PIN", "local", "latch the held pad mode", None),
     ],
     "SONG": [
-        ("PREV", "lua", "locate to the previous section marker", None),
-        ("NEXT", "lua", "locate to the next section marker", None),
-        ("MARK", "lua", "Session:locations():add_mark(pos)", None),
+        ("PREV", "osc", "/locate {marker} 0",
+         "the previous marker off the published list; daw-ctl owns the step"),
+        ("NEXT", "osc", "/locate {marker} 0", "the next marker, same shape"),
+        ("MARK", "lua", "queue `mark`; locations:add_range(pos, pos) at "
+         "Ardour's own playhead",
+         "add_mark and the Location constructor are unbound on Ardour 8 "
+         "and 9 both - a zero-length range is the mark that can be made"),
         ("PIN", "local", "latch the held pad mode", None),
     ],
     "WAVE": [
         ("TRIM", "lua", "apply the trim as a region bound", None),
         ("NORM", "lua", "region:normalize()", None),
-        ("UNDO", "osc", "/access_action Editor/undo", None),
+        ("UNDO", "lua", "pop loop-ops.lua's inverse-op stack via the queue",
+         "Session:undo is not bound in Lua on either Ardour this runs"),
         ("BACK", "local", "return to the previous page", None),
     ],
     # The floppy browser. Nothing here is Ardour's - the browser talks to

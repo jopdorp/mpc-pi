@@ -625,7 +625,8 @@ class TestRegionVerbs(unittest.TestCase):
     """
 
     VERBS = ("daw:split", "daw:region:prev", "daw:region:next",
-             "daw:duplicate", "daw:erase", "daw:undo", "daw:norm")
+             "daw:duplicate", "daw:erase", "daw:undo", "daw:norm",
+             "daw:byp", "daw:mark")
 
     def button(self, target):
         found = [b for b, t in control_map.DAW_BUTTONS.items() if t == target]
@@ -794,6 +795,143 @@ class TestRegionVerbs(unittest.TestCase):
                 self.assertEqual(rig.midi(button),
                                  [control_map.MPC_BUTTONS[button]])
                 self.assertEqual(rig.daw.page, page)
+
+
+class TestTheBrowsePairFollowsThePage(unittest.TestCase):
+    """FX steps its chain, SONG jumps its markers, EDIT keeps its regions.
+
+    Two buttons, one word on the wire; daw-ctl owns the page, so daw-ctl
+    decides what the previous/next THING is - the same shape ERASE and
+    UNDO already have. These press the real buttons and assert what
+    changed: the slot, the locate, the queue, the pixels. The FX chain is
+    injected rather than read from chains.json, because the claim is
+    about stepping and bypassing, not about what this desk ships.
+    """
+
+    def button(self, target):
+        found = [b for b, t in control_map.DAW_BUTTONS.items() if t == target]
+        assert len(found) == 1, (target, found)
+        return found[0]
+
+    def fx_rig(self):
+        rig = Rig(surface="DAW")
+        rig.daw.chains = {rig.daw.focus: [{"name": "OD", "kind": "drive"},
+                                          {"name": "EQ", "kind": "eq"},
+                                          {"name": "COMP", "kind": "comp"}]}
+        rig.daw.fx_bypass = {}
+        rig.press(PAGE_BUTTONS["FX"])
+        return rig
+
+    def ssid(self, rig):
+        return daw_ctl_shim.STRIPS.index(rig.daw.focus) + 1
+
+    def test_fx_steps_the_chain_and_the_chip_follows(self):
+        rig = self.fx_rig()
+        before = bytes(rig.frame().px)
+        rig.press(self.button("daw:region:next"))
+        self.assertEqual(rig.daw.fx_slot, 1, "NEXT did not step the slot")
+        self.assertIn("EQ", rig.daw.message)
+        fx = rig.daw.ui_state()["fx"]
+        self.assertEqual(fx["slot"], 1)
+        self.assertEqual(fx["kind"], "eq",
+                         "the body view did not follow the slot")
+        self.assertNotEqual(before, bytes(rig.frame().px),
+                            "the focused chip never moved on screen")
+        rig.press(self.button("daw:region:prev"))
+        self.assertEqual(rig.daw.fx_slot, 0)
+
+    def test_fx_knobs_edit_the_focused_slot_absolutely(self):
+        """The knob under the screen edits the chip on the screen.
+
+        Two histories die here at once: the plugin id was hardcoded to 1,
+        and the wire carried the encoder's delta where Ardour expects an
+        absolute 0..1 - so the first turn of any FX knob set slot 1's
+        parameter to a whisker above zero.
+        """
+        rig = self.fx_rig()
+        rig.press(self.button("daw:region:next"))      # slot 1, the EQ
+        sent = len(rig.osc.sent)
+        rig.turn(4, mk1_encoders.FULL_TURN // 4)       # K1, under screen R
+        params = [a for p, a in rig.osc.sent[sent:]
+                  if p == "/strip/plugin/parameter"]
+        self.assertTrue(params, "K1 never reached Ardour")
+        self.assertEqual(params[-1][:3], (self.ssid(rig), 2, 1), params[-1])
+        self.assertGreater(params[-1][3], 0.5, "the value did not accumulate")
+        self.assertLessEqual(params[-1][3], 1.0)
+
+    def test_byp_takes_the_slot_out_and_back(self):
+        rig = self.fx_rig()
+        before = bytes(rig.frame().px)
+        rig.press(self.button("daw:byp"))
+        self.assertEqual(rig.osc.sent[-1],
+                         ("/strip/plugin/deactivate", (self.ssid(rig), 1)))
+        self.assertTrue(rig.daw.ui_state()["fx"]["chain"][0]["bypass"])
+        self.assertNotEqual(before, bytes(rig.frame().px),
+                            "the bypassed chip did not change on screen")
+        rig.press(self.button("daw:byp"))
+        self.assertEqual(rig.osc.sent[-1],
+                         ("/strip/plugin/activate", (self.ssid(rig), 1)))
+        self.assertFalse(rig.daw.ui_state()["fx"]["chain"][0]["bypass"])
+
+    def song_rig(self, marks):
+        rig = Rig(surface="DAW")
+        rig.press(PAGE_BUTTONS["SONG"])
+        self.spb = rig.daw.transport.samples_per_bar()
+        regions = os.path.join(os.path.dirname(rig.queue), "daw-regions")
+        rig.daw.regions_path = regions
+        with open(regions, "w") as fh:
+            fh.write("# rate %d transport %d gen 1\n"
+                     % (rig.daw.transport.rate, 4 * self.spb))
+            for name, bar in marks:
+                fh.write("mark\t%s\t%d\n" % (name, bar * self.spb))
+        rig.daw.regions_stamp = None
+        assert rig.daw.poll_regions(), "the frame was not read"
+        return rig
+
+    def test_song_jumps_between_published_markers(self):
+        rig = self.song_rig([("M1", 2), ("M2", 8)])
+        before = bytes(rig.frame().px)
+        rig.press(self.button("daw:region:next"))
+        self.assertEqual(rig.osc.sent[-1], ("/locate", (8 * self.spb, 0)))
+        self.assertEqual(rig.daw.message, "MARKER M2")
+        self.assertNotEqual(before, bytes(rig.frame().px),
+                            "the jump never reached the screen")
+        rig.press(self.button("daw:region:prev"))
+        self.assertEqual(rig.osc.sent[-1], ("/locate", (2 * self.spb, 0)))
+        rig.press(self.button("daw:region:prev"))
+        self.assertEqual(rig.daw.message, "NO MARKER BEFORE",
+                         "running out of markers must refuse out loud")
+
+    def test_song_with_no_markers_says_so(self):
+        rig = Rig(surface="DAW")
+        rig.press(PAGE_BUTTONS["SONG"])
+        rig.press(self.button("daw:region:next"))
+        self.assertEqual(rig.daw.message, "NO MARKERS")
+
+    def test_mark_goes_down_the_queue_bare(self):
+        """The governor stamps the position - same shape as NORM's factor:
+        the side that owns the number supplies it."""
+        rig = self.song_rig([("M1", 2)])
+        rig.press(self.button("daw:mark"))
+        with open(rig.queue) as fh:
+            lines = [ln.strip() for ln in fh if ln.strip()]
+        self.assertEqual(lines, ["mark"])
+        self.assertTrue(rig.daw.message.startswith("MARK BAR"),
+                        rig.daw.message)
+
+    def test_the_sections_the_markers_imply_are_drawn(self):
+        rig = self.song_rig([("M1", 2), ("M2", 8)])
+        song = rig.daw.ui_state()["song"]
+        self.assertEqual([s["name"] for s in song["sections"]], ["M1", "M2"])
+        self.assertEqual(song["sections"][0]["start"], 2.0)
+        self.assertEqual(song["sections"][0]["length"], 6.0)
+        self.assertTrue(song["sections"][0]["current"],
+                        "the section under the playhead is not current")
+        empty = Rig(surface="DAW")
+        empty.press(PAGE_BUTTONS["SONG"])
+        self.assertNotEqual(bytes(rig.frame().px),
+                            bytes(empty.frame().px),
+                            "published markers changed nothing on screen")
 
 
 class TestFrameStaysLegal(unittest.TestCase):

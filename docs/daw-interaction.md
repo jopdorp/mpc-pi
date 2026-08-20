@@ -141,32 +141,23 @@ captures now" removes it — see `docs/maschine-daw-design.md`, Phase 3.
 | button | page | knobs do | status |
 |---|---|---|---|
 | `group_e` | MIX | K1–K8 = the eight strip levels | built |
-| `group_f` | FX | the focused plugin's parameters | partial |
-| `group_g` | SONG | markers and arrangement | partial |
+| `group_f` | FX | the focused slot's parameters | built |
+| `group_g` | SONG | scrub; markers and arrangement | built |
 | `group_h` | EDIT | regions on the timeline | built |
 | `SELECT` | WAVE | held + `Dn`: drill into lane n's take; tapped: the focused lane | built |
 
-All five **open and render** — that much has been true for a while, and it
-is also the least interesting thing about them. What each one can then
-*do* is in its own section below; "partial" here always means the page
-draws and its position controls work, while the operations that change
-audio do not.
+All five **open and render**, and each one's operations are in its own
+section below. Nothing on this table is "partial" any more; where a
+control's honest limit is narrower than its name suggests — the FX
+knobs edit by parameter *index*, not by named band — the section says
+so rather than the table hiding it.
 
-FX is the exception to that pattern: its knobs do reach Ardour
-(`/strip/plugin/parameter` on the focused strip), but the plugin slot is
-hardcoded to the first one, so K1–K4 always edit slot 1 whatever the chain
-holds, and `BYP` does not exist. That is a knob that moves the wrong
-plugin rather than a knob that moves nothing, which is the more dangerous
-of the two.
-
-**The two browse arrows now step regions, on every page.** FX wants them
-for the plugin slot and SONG wants them for markers, and when either is
-built it takes them **the way `ERASE` and `UNDO` did** — `daw-ctl` reads
-its own page and decides, because it is the side that owns the page.
-Neither gets a new key and neither gets a modifier. Until then `◀` and `▶`
-mean *previous / next region* wherever you press them, which is a verb
-with something behind it rather than a key reserved for one that is not
-written.
+**The two browse arrows step what the page in front of you steps
+through.** One word on the wire — `region prev` / `region next` — and
+`daw-ctl` reads its own page and decides, **the way `ERASE` and `UNDO`
+already did**, because it is the side that owns the page: chain slots on
+FX, markers on SONG, the region selection everywhere else. Neither got a
+new key and neither got a modifier.
 
 WAVE is a drill-in rather than a top-level page: you always open it *on*
 something, and `SELECT` both opens it and backs out of it.
@@ -272,8 +263,11 @@ from is now a test: `tests/test_interaction.py` presses each of these
 seven buttons on EDIT, WAVE and the strips page and fails if the answer
 contains the word UNKNOWN.
 
-`MARK` is the one verb in this specification still deliberately unbound.
-`daw-ctl` has no marker command, so binding it would put the fault back.
+`MARK` and `BYP` joined the bound verbs when `daw-ctl` learnt to answer
+them — see the FX and SONG sections below for which keys carry them and
+why. The rule that kept them off the table until then is unchanged: a key
+that spends the status line on `UNKNOWN COMMAND` is worse than a key that
+does nothing.
 
 **The cursor is in Ardour's coordinates, not the MPC's.** The published
 header carries Ardour's sample rate and transport position, and EDIT draws
@@ -360,6 +354,90 @@ was asked for. Normalising a silent region **refuses** rather than
 dividing by a zero peak. `undo` pops an inverse-op stack that
 `loop-ops.lua` keeps for region edits only, bounded at 32 — take-level
 UNDO is a different stack and a different key.
+
+## FX: the chain's slot
+
+| control | action | status |
+|---|---|---|
+| `group_f` | open the page on the focused track | built |
+| `◀` / `▶` | previous / next chain slot | built |
+| K1–K4 | the focused slot's first four parameters, absolute | built |
+| `CONTROL` | `byp` — the focused slot in and out of the path | built |
+| jog | nothing, by specification | built |
+
+The chain the chips draw is `chains.json` — the same file
+`session-template.lua` builds the session from, so the panel browses the
+plugins that are actually there. Four chips, windowed around the focused
+slot: browsing into a fifth must move the window, because a focused chip
+off the edge of the screen is the same fault as a selection the cursor
+did not follow.
+
+**The knobs had two faults with one shape.** The plugin id was hardcoded
+to 1, so every knob edited the first slot whatever chip was focused; and
+the encoder's *delta* went on the wire where `/strip/plugin/parameter`
+takes an *absolute* 0..1, so the first turn of any FX knob set slot 1's
+parameter to a whisker above zero. `daw-ctl` holds the running value now,
+per (strip, slot, knob), opening at 0.5 — a send-only OSC client cannot
+ask the plugin where it really is, and the honest limit that leaves is
+stated on the page: the knobs are P1–P4 by index, not named bands.
+
+**And a third fault sat under them: the knobs counted from the wrong
+screen.** The page and its encoder bar are drawn on screen R, `daw-ctl`'s
+handlers take targets 0–3, and `maschine-hub` passed the raw index 0–7
+through — so on every page but the strips the four knobs physically under
+the page answered `NO KNOB EDIT 4`, while the four that worked sat under
+the screen showing the MPC. That is the fourth control to ship as two
+green halves either side of an uncounted seam, and the hub's self-test
+now asserts the index arithmetic itself.
+
+`CONTROL` carries `byp` because it heads the same left-hand cluster the
+browse pair lives in — step to a slot with `◀` `▶`, take it in and out
+with the key above them, one hand shape — and because its printed word is
+the nearest thing this panel has to a plugin-control key. Ardour's OSC
+has a path per direction (`activate` / `deactivate`) rather than a
+toggle, which for once is the good shape: the wire states the outcome, so
+a double press cannot invert the belief the way `/rec_enable_toggle` can.
+On the MPC surface `CONTROL` is still `BAR ◀`.
+
+## SONG: markers and the arrangement
+
+| control | action | status |
+|---|---|---|
+| `group_g` | open the page | built |
+| jog / K1 | scrub the playhead, snapped to the bar | built |
+| `◀` / `▶` | jump to the previous / next marker | built |
+| `SCENE` | `mark` — drop a section marker | built |
+
+`SCENE` is the printed word nearest to what a section marker is — a scene
+of the arrangement — and on the MPC surface it is still `UP`.
+
+**`mark` goes down the queue with no position.** `daw-ctl`'s playhead is
+the MPC's clock, Ardour's transport free-runs against it by an unknown
+constant, and a position sent from the panel would land in the wrong
+coordinates — so the governor stamps the marker at Ardour's own
+`transport_sample()`, the same shape as `norm` sending no factor: the
+side that owns the number supplies it. The marker comes back on the
+published list within one drain, as a three-field `mark` row an older
+`daw-ctl` skips unread.
+
+**A marker is a zero-length range, and that is measured, not chosen.**
+Neither Ardour 8.6 nor 9.0 binds `Locations:add_mark` or the `Location`
+constructor to Lua — probed live on the build host's 9, read in 8.6's
+`luabindings.cc` — while `add_range`, `set_name` and `remove` are bound
+on both. A range whose start is its end jumps, publishes and removes
+exactly like the mark it stands in for.
+
+**The page's whole coordinate system is Ardour's.** The scrub used to
+move `daw-ctl`'s mirror of the MPC's clock, which the transport poll
+rewrites every 10 ms — so a scrub visibly snapped back within a frame,
+and a playhead in MPC coordinates would sit outside the section it is
+playing by the free-run offset. Scrub, marker jumps, and the sections
+drawn between markers all live on `ardour_playhead` now: the belief the
+scrub advances is the same one the governor's publish reconciles.
+
+Sections are what the markers imply — each runs to the next marker, the
+last to the edge of the ribbon — so `MARK` twice makes a section without
+a second concept for the player to hold.
 
 ## Transport, on both surfaces
 
