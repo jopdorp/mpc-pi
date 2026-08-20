@@ -343,6 +343,51 @@ written down here rather than left to be rediscovered.
 5. `arm_dma_timer()` paces the wave-RAM DMA at the capture rate while
    recording, and keeps `MAME_MPC_DSP_DMA_TURBO` for everything else.
 
+## The input monitor is two more voices, and one key-on starts both
+
+The record destination voices cannot play what they are recording - a voice has
+one address counter and the transfer owns it - so the SAMPLE screen monitors
+through a second pair aimed at the very same two regions.
+
+The routine is at **0x49308**, called right after the arm-take routine, and it
+returns without touching the DSP at all when the Monitor field reads OFF
+(`ds:0xd7ce == 0`). It copies a 22-word template from `ds:0x15e0` into two
+blocks, patches the start and end addresses, and programs:
+
+* **voice 0x15** over the LEFT record region `0x010000-0x011140`, mixer
+  register 7 low half `0x8000`, i.e. **L=0x80 R=0x00**, hard left;
+* **voice 0x17** over the RIGHT region `0x011140-0x012280`, register 7 low half
+  `0x0080`, i.e. **L=0x00 R=0x80**, hard right.
+
+Both voice numbers are literals, `push byte 0x15` and `push byte 0x17`; there
+is no table. With Monitor set to an assignable output pair instead of L/R, the
+main volumes go to zero and register 7's high half carries `0x40` send level
+and an output number from the pair table at `ds:0x0485`.
+
+Then, once, at 0x493cc:
+
+    in al,0x88 / and al,0x7f / mov ah,1 / out 0x88,ax
+
+**One key-on, for two voices, with no voice select in front of it.** The
+register programmer it calls at `0x3e5fc` never writes the control port, and no
+second key-on exists anywhere in the module. The same shape appears everywhere
+stereo does: arming a take programs voices 0x00 and 0x10 and strobes once, and
+an ordinary stereo pad hit programs voices 2 and 4 - then 6 and 8 for the next
+hit - and strobes once through the playback module's key-on at `0x3e597`.
+
+Three pairs, three different distances, from an allocator that hands voices out
+in order, so the partner is not derivable from the voice number. Across a full
+recorded session the partner is always the voice selected immediately before
+the current one. The chip therefore latches selected voices and the key-on
+strobe starts them together and empties the latch - the only way a pair can
+start on the same sample when one register write cannot name two voices. A
+voice selected on its own, after a previous strobe emptied the latch, keys
+alone.
+
+Emulating the key-on as "start the currently selected voice" left voice 0x15
+programmed perfectly and never heard, which is exactly the symptom: in STEREO
+mode both inputs reach the DSP and only the right one is audible.
+
 ## Verifying it
 
 `MAME_MPC_SAMPLE_DEBUG=1` makes the emulator trace, on stderr and so into the
@@ -354,6 +399,28 @@ journal:
     mpc2000xl sampler: control <old> -> <new> (ch .., rec=..)
     mpc2000xl sampler: ch .. reg .. <- <48-bit> (start .. end ..)
     mpc2000xl sampler: poll ch .. start .. pos .. addr .. reg ..
+    mpc2000xl sampler: MIX ch .. L=.. R=.. send=.. lvl=.. rec=.. key=..
+    mpc2000xl sampler: KEYON data .. prev .. rec=.. dma=.. key=.. ch ..(start .. end .. L=.. R=..) ..
+    mpc2000xl sampler: VOICES key=.. v..(env=.. L=.. R=.. pos=..) ..
+
+`VOICES` is a once-a-second census of what is audible, and it answers the one
+question the rest of the trace cannot: a voice can be keyed on and still silent
+because its envelope never left zero, so "keyed" is not "heard".
+
+`MAME_MPC_DSP_TRACE=<path>` writes a complete journal of the guest's register
+traffic - every voice select with its byte mask, every register read and write,
+every control and atomic write - armed the first time the sampler is enabled so
+the whole SAMPLE-screen session is captured and nothing before it. The stereo
+pairing rule above is not visible without it.
+
+`scripts/diagnostics/run-sample-rig.sh` is the automated end-to-end check: it
+drives the panel from inside the machine, pushes a 440 Hz LEFT / 660 Hz RIGHT
+probe into RECORD IN, captures `:speaker`, and reports how much of each tone
+reached each output during each stage. Two wiring rules in it are not optional:
+`pw-record` must be given `--target 0` or it autoconnects to the machine's
+physical microphone and records the room - which reads as a plausible but
+entirely wrong result - and the links to `:speaker` must be made by hand
+because `pw-record --target :speaker` produces silence.
 
 `in_peak` is the loudest captured sample in the last report period: **zero
 means the audio never reached MAME**, which on this appliance almost always
@@ -376,13 +443,28 @@ The DMA pacing is confirmed by measurement: 88,181 words/s against 88,200
 expected for stereo, with `adc_words` and `wave_words` in lockstep at a
 constant offset.
 
-The stereo two-voice split and the position read-back are reasoned from the
-disassembly above and traced, but **take length is still not confirmed on the
-machine**: it needs someone at the SAMPLE screen recording a take of a known
-length and checking it comes out that long. The trace now prints `ctl`, `pos0`
-and `posR` for exactly this - during a stereo take `ctl` should read `0158`,
-and `pos0` and `posR` should climb TOGETHER at half the rate `wave_words`
-does.
+The stereo two-voice split is confirmed. `pos0` and `posR` now climb together
+at half the rate `wave_words` does, which they did not before: the right half
+had been advancing at twice the left's for the whole take, because the record
+transfer's key-on landed on voice 0x10 and a keyed voice advances its own
+counter on top of the transfer's. A voice the transfer owns is no longer
+played, and the take comes out the length asked for.
+
+Stereo separation is confirmed end to end by the rig, in STEREO mode with the
+LCD read back to check the Mode field. Peak per 0.25 s window on `:speaker`,
+440 Hz left input and 660 Hz right input:
+
+| stage | L@440 | L@660 | R@440 | R@660 |
+| --- | --- | --- | --- | --- |
+| MONITOR | 0.0889 | 0.0015 | 0.0018 | 0.0741 |
+| RECORD | 0.0871 | 0.0014 | 0.0009 | 0.0583 |
+| PLAYBACK | 0.1837 | 0.0045 | 0.0022 | 0.1236 |
+| PAD | 0.2789 | 0.0035 | 0.0022 | 0.1355 |
+
+Before the pair key-on the left output carried nothing at all at any stage.
+
+Still open: the ADC ring occasionally drains, depth 30 dipping to 2 in about
+one report in seven, which is the residual level-meter flicker.
 
 The digital gate fix is reasoned from the disassembly above and is traced, but
 **S/PDIF is not confirmed working**. Confirming it needs someone at the SAMPLE

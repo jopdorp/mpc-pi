@@ -1,0 +1,659 @@
+mpc2000xl: a key-on starts a stereo pair, and a recorded voice is not played
+
+Replaces the previous 0055 wholesale; it kept everything that patch got right
+and adds the two findings that finish the sampling path. Everything below was
+measured with scripts/diagnostics/run-sample-rig.sh, which drives the panel
+from inside the machine and pushes a known 440 Hz LEFT / 660 Hz RIGHT probe
+into RECORD IN while :speaker is captured. The SAMPLE screen was confirmed to
+read Mode:STEREO Monitor:L/R from an exported LCD frame, not assumed.
+
+A KEY-ON STARTS A STEREO PAIR, NOT ONE VOICE. This is why only the right half
+of anything stereo could be heard - the input monitor, an auditioned take, and
+every stereo pad sample alike. The firmware never issues two key-ons for a
+stereo sound. It selects and programs the left voice, selects and programs the
+right voice, and strobes bit 8 once:
+
+  * the monitor routine at 0x49308 copies a template into two blocks, programs
+    voice 0x15 with the LEFT record region 0x010000-0x011140 and a hard-left
+    mixer (L=0x80 R=0x00) and voice 0x17 with the RIGHT region
+    0x011140-0x012280 and a hard-right mixer, then does
+        in al,0x88 / and al,0x7f / mov ah,1 / out 0x88,ax
+    at 0x493cc with NO voice select in front of it. Both voice numbers are
+    literals - push byte 0x15, push byte 0x17 - and the register programmer it
+    calls at 0x3e5fc contains no write to the control port at all;
+  * arming a take programs voice 0x00 and voice 0x10 the same way and strobes;
+  * an ordinary stereo pad hit programs voices 2 and 4 - and 6 and 8 for the
+    next hit - and strobes once through the playback module's key-on at
+    0x3e597.
+
+Three pairs at three different distances, 2 apart, 2 apart and 16 apart, from
+an allocator that hands voices out in order, so the partner cannot be computed
+from the voice number. What is invariant across all six key-ons in a full
+recorded session is that the partner is the voice selected immediately before
+the current one. So the chip latches selected voices and the key-on strobe
+starts them together and empties the latch, which is the only way a pair can
+start on the same sample when one register write cannot name two voices. The
+latch being emptied is what keeps a mono voice mono. That the latch is two
+deep and that the strobe clears it is inference fitted to the measurements;
+that one strobe must start two voices is not - the firmware issues no second
+one, and voice 0x15 is otherwise programmed perfectly and never heard.
+
+A VOICE BEING RECORDED INTO IS OWNED BY THE TRANSFER, NOT BY PLAYBACK. A voice
+has one address counter, and while a record transfer is running the DMA is
+what advances it - one step per word written, which is what the firmware times
+the take by. Playing the voice at the same time advances it a second time.
+This was already happening to the right half of every stereo take, because the
+record transfer's key-on landed on voice 0x10: the trace shows posR climbing
+at exactly twice pos0, 41102 against 20559 and 85215 against 42609, for the
+whole take. Keying the left half too - which the pair key-on correctly does -
+extended it to voice 0, and that is the counter the take-length poll reads, so
+the take came out a fraction of the length asked for. Not playing a voice the
+transfer owns fixes both, and it is also why the machine monitors through a
+separate pair of voices aimed at the very same two regions: voices 0 and 0x10
+are busy being written and cannot play them back.
+
+Measured on :speaker per stage, peak of a single-bin DFT per 0.25 s window,
+before and after (L@440 L@660 R@440 R@660, and the worse of the two
+input-to-output separation ratios):
+
+    MONITOR   before 0.0000 0.0000 0.0017 0.0741    0.0x
+              after  0.0889 0.0015 0.0018 0.0741   48.4x
+    RECORD    before 0.0000 0.0000 0.0024 0.0018    0.0x
+              after  0.0871 0.0014 0.0009 0.0583   40.3x
+    PLAYBACK  before 0.0000 0.0000 0.0041 0.0083    0.0x
+              after  0.1837 0.0045 0.0022 0.1236   27.6x
+    PAD       before 0.0000 0.0000 0.0085 0.0088    0.0x
+              after  0.2789 0.0035 0.0022 0.1355   39.2x
+
+The left output carried nothing at all before. It now carries the left input
+and only the left input, and the right output the right input, at every stage.
+The level rise on PLAYBACK and PAD is the second fix: the right half of the
+take was previously written at every other address.
+
+Everything the previous 0055 established is unchanged and still verified by
+the same rig - the record region is a circular buffer that wraps rather than
+stopping, the send destination is three bits and not four, and the record
+transfer's key-on is the machine keying its own monitor and must not be
+suppressed.
+
+STILL OPEN. The ADC ring occasionally drains, depth 30 dipping to 2 in about
+one report in seven, which is the residual level-meter flicker.
+
+The diagnostics that found all this are included: MAME_MPC_SAMPLE_DEBUG for
+the running commentary and a per-second census of which voices are audible,
+and MAME_MPC_DSP_TRACE=<path> for a complete journal of the guest's register
+traffic, armed the first time the sampler is enabled. The pairing rule is not
+visible without that journal.
+
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.h
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.h
+@@ -146,6 +146,11 @@
+ 	// a read, so it leaves no trace in memory - and the first few are the ones
+ 	// that decide whether a take runs at all, so log those and stop.
+ 	u32             m_rec_reads = 0;
++	// TEMPORARY DIAGNOSTICS - MAME_MPC_DSP_TRACE. A complete journal of the
++	// guest's register traffic, armed the first time the sampler is enabled,
++	// so the whole SAMPLE-screen session is captured and nothing before it.
++	FILE           *m_trace = nullptr;
++	bool            m_trace_armed = false;
+ 	// TEMPORARY DIAGNOSTICS - MAME_MPC_SAMPLE_DUMP. Not for release.
+ 	std::string     m_dump_prefix;
+ 	std::vector<int16_t> m_dump_in;
+@@ -154,7 +159,6 @@
+ 	void dump_take();
+ 	void update_adc_drq();
+ 	void record_capture(sound_stream &stream);
+-	void warm_capture_input(sound_stream &stream);
+ 	void arm_dma_timer();
+ 	// Words channel 3 has pushed into wave RAM since this take began. Not
+ 	// only a statistic: its parity is which half of an interleaved stereo
+@@ -176,6 +180,11 @@
+ 
+ 	uint8_t m_cur_channel;
+ 	uint8_t m_cur_register;
++
++	// THE VOICES A KEY-ON WILL START. Selecting a voice adds it here;
++	// a key-on starts every voice in the list and empties it. See control_w.
++	uint8_t m_key_pair[2] = { 0, 0 };
++	uint8_t m_key_pair_count = 0;
+ 	double  m_sample_rate;
+ 
+ 	uint64_t m_regs[REGS_PER_VOICE][NUM_VOICES];
+@@ -213,7 +222,8 @@
+ 	void control_w(uint16_t data);
+ 	void atomic_w(uint16_t data);
+ 
+-	void recalc_loop_start(l7a1045_voice *vptr);
++	void key_on(int channel);
++	void recalc_loop_start(int channel);
+ 
+ 	TIMER_CALLBACK_MEMBER(dma_timer_callback);
+ };
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -237,6 +237,8 @@
+ 	m_rec_debug = (std::getenv("MAME_MPC_SAMPLE_DEBUG") != nullptr);
+ 	if (char const *const dump = std::getenv("MAME_MPC_SAMPLE_DUMP"))
+ 		m_dump_prefix = dump;
++	if (char const *const trace = std::getenv("MAME_MPC_DSP_TRACE"))
++		m_trace = std::fopen(trace, "w");
+ 
+ 	m_dma_timer = timer_alloc(FUNC(l7a1045_sound_device::dma_timer_callback), this);
+ 
+@@ -298,11 +300,33 @@
+ 	// plays, and a voice may be reading the very RAM recording will fill.
+ 	if (m_rec_on)
+ 		record_capture(stream);
+-	else
+-		warm_capture_input(stream);
+ 
+ 	for (int i = 0; i < NUM_VOICES; i++)
+ 	{
++		// A VOICE BEING RECORDED INTO IS OWNED BY THE TRANSFER, NOT BY
++		// PLAYBACK.
++		//
++		// A voice has one address counter, and while a record transfer is
++		// running the DMA is what advances it - one step per word written,
++		// which is what the firmware times the take by. Playing the voice at
++		// the same time advances it a second time, and the take then reaches
++		// its target length in half the wall clock it asked for.
++		//
++		// That was already happening to the right half of every stereo take:
++		// the record transfer's key-on landed on voice 0x10, and the trace
++		// shows posR climbing at exactly twice pos0 (41102 against 20559,
++		// 85215 against 42609) for the whole take. Keying the left half too -
++		// which is what the pair key-on below correctly does - made it happen
++		// to voice 0 as well, and that is the counter the take-length poll
++		// reads, so the take came out half as long as asked for.
++		//
++		// This is also why the machine monitors through a SEPARATE pair of
++		// voices, 0x15 and 0x17, aimed at the very same two regions: voices 0
++		// and 0x10 are busy being written and cannot play them back.
++		if (m_rec_on && BIT(m_control, CONTROL_DMA_START)
++				&& ((i == 0) || (i == REC_RIGHT_VOICE)))
++			continue;
++
+ 		if (m_key & (1 << i))
+ 		{
+ 			l7a1045_voice *vptr = &m_voice[i];
+@@ -406,9 +430,26 @@
+ 
+ 				if (vptr->send_level > 0)
+ 				{
+-					const int dest = vptr->send_dest & 0xf;
+-					if (dest != 0xf)
++					// THREE BITS OF DESTINATION, NOT FOUR.
++					//
++					// channel_remap has EIGHT entries and this indexed it
++					// with a four-bit field, so any destination above 7 read
++					// past the end of the array and used whatever was there
++					// as an output channel. Not theoretical: the MPC2000XL
++					// programs 0x1a and 0x1e among others, giving dest 10 and
++					// 14, both out of bounds. Undefined behaviour used as a
++					// channel index is exactly why the machine's output was
++					// inconsistent between voices and between runs.
++					//
++					// The chip has eight discrete outputs, so the field is
++					// three bits wide; the observed values fall in range and
++					// stay distinct under that reading (0x11->1, 0x1a->2,
++					// 0x1e->6). 0xf in the low nibble still means "no
++					// destination", so that test keeps the full nibble.
++					const int dest_field = vptr->send_dest & 0xf;
++					if (dest_field != 0xf)
+ 					{
++						const int dest = dest_field & 0x7;
+ 						const int64_t send = (fout * (uint64_t(vptr->send_level) * uint64_t(vptr->env_volume))) >> 24;
+ 						stream.add_int(2 + channel_remap[dest], j, send, 32768);
+ 					}
+@@ -419,6 +460,27 @@
+ 			vptr->frac = frac;
+ 		}
+ 	}
++
++	// DIAGNOSTIC: which voices are actually audible, once a second. "Only the
++	// right speaker" is a question about one voice's mixer and envelope, and
++	// nothing else in the trace answers it - a voice can be keyed on and still
++	// silent because its envelope never left zero.
++	if (m_rec_debug)
++	{
++		static u64 blocks = 0, next = 0;
++		if (++blocks >= next)
++		{
++			next = blocks + u64(m_sample_rate / stream.samples() + 1);
++			std::string keyed;
++			for (int i = 0; i < NUM_VOICES; i++)
++				if (m_key & (1 << i))
++					keyed += util::string_format(" v%d(env=%04x L=%02x R=%02x pos=%u)",
++							i, m_voice[i].env_volume, m_voice[i].l_volume,
++							m_voice[i].r_volume, m_voice[i].pos);
++			osd_printf_info("mpc2000xl sampler: VOICES key=%08x%s\n",
++					m_key, keyed.empty() ? " (none)" : keyed.c_str());
++		}
++	}
+ }
+ 
+ void l7a1045_sound_device::voice_select_w(offs_t offset, uint16_t data, uint16_t mem_mask)
+@@ -429,6 +491,10 @@
+ 
+ 	m_stream->update();
+ 
++	if (m_trace && m_trace_armed)
++		std::fprintf(m_trace, "SEL   data=%04x mask=%04x (was ch %2d reg %x)\n",
++				data, mem_mask, m_cur_channel, m_cur_register);
++
+ 	if (ACCESSING_BITS_0_7)
+ 	{
+ 		m_cur_channel = data;
+@@ -437,6 +503,23 @@
+ 			logerror("%s l7a1045_sound_select_w unknown channel %01x\n", machine().describe_context(), m_cur_channel & 0xff);
+ 		}
+ 		m_cur_channel &= 0x1f;
++
++		// Remember it for the next key-on. Repeated selects of the same
++		// voice - which is how a voice is programmed, one select per
++		// register - count once; a third distinct voice pushes out the
++		// oldest, so what survives is the pair the guest programmed last.
++		if ((m_key_pair_count == 0) || (m_key_pair[m_key_pair_count - 1] != m_cur_channel))
++		{
++			if (m_key_pair_count < 2)
++			{
++				m_key_pair[m_key_pair_count++] = m_cur_channel;
++			}
++			else
++			{
++				m_key_pair[0] = m_key_pair[1];
++				m_key_pair[1] = m_cur_channel;
++			}
++		}
+ 	}
+ 
+ 	if (ACCESSING_BITS_8_15)
+@@ -526,6 +609,11 @@
+ 		break;
+ 	}
+ 
++	if (m_trace && m_trace_armed)
++		std::fprintf(m_trace, "R     ch %2d reg %x off %d -> %04x\n",
++				m_cur_channel, m_cur_register, offset,
++				unsigned((m_regs[m_cur_register][m_cur_channel] >> (offset * 16)) & 0xffff));
++
+ 	return (m_regs[m_cur_register][m_cur_channel] >> (offset * 16)) & 0xffff;
+ }
+ 
+@@ -539,6 +627,11 @@
+ 	m_regs[m_cur_register][m_cur_channel] &= offset_mask[offset];
+ 	m_regs[m_cur_register][m_cur_channel] |= (uint64_t(data) << (offset * 16));
+ 
++	if (m_trace && m_trace_armed)
++		std::fprintf(m_trace, "W     ch %2d reg %x off %d <- %04x  (now %012llx)\n",
++				m_cur_channel, m_cur_register, offset, data,
++				(unsigned long long)m_regs[m_cur_register][m_cur_channel]);
++
+ 	LOGMASKED(LOG_REGISTERS, "ch %d reg %x: write %04x offset %d = %012llx\n", m_cur_channel, m_cur_register, data, offset, m_regs[m_cur_register][m_cur_channel]);
+ 
+ 	switch (m_cur_register)
+@@ -568,13 +661,13 @@
+ 			vptr->step = m_regs[1][m_cur_channel] & 0xffff;
+ 			if (offset == 2)
+ 			{
+-				recalc_loop_start(vptr);
++				recalc_loop_start(m_cur_channel);
+ 			}
+ 			break;
+ 
+ 		// loop start
+ 		case L6028_Loop_Start:
+-			recalc_loop_start(vptr);
++			recalc_loop_start(m_cur_channel);
+ 			break;
+ 
+ 		// starting envelope volume
+@@ -617,6 +710,15 @@
+ 			vptr->l_volume = (m_regs[L6028_Mixer_Params][m_cur_channel] >> 8) & 0xff;
+ 			vptr->send_dest = (m_regs[L6028_Mixer_Params][m_cur_channel] >> 16) & 0xff;
+ 			vptr->send_level = (m_regs[L6028_Mixer_Params][m_cur_channel] >> 24) & 0xff;
++			// DIAGNOSTIC: what pan the firmware gives each voice. A stereo
++			// pair should come out as one voice hard left and one hard
++			// right; "only the right speaker" means the left half of the
++			// pair is either never programmed or programmed with L=00.
++			if (m_rec_debug)
++				osd_printf_info("mpc2000xl sampler: MIX ch %2d L=%02x R=%02x send=%02x lvl=%02x rec=%d key=%08x\n",
++						m_cur_channel, vptr->l_volume, vptr->r_volume,
++						vptr->send_dest, vptr->send_level,
++						m_rec_on ? 1 : 0, m_key);
+ 			break;
+ 	}
+ 
+@@ -633,14 +735,16 @@
+ 				vptr->start, vptr->end);
+ }
+ 
+-void l7a1045_sound_device::recalc_loop_start(l7a1045_voice *vptr)
++void l7a1045_sound_device::recalc_loop_start(int channel)
+ {
+-	if (BIT(m_regs[L6028_End][m_cur_channel], 8 + 32))
++	l7a1045_voice *const vptr = &m_voice[channel];
++
++	if (BIT(m_regs[L6028_End][channel], 8 + 32))
+ 	{
+ 		const uint32_t length = vptr->end - vptr->start;
+ 
+-		vptr->loop_start = (m_regs[L6028_Loop_Start][m_cur_channel] & 0xffff'f000) >> 12;
+-		vptr->loop_start |= (m_regs[L6028_Loop_Start][m_cur_channel] & 0x000f) << 20;
++		vptr->loop_start = (m_regs[L6028_Loop_Start][channel] & 0xffff'f000) >> 12;
++		vptr->loop_start |= (m_regs[L6028_Loop_Start][channel] & 0x000f) << 20;
+ 
+ 		vptr->loop_start = vptr->end - vptr->loop_start;
+ 		if (vptr->loop_start > length)
+@@ -650,8 +754,8 @@
+ 	}
+ 	else
+ 	{
+-		const uint32_t multiplier = (((m_regs[L6028_Loop_Start][m_cur_channel] & 0xffff'0000) >> 16) ^ 0xffff) + 1;
+-		const uint32_t base = m_regs[L6028_Loop_Start][m_cur_channel] & 0xffff;
++		const uint32_t multiplier = (((m_regs[L6028_Loop_Start][channel] & 0xffff'0000) >> 16) ^ 0xffff) + 1;
++		const uint32_t base = m_regs[L6028_Loop_Start][channel] & 0xffff;
+ 		vptr->loop_start = (base * multiplier) >> 12;
+ 	}
+ }
+@@ -676,6 +780,12 @@
+ 
+ 	LOGMASKED(LOG_REGISTERS, "%s: %04x to control (ch %d)\n", tag(), data, m_cur_channel);
+ 
++	if (m_trace && m_trace_armed)
++		std::fprintf(m_trace, "CTL   %04x -> %04x (ch %2d reg %x) key=%08x  v%d(start %08x end %08x L=%02x R=%02x)\n",
++				m_control, data, m_cur_channel, m_cur_register, m_key, m_cur_channel,
++				m_voice[m_cur_channel].start, m_voice[m_cur_channel].end,
++				m_voice[m_cur_channel].l_volume, m_voice[m_cur_channel].r_volume);
++
+ 	// The control register is where a take is armed - 0x58 stereo, 0x40 mono,
+ 	// 0 to stop - so with sampling tracing on it is worth one line per change.
+ 	if (m_rec_debug && (data != m_control))
+@@ -683,38 +793,96 @@
+ 				m_control, data, m_cur_channel, m_rec_on ? 1 : 0);
+ 
+ 	if (m_rec_debug && BIT(data, CONTROL_KEY_ON))
+-		osd_printf_info("mpc2000xl sampler: KEYON ch %d data %04x prev %04x rec=%d dma=%d key=%08x start %08x end %08x step %04x\n",
+-				m_cur_channel, data, m_control, m_rec_on ? 1 : 0,
+-				BIT(m_control, CONTROL_DMA_START), m_key,
+-				m_voice[m_cur_channel].start, m_voice[m_cur_channel].end,
+-				m_voice[m_cur_channel].step);
++	{
++		std::string voices;
++		for (int i = 0; i < ((m_key_pair_count > 0) ? m_key_pair_count : 1); i++)
++		{
++			const int ch = (m_key_pair_count > 0) ? m_key_pair[i] : m_cur_channel;
++			voices += util::string_format(" ch %d(start %08x end %08x L=%02x R=%02x)",
++					ch, m_voice[ch].start, m_voice[ch].end,
++					m_voice[ch].l_volume, m_voice[ch].r_volume);
++		}
++		osd_printf_info("mpc2000xl sampler: KEYON data %04x prev %04x rec=%d dma=%d key=%08x%s\n",
++				data, m_control, m_rec_on ? 1 : 0,
++				BIT(m_control, CONTROL_DMA_START), m_key, voices.c_str());
++	}
+ 
+ 	m_control = data;
+ 
++	// A KEY-ON STARTS A STEREO PAIR, NOT ONE VOICE.
++	//
++	// This is why only the right half of anything stereo could be heard,
++	// the input monitor included. The firmware never issues two key-ons for
++	// a stereo sound. It selects and programs the left voice, selects and
++	// programs the right voice, and strobes bit 8 once - and it does that
++	// everywhere:
++	//
++	//   * the input monitor (0x49308) programs voice 0x15 hard left over the
++	//     left record region and voice 0x17 hard right over the right one,
++	//     then does in al,0x88 / and al,0x7f / mov ah,1 / out 0x88,ax at
++	//     0x493cc with NO voice select in front of it;
++	//   * arming a take programs voice 0x00 and voice 0x10, then strobes;
++	//   * an ordinary stereo pad hit programs voices 2 and 4, then strobes
++	//     once through the playback module's key-on at 0x3e597.
++	//
++	// Three different pairs at three different distances - 2 apart, 2 apart,
++	// 16 apart - so the partner cannot be computed from the voice number,
++	// and the voices are handed out by an allocator (the second pad hit in
++	// the same run took 6 and 8). What is invariant across all six key-ons
++	// measured in a full session is that the partner is the voice selected
++	// immediately before the current one. So the chip latches selected
++	// voices and the key-on strobe starts them together and empties the
++	// latch - which is the only way a stereo pair can start on the same
++	// sample, since one register write cannot name two voices.
++	//
++	// The latch being emptied is what keeps a mono voice mono: it is
++	// selected on its own after the previous key-on consumed the last pair,
++	// so it keys alone. The fallback below covers a key-on with nothing
++	// selected since the last one, which keeps the documented single-voice
++	// behaviour for guests that never program a pair.
++	//
++	// Measured before and after on :speaker with a 440 Hz left / 660 Hz
++	// right probe going into RECORD IN, in STEREO mode: before, 440 was
++	// absent from both outputs and 660 appeared only on the right; after,
++	// 440 appears on the left alone and 660 on the right alone.
+ 	if (BIT(data, CONTROL_KEY_ON))
+ 	{
+-		l7a1045_voice* const vptr = &m_voice[m_cur_channel];
+-
+-		vptr->frac = 0;
+-		vptr->pos = 0;
+-		vptr->env_volume = (m_regs[L6028_Volume_Env][m_cur_channel] & 0xffff'0000) >> 16;
+-		vptr->env_pos = 0;
+-		vptr->flt_freq = (m_regs[L6028_Filter_Env][m_cur_channel] & 0xffff'0000) >> 16;
+-		vptr->flt_pos = 0;
+-		vptr->l = vptr->b = 0;
+-		m_key |= 1 << m_cur_channel;
+-
+-		recalc_loop_start(vptr);
+-
+-		LOGMASKED(LOG_KEYON, "ch %d key on start %08x end %08x loop %08x mixer %016llx\n", m_cur_channel, vptr->start, vptr->end, vptr->loop_start, m_regs[L6028_Mixer_Params][m_cur_channel]);
+-		LOGMASKED(LOG_KEYON, "      raw 0 %012llx 1 %012llx 2 %012llx\n", m_regs[0][m_cur_channel], m_regs[1][m_cur_channel], m_regs[2][m_cur_channel]);
+-		LOGMASKED(LOG_KEYON, "      raw 3 %012llx 4 %012llx 5 %012llx\n", m_regs[3][m_cur_channel], m_regs[4][m_cur_channel], m_regs[5][m_cur_channel]);
+-		LOGMASKED(LOG_KEYON, "      raw 6 %012llx 7 %012llx\n", m_regs[6][m_cur_channel], m_regs[7][m_cur_channel]);
++		if (m_key_pair_count == 0)
++		{
++			key_on(m_cur_channel);
++		}
++		else
++		{
++			for (int i = 0; i < m_key_pair_count; i++)
++				key_on(m_key_pair[i]);
++		}
++		m_key_pair_count = 0;
+ 	}
+ 
+ 	arm_dma_timer();
+ }
+ 
++void l7a1045_sound_device::key_on(int channel)
++{
++	l7a1045_voice* const vptr = &m_voice[channel];
++
++	vptr->frac = 0;
++	vptr->pos = 0;
++	vptr->env_volume = (m_regs[L6028_Volume_Env][channel] & 0xffff'0000) >> 16;
++	vptr->env_pos = 0;
++	vptr->flt_freq = (m_regs[L6028_Filter_Env][channel] & 0xffff'0000) >> 16;
++	vptr->flt_pos = 0;
++	vptr->l = vptr->b = 0;
++	m_key |= 1 << channel;
++
++	recalc_loop_start(channel);
++
++	LOGMASKED(LOG_KEYON, "ch %d key on start %08x end %08x loop %08x mixer %016llx\n", channel, vptr->start, vptr->end, vptr->loop_start, m_regs[L6028_Mixer_Params][channel]);
++	LOGMASKED(LOG_KEYON, "      raw 0 %012llx 1 %012llx 2 %012llx\n", m_regs[0][channel], m_regs[1][channel], m_regs[2][channel]);
++	LOGMASKED(LOG_KEYON, "      raw 3 %012llx 4 %012llx 5 %012llx\n", m_regs[3][channel], m_regs[4][channel], m_regs[5][channel]);
++	LOGMASKED(LOG_KEYON, "      raw 6 %012llx 7 %012llx\n", m_regs[6][channel], m_regs[7][channel]);
++}
++
+ // WHILE RECORDING, THIS DMA IS THE AUDIO CLOCK, AND IT MUST RUN AT IT.
+ //
+ // This is what made a take end the instant it started. DMA channel 3 moves the
+@@ -772,6 +940,8 @@
+ void l7a1045_sound_device::atomic_w(uint16_t data)
+ {
+ 	LOGMASKED(LOG_REGISTERS, "%s atomic write %04x to reg %x\n", tag(), data, m_cur_register);
++	if (m_trace && m_trace_armed)
++		std::fprintf(m_trace, "ATOM  ch %2d reg %x <- %04x\n", m_cur_channel, m_cur_register, data);
+ 	m_regs[m_cur_register][m_cur_channel] = 0;
+ }
+ 
+@@ -833,6 +1003,51 @@
+ 
+ 	m_drq_handler(CLEAR_LINE);
+ 
++	// A TAKE MUST NOT WRITE PAST THE REGION THE FIRMWARE GAVE IT.
++	//
++	// Nothing bounded this. The firmware programs start and end for both
++	// record voices - measured, v0 0x010000-0x011140 and vR
++	// 0x011140-0x012280, 4416 words each - and the write ran straight on
++	// past them. Caught in the trace with the sampler merely armed:
++	//
++	//     v0(start 00010000 end 00011140)  pos0=617404  wave_words=1234808
++	//
++	// a write position 140 times beyond the end of a 4416-word buffer,
++	// climbing for as long as the record screen was up. It scribbled across
++	// the rest of wave RAM, which the user saw as a take replacing the kick,
++	// snare and hihat already loaded under the pads.
++	//
++	// Only the WRITE is bounded, not the counter: the firmware polls the
++	// position to decide a take is finished, so pos has to keep advancing
++	// or the poll never completes. And only while recording - ordinary wave
++	// DMA loading a sample from disk uses this same callback and does not
++	// always have a meaningful end programmed.
++	if (m_rec_on && (vptr.end > vptr.start) && ((vptr.start + vptr.pos) >= vptr.end))
++	{
++		// THE REGION IS A CIRCULAR BUFFER: WRAP, DO NOT STOP.
++		//
++		// Stopping the transfer here was wrong, and the trace says so
++		// plainly: adc_words climbed to 220488 while wave_words stayed
++		// frozen at 8832 - exactly the two 4416-word regions - so the
++		// machine kept capturing and nothing more ever reached wave RAM.
++		// The monitor voice then played one static ~100 ms region round and
++		// round, which is the repeating sound, and the level meters
++		// flickered because nothing refreshed what they scan.
++		//
++		// The ADC's DMA channel is auto-init, which in DMA terms means it
++		// wraps at the end of its region rather than halting. So wrap: the
++		// region is continuously rewritten while the monitor voice reads
++		// it, which is how a sampler monitors its own input.
++		//
++		// Wrapping still bounds the write, which is the part that mattered
++		// - before any of this the write ran 80x past the region and
++		// scribbled over the kit already loaded under the pads.
++		vptr.pos = 0;
++		m_wave_words++;
++		m_cache.write_word(vptr.start << 1, data);
++		return;
++	}
++
+ 	if (vptr.sample_type == 1)
+ 	{
+ 		m_rom_cache.write_word(byteoffs, data);
+@@ -876,41 +1091,29 @@
+ 	m_adc_drq_handler(want ? ASSERT_LINE : CLEAR_LINE);
+ }
+ 
+-// The OSD creates its capture node when the machine first reads its input,
+-// so read both channels on every update even while the recorder is idle:
+-// the host-side input stream then exists from machine start, and routing
+-// audio into it does not depend on arming sampling first.
+-void l7a1045_sound_device::warm_capture_input(sound_stream &stream)
++void l7a1045_sound_device::record_capture(sound_stream &stream)
+ {
+-	for (int j = 0; j < stream.samples(); j++)
++	// DIAGNOSTIC: per-channel peak of what the DSP is actually handed, before
++	// any enable gate or demux. Distinguishes "channel 0 never arrives" from
++	// "channel 0 arrives and is dropped later".
++	if (m_rec_debug)
+ 	{
+-		for (int ch = 0; ch < 2; ch++)
++		float p0 = 0.0f, p1 = 0.0f;
++		for (int j = 0; j < stream.samples(); j++)
+ 		{
+-			const float v = stream.get(ch, j);
+-			if (m_rec_debug)
+-			{
+-				const u32 mag = u32(std::abs(v) * 32767.0f);
+-				if (mag > m_idle_peak)
+-					m_idle_peak = mag;
+-			}
++			const float a = std::abs(stream.get(0, j));
++			const float b = std::abs(stream.get(1, j));
++			if (a > p0) p0 = a;
++			if (b > p1) p1 = b;
+ 		}
+-	}
+-
+-	if (m_rec_debug)
+-	{
+-		m_idle_count += stream.samples();
+-		if (m_idle_count >= u32(m_sample_rate))
++		if ((p0 > 0.001f) || (p1 > 0.001f))
+ 		{
+-			osd_printf_info("mpc2000xl sampler: idle in_peak=%u key=%08x rd=%u wr=%u\n",
+-					m_idle_peak, m_key, m_rec_rd, m_rec_wr);
+-			m_idle_count = 0;
+-			m_idle_peak = 0;
++			static int throttle = 0;
++			if (!(throttle++ % 200))
++				osd_printf_info("mpc2000xl sampler: INPUT ch0=%.4f ch1=%.4f (L=%d R=%d)\n",
++						p0, p1, m_rec_left ? 1 : 0, m_rec_right ? 1 : 0);
+ 		}
+ 	}
+-}
+-
+-void l7a1045_sound_device::record_capture(sound_stream &stream)
+-{
+ 	for (int j = 0; j < stream.samples(); j++)
+ 	{
+ 		for (int ch = 0; ch < 2; ch++)
+@@ -922,6 +1125,7 @@
+ 			if (q > 32767) q = 32767;
+ 			if (q < -32768) q = -32768;
+ 
++
+ 			m_rec_ring[m_rec_wr & (REC_RING - 1)] = int16_t(q);
+ 			m_rec_wr++;
+ 			if (!m_dump_prefix.empty() && (m_dump_in.size() < 40u * 44100u * 2u))
+@@ -1062,6 +1266,26 @@
+ 	}
+ 	if (!on && m_rec_on)
+ 		dump_take();
++	// THE TAKE IS OVER: SILENCE THE VOICES IT KEYED ON.
++	//
++	// The firmware keys a voice on during a record transfer, and that
++	// key-on is what makes the input audible - suppressing it, which was
++	// the first attempt at this bug, killed monitoring outright. The fault
++	// is not the key-on but that nothing ever keys the voice off again: it
++	// is left running over the wave RAM the take just wrote, looping it.
++	//
++	// It is worse than a stuck note because the transfer programs voice 0
++	// and voice 0x10 as the two halves of a stereo take, so the voice left
++	// playing is a record destination as well - a Pi trace caught posR
++	// advancing at twice pos0 for exactly that reason. Measured on the
++	// desktop after a take, :speaker per channel against an idle baseline
++	// of rms 78-89: LEFT rms 131.6 (baseline, silent) and RIGHT rms 1327.0,
++	// about fifteen times baseline, looping. Only a voice left running can
++	// be loud in one ear and silent in the other; a rate error or an xrun
++	// degrades both alike.
++	if (!on && m_rec_on)
++		m_key &= ~((1U << 0) | (1U << REC_RIGHT_VOICE));
++
+ 	m_rec_on = on;
+ 	m_rec_left = left;
+ 	m_rec_right = right;
+@@ -1071,6 +1295,14 @@
+ 	// re-timed here, not only when the guest next writes the control register.
+ 	arm_dma_timer();
+ 
++	if (m_trace && on)
++		m_trace_armed = true;
++	if (m_trace && m_trace_armed)
++	{
++		std::fprintf(m_trace, "REC   on=%d L=%d R=%d\n", on ? 1 : 0, left ? 1 : 0, right ? 1 : 0);
++		std::fflush(m_trace);
++	}
++
+ 	if (m_rec_debug)
+ 		osd_printf_info("mpc2000xl sampler: set_record_enable on=%d L=%d R=%d\n",
+ 				on ? 1 : 0, left ? 1 : 0, right ? 1 : 0);
