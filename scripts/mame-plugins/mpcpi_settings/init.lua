@@ -702,12 +702,61 @@ function mpcpi_settings.startplugin()
 		end
 	end
 
-	-- MAME has no menu bar, and this machine has a keyboard, so Tab belongs
-	-- to the MPC panel until the UI is toggled on with Scroll Lock. The menu
-	-- key opens this menu directly, past that gate; MPCPI_SETTINGS_HOTKEY
-	-- takes MAME sequence tokens for anyone whose keyboard has no such key.
+	-- This machine has a keyboard, so Tab belongs to the MPC panel until the
+	-- UI is toggled on with Scroll Lock. The artwork's visible menu bar and
+	-- this hotkey both open the menu directly, past that gate.
 	local hotkey_sequence
 	local hotkey_down = false
+	local menu_click_port
+	local menu_click_down = false
+
+	local function show_device_menu(requested)
+		if requested == 2 then
+			browse_dir = start_dir()
+			view = VIEW_DISK
+			restore_selection = 3
+		elseif requested == 3 then
+			view = VIEW_MAIN
+			restore_selection = 8
+		elseif requested == 4 then
+			view = VIEW_MAIN
+			restore_selection = 12
+		else
+			view = VIEW_MAIN
+			restore_selection = nil
+		end
+		emu.show_menu(MENU_NAME)
+	end
+
+	local function poll_menu_click()
+		if not menu_click_port then
+			menu_click_port = manager.machine.ioport.ports[':MPCPI_MENU']
+		end
+		if not menu_click_port then
+			return
+		end
+		local bits = menu_click_port:read() & 0x0f
+		if bits == 0 then
+			menu_click_down = false
+			return
+		end
+		if menu_click_down then
+			return
+		end
+		menu_click_down = true
+		if manager.ui.menu_active then
+			return
+		end
+		if bits & 0x02 ~= 0 then
+			show_device_menu(2)
+		elseif bits & 0x04 ~= 0 then
+			show_device_menu(3)
+		elseif bits & 0x08 ~= 0 then
+			show_device_menu(4)
+		else
+			show_device_menu(1)
+		end
+	end
 
 	local function poll_hotkey()
 		if not hotkey_sequence then
@@ -715,7 +764,7 @@ function mpcpi_settings.startplugin()
 		end
 		local pressed = manager.machine.input:seq_pressed(hotkey_sequence)
 		if pressed and not hotkey_down then
-			emu.show_menu(MENU_NAME)
+			show_device_menu(1)
 		end
 		hotkey_down = pressed
 	end
@@ -734,6 +783,7 @@ function mpcpi_settings.startplugin()
 	emu.register_prestart(on_start)
 	emu.register_periodic(function ()
 		restore_saved()
+		poll_menu_click()
 		poll_hotkey()
 	end)
 	emu.register_menu(menu_callback, menu_populate, MENU_NAME)

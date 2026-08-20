@@ -1,0 +1,72 @@
+From: MPC-Pi Project
+Subject: [PATCH] mpc2000xl: add a clickable device menu bar
+
+Put the desktop device settings on a visible strip at the top of the panel.
+Each entry is backed by a UI-only input port that the settings Lua plugin can
+poll; the guest never reads this port.
+
+The strip occupies the otherwise-unused top edge, outside all emulated
+controls.  MAME's standard layout hit testing therefore owns and releases the
+click without affecting panel inputs underneath it.
+---
+ src/mame/akai/mpc2000.cpp         |  7 +++++++
+ src/mame/layout/mpc2000xl.lay     | 24 ++++++++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -1724,5 +1724,12 @@ static INPUT_PORTS_START( mpc2000 )
+ 	PORT_BIT(0x100, IP_ACTIVE_HIGH, IPT_KEYBOARD) PORT_NAME("DATA Wheel -") PORT_CODE(KEYCODE_MINUS)
+ 	PORT_BIT(0x200, IP_ACTIVE_HIGH, IPT_KEYBOARD) PORT_NAME("DATA Wheel +") PORT_CODE(KEYCODE_EQUALS)
++
++	PORT_START("MPCPI_MENU")
++	PORT_BIT(0x01, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("Device Settings")
++	PORT_BIT(0x02, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("Disk Settings")
++	PORT_BIT(0x04, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("MIDI Settings")
++	PORT_BIT(0x08, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("Audio Settings")
++	PORT_BIT(0xf0, IP_ACTIVE_HIGH, IPT_UNUSED)
+ INPUT_PORTS_END
+ 
+ ROM_START( mpc2000xl )
+diff --git a/src/mame/layout/mpc2000xl.lay b/src/mame/layout/mpc2000xl.lay
+--- a/src/mame/layout/mpc2000xl.lay
++++ b/src/mame/layout/mpc2000xl.lay
+@@ -292,6 +292,22 @@
+ 	<element name="led" defstate="0"><disk></disk></element>
+ 
+ 	<!-- All Texts -->
++	<element name="menu-device-settings">
++		<rect><color red="0.16" green="0.16" blue="0.16" /></rect>
++		<text string="DEVICE SETTINGS"><color red="1" green="1" blue="1" /></text>
++	</element>
++	<element name="menu-disk">
++		<rect><color red="0.16" green="0.16" blue="0.16" /></rect>
++		<text string="DISK"><color red="1" green="1" blue="1" /></text>
++	</element>
++	<element name="menu-midi">
++		<rect><color red="0.16" green="0.16" blue="0.16" /></rect>
++		<text string="MIDI"><color red="1" green="1" blue="1" /></text>
++	</element>
++	<element name="menu-audio">
++		<rect><color red="0.16" green="0.16" blue="0.16" /></rect>
++		<text string="AUDIO"><color red="1" green="1" blue="1" /></text>
++	</element>
+ 	<element name="text-drum1"><text align="3" string="PAD 1 " /></element>
+ 	<element name="text-drum2"><text align="3" string="PAD 2 " /></element>
+ 	<element name="text-drum3"><text align="3" string="PAD 3 " /></element>
+@@ -1002,6 +1018,14 @@
+ 
+ 	<!-- Box and Screen -->
+ 	<element ref="box-topedge"><bounds x="0" y="0" width="6000" height="180" /></element>
++	<element ref="menu-device-settings" inputtag="MPCPI_MENU" inputmask="0x01">
++		<bounds x="120" y="25" width="1180" height="125" /></element>
++	<element ref="menu-disk" inputtag="MPCPI_MENU" inputmask="0x02">
++		<bounds x="1320" y="25" width="650" height="125" /></element>
++	<element ref="menu-midi" inputtag="MPCPI_MENU" inputmask="0x04">
++		<bounds x="1990" y="25" width="650" height="125" /></element>
++	<element ref="menu-audio" inputtag="MPCPI_MENU" inputmask="0x08">
++		<bounds x="2660" y="25" width="650" height="125" /></element>
+ 	<element ref="rect"><bounds x="0" y="180" width="6000" height="4146" /><color red="0.87" green="0.858" blue="0.847"/></element>
+ 	<collection name="script warning">
+ 		<element ref="script_warning" id="warning"><bounds x="3000" y="40" width="2900" height="100"/><color red="1" green="0" blue="0" /></element>

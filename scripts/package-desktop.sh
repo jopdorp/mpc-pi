@@ -132,10 +132,10 @@ export MPC_PANEL_TIMER_MODE="\${MPC_PANEL_TIMER_MODE:-accurate}"
 if [ -n "\${MPCPI_DISABLE_ACP:-}" ]; then
     "\$here/scripts/mpcpi-audio-setup"
 fi
-# The Device Settings menu (the menu key, or Scroll Lock then Tab ->
-# Plugin Options -> Device Settings). Disk, MIDI port and output device it
-# changes live; the quantum and the rate are read once, when the audio
-# stream is created and when the graph is forced, so it writes them here
+# The Device Settings menu (the artwork menu bar, the menu key, or Scroll
+# Lock then Tab -> Plugin Options -> Device Settings). The disk, MIDI ports,
+# and output device change live; the quantum and rate are read once, when the
+# audio stream is created and when the graph is forced, so it writes them here
 # and asks for a fresh launch by leaving a marker behind.
 mpcpi_conf="\${XDG_CONFIG_HOME:-\$HOME/.config}/mpcpi"
 mkdir -p "\$mpcpi_conf"
@@ -150,8 +150,12 @@ trap '"\$here/scripts/mpcpi-sampler-input" --stop 2>/dev/null || true' EXIT INT 
 while :; do
     rm -f "\$MPCPI_RELAUNCH_FILE"
     unset MPC_PIPEWIRE_FRAMES PIPEWIRE_RATE_HZ MPCPI_AUDIO_SINK
-    # shellcheck source=/dev/null
-    [ -r "\$MPCPI_SETTINGS_FILE" ] && . "\$MPCPI_SETTINGS_FILE"
+    if [ -r "\$MPCPI_SETTINGS_FILE" ]; then
+        # shellcheck source=/dev/null
+        set -a
+        . "\$MPCPI_SETTINGS_FILE"
+        set +a
+    fi
     eval "\$mpcpi_overrides"
     export PIPEWIRE_RATE_HZ="\${PIPEWIRE_RATE_HZ:-48000}"
     export MPC_PIPEWIRE_FRAMES="\${MPC_PIPEWIRE_FRAMES:-64}"
@@ -419,9 +423,8 @@ chmod +x "$staging/scripts/mpcpi-sampler-input"
 # The plugins tree ships in the bundle because the mpc-named binary does not
 # find an executable-relative plugins directory on its own.
 cp -r -- "$mame_source_dir/plugins" "$staging/plugins"
-# MAME has no menu bar, so the device settings a player wants at hand -
-# the disk in the drive, the MIDI ports, the output device and the audio
-# buffer - are a plugin menu of our own.
+# The artwork menu bar signals this plugin to open the device settings a
+# player wants at hand: disk, MIDI ports, output device and audio buffer.
 cp -r -- "$repo_root/scripts/mame-plugins/mpcpi_settings" "$staging/plugins/"
 chmod +x "$staging/plugins/mpcpi_settings/mpcpi-audio-route"
 
@@ -517,9 +520,11 @@ sliders are mouse-controlled through the bundled layout helper plugin, which
 
 ## Device settings
 
-Press the menu key (the one beside right Ctrl) for **Device Settings**: the
-disk in the drive, the MIDI in and out ports, the audio output device and
-the audio buffer. Set \`MPCPI_SETTINGS_HOTKEY\` to MAME sequence tokens -
+Click **DEVICE SETTINGS**, **DISK**, **MIDI** or **AUDIO** in the bar at the
+top of the panel. The first opens the whole menu; the other entries jump to
+their part of it. The menu covers the disk in the drive, the MIDI in and out
+ports, the audio output device and the audio buffer. The menu key also opens
+it. Set \`MPCPI_SETTINGS_HOTKEY\` to MAME sequence tokens -
 \`MPCPI_SETTINGS_HOTKEY=KEYCODE_F14 ./mpcpi\` - for a keyboard without one.
 The same menu is under Plugin Options in MAME's own menu, but these
 machines have a keyboard, so Tab belongs to the MPC panel until you press
