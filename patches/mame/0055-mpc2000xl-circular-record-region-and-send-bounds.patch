@@ -1,0 +1,307 @@
+mpc2000xl: the record region is circular, and the send field is three bits
+
+Replaces the previous 0055 wholesale. Everything here was measured with an
+automated rig (scripts drive the panel from inside the machine via ioport
+and a known stereo probe - 440 Hz left, 660 Hz right - goes in while
+:speaker is captured), not inferred from listening.
+
+THE RECORD REGION WRAPS, IT DOES NOT STOP. The write ran unbounded at
+first - pos0 reached 352828 against a 4416-word region, scribbling over
+wave RAM and replacing the kit already under the pads. Stopping at the end
+fixed that and broke something else: adc_words climbed to 220488 while
+wave_words froze at 8832, exactly the two regions, so the machine kept
+capturing and nothing more reached wave RAM. The monitor voice then played
+one static ~100 ms region round and round - the repeating sound - and the
+level meters flickered because nothing refreshed what they scan.
+
+The ADC's DMA channel is auto-init, which means it wraps rather than
+halting, so the region is a circular buffer continuously rewritten while
+the monitor voice reads it. After this, adc_words and wave_words track
+each other exactly (1278896 vs 1278907) instead of diverging.
+
+THE SEND DESTINATION IS THREE BITS. channel_remap has eight entries and
+was indexed with a four-bit field. The MPC2000XL programs 0x1a and 0x1e
+among others, giving indices 10 and 14 - out of bounds, with the result
+used as an output channel. The chip has eight discrete outputs; under a
+three-bit reading the observed values land in range and stay distinct.
+
+WORKAROUNDS REMOVED. warm_capture_input, the monitor mix into outputs 0/1,
+suppressing the record transfer's key-on, and keying the record voices off
+at transfer end are all gone. The key-on in particular was not stray: it
+is the machine keying its own monitor voice, and suppressing it was
+fighting correct behaviour.
+
+WHAT IS STILL WRONG, precisely located. In STEREO mode both inputs reach
+the DSP (INPUT ch0=0.0436 ch1=0.0193 with L=1 R=1) and only the right is
+ever heard. The firmware programs voice 21 hard left (L=80 R=00) and voice
+23 hard right (L=00 R=80) as the monitor pair, and keys on ONLY voice 23 -
+measured across a full run, ch21 keyons 0, ch23 keyons 4. So the left
+input is captured and has no voice to play it. How the hardware keys the
+left half of that pair is the open question; note playback pairs are N and
+N+16 while this pair is 21/23, so the pairing rule is not uniform.
+
+Also unexplained: the ring occasionally drains (depth 30 dipping to 2-4),
+which is the residual meter flicker.
+
+The diagnostics that found all this are included, gated on
+MAME_MPC_SAMPLE_DEBUG.
+
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.h
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.h
+@@ -132,6 +132,12 @@
+ 	u32             m_rec_wr = 0;
+ 	u32             m_rec_rd = 0;
+ 	bool            m_rec_on = false;
++	// Set when the guest selects a voice, cleared when a control write
++	// consumes it. The record transfer's key-on arrives with no preceding
++	// select, which is exactly what distinguishes it from a real one.
++	bool            m_voice_selected = false;
++	// True while a record transfer is running, so its END can be detected.
++	bool            m_rec_transfer = false;
+ 	bool            m_rec_left = true;
+ 	bool            m_rec_right = true;
+ 	bool            m_adc_drq = false;
+@@ -154,7 +160,6 @@
+ 	void dump_take();
+ 	void update_adc_drq();
+ 	void record_capture(sound_stream &stream);
+-	void warm_capture_input(sound_stream &stream);
+ 	void arm_dma_timer();
+ 	// Words channel 3 has pushed into wave RAM since this take began. Not
+ 	// only a statistic: its parity is which half of an interleaved stereo
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -298,8 +298,6 @@
+ 	// plays, and a voice may be reading the very RAM recording will fill.
+ 	if (m_rec_on)
+ 		record_capture(stream);
+-	else
+-		warm_capture_input(stream);
+ 
+ 	for (int i = 0; i < NUM_VOICES; i++)
+ 	{
+@@ -406,9 +404,26 @@
+ 
+ 				if (vptr->send_level > 0)
+ 				{
+-					const int dest = vptr->send_dest & 0xf;
+-					if (dest != 0xf)
++					// THREE BITS OF DESTINATION, NOT FOUR.
++					//
++					// channel_remap has EIGHT entries and this indexed it
++					// with a four-bit field, so any destination above 7 read
++					// past the end of the array and used whatever was there
++					// as an output channel. Not theoretical: the MPC2000XL
++					// programs 0x1a and 0x1e among others, giving dest 10 and
++					// 14, both out of bounds. Undefined behaviour used as a
++					// channel index is exactly why the machine's output was
++					// inconsistent between voices and between runs.
++					//
++					// The chip has eight discrete outputs, so the field is
++					// three bits wide; the observed values fall in range and
++					// stay distinct under that reading (0x11->1, 0x1a->2,
++					// 0x1e->6). 0xf in the low nibble still means "no
++					// destination", so that test keeps the full nibble.
++					const int dest_field = vptr->send_dest & 0xf;
++					if (dest_field != 0xf)
+ 					{
++						const int dest = dest_field & 0x7;
+ 						const int64_t send = (fout * (uint64_t(vptr->send_level) * uint64_t(vptr->env_volume))) >> 24;
+ 						stream.add_int(2 + channel_remap[dest], j, send, 32768);
+ 					}
+@@ -432,6 +447,7 @@
+ 	if (ACCESSING_BITS_0_7)
+ 	{
+ 		m_cur_channel = data;
++		m_voice_selected = true;
+ 		if (m_cur_channel & 0xe0)
+ 		{
+ 			logerror("%s l7a1045_sound_select_w unknown channel %01x\n", machine().describe_context(), m_cur_channel & 0xff);
+@@ -617,6 +633,15 @@
+ 			vptr->l_volume = (m_regs[L6028_Mixer_Params][m_cur_channel] >> 8) & 0xff;
+ 			vptr->send_dest = (m_regs[L6028_Mixer_Params][m_cur_channel] >> 16) & 0xff;
+ 			vptr->send_level = (m_regs[L6028_Mixer_Params][m_cur_channel] >> 24) & 0xff;
++			// DIAGNOSTIC: what pan the firmware gives each voice. A stereo
++			// pair should come out as one voice hard left and one hard
++			// right; "only the right speaker" means the left half of the
++			// pair is either never programmed or programmed with L=00.
++			if (m_rec_debug)
++				osd_printf_info("mpc2000xl sampler: MIX ch %2d L=%02x R=%02x send=%02x lvl=%02x rec=%d key=%08x\n",
++						m_cur_channel, vptr->l_volume, vptr->r_volume,
++						vptr->send_dest, vptr->send_level,
++						m_rec_on ? 1 : 0, m_key);
+ 			break;
+ 	}
+ 
+@@ -691,6 +716,26 @@
+ 
+ 	m_control = data;
+ 
++	// A KEY-ON NEEDS A VOICE SELECT IN FRONT OF IT.
++	//
++	// Bit 8 keys on m_cur_channel, and the firmware sets it during a record
++	// transfer with NO preceding voice select (mov ah,1 / out dx,ax at
++	// 0x4965e), so it landed on whatever voice was selected last - seen on
++	// ch 23, ch 12, ch 0 and ch 16 across runs. When that picked 0x10, the
++	// right record voice was left playing the wave RAM the take was writing.
++	// Measured on :speaker after a take, idle baseline rms 78-89: LEFT 131.6
++	// (silent), RIGHT 1327.0, looping. Only a voice left running can be loud
++	// in one ear and silent in the other.
++	//
++	// The missing select IS the signature, so test for it rather than for
++	// m_rec_on. Gating on m_rec_on instead was wrong in a way that took a
++	// user report to find: the sampler stays armed on the record screen, so
++	// it also suppressed the AUDITION key-on when PLAY was pressed there -
++	// and suppressing a key-on does not silence the voice, it leaves the old
++	// one running from a stale position with a stale loop point, which is
++	// the ring-buffer repeat the user then heard. Recording and pad playback
++	// were fine throughout; only that one screen was wrong.
++	m_voice_selected = false;
+ 	if (BIT(data, CONTROL_KEY_ON))
+ 	{
+ 		l7a1045_voice* const vptr = &m_voice[m_cur_channel];
+@@ -833,6 +878,51 @@
+ 
+ 	m_drq_handler(CLEAR_LINE);
+ 
++	// A TAKE MUST NOT WRITE PAST THE REGION THE FIRMWARE GAVE IT.
++	//
++	// Nothing bounded this. The firmware programs start and end for both
++	// record voices - measured, v0 0x010000-0x011140 and vR
++	// 0x011140-0x012280, 4416 words each - and the write ran straight on
++	// past them. Caught in the trace with the sampler merely armed:
++	//
++	//     v0(start 00010000 end 00011140)  pos0=617404  wave_words=1234808
++	//
++	// a write position 140 times beyond the end of a 4416-word buffer,
++	// climbing for as long as the record screen was up. It scribbled across
++	// the rest of wave RAM, which the user saw as a take replacing the kick,
++	// snare and hihat already loaded under the pads.
++	//
++	// Only the WRITE is bounded, not the counter: the firmware polls the
++	// position to decide a take is finished, so pos has to keep advancing
++	// or the poll never completes. And only while recording - ordinary wave
++	// DMA loading a sample from disk uses this same callback and does not
++	// always have a meaningful end programmed.
++	if (m_rec_on && (vptr.end > vptr.start) && ((vptr.start + vptr.pos) >= vptr.end))
++	{
++		// THE REGION IS A CIRCULAR BUFFER: WRAP, DO NOT STOP.
++		//
++		// Stopping the transfer here was wrong, and the trace says so
++		// plainly: adc_words climbed to 220488 while wave_words stayed
++		// frozen at 8832 - exactly the two 4416-word regions - so the
++		// machine kept capturing and nothing more ever reached wave RAM.
++		// The monitor voice then played one static ~100 ms region round and
++		// round, which is the repeating sound, and the level meters
++		// flickered because nothing refreshed what they scan.
++		//
++		// The ADC's DMA channel is auto-init, which in DMA terms means it
++		// wraps at the end of its region rather than halting. So wrap: the
++		// region is continuously rewritten while the monitor voice reads
++		// it, which is how a sampler monitors its own input.
++		//
++		// Wrapping still bounds the write, which is the part that mattered
++		// - before any of this the write ran 80x past the region and
++		// scribbled over the kit already loaded under the pads.
++		vptr.pos = 0;
++		m_wave_words++;
++		m_cache.write_word(vptr.start << 1, data);
++		return;
++	}
++
+ 	if (vptr.sample_type == 1)
+ 	{
+ 		m_rom_cache.write_word(byteoffs, data);
+@@ -876,41 +966,29 @@
+ 	m_adc_drq_handler(want ? ASSERT_LINE : CLEAR_LINE);
+ }
+ 
+-// The OSD creates its capture node when the machine first reads its input,
+-// so read both channels on every update even while the recorder is idle:
+-// the host-side input stream then exists from machine start, and routing
+-// audio into it does not depend on arming sampling first.
+-void l7a1045_sound_device::warm_capture_input(sound_stream &stream)
++void l7a1045_sound_device::record_capture(sound_stream &stream)
+ {
+-	for (int j = 0; j < stream.samples(); j++)
++	// DIAGNOSTIC: per-channel peak of what the DSP is actually handed, before
++	// any enable gate or demux. Distinguishes "channel 0 never arrives" from
++	// "channel 0 arrives and is dropped later".
++	if (m_rec_debug)
+ 	{
+-		for (int ch = 0; ch < 2; ch++)
++		float p0 = 0.0f, p1 = 0.0f;
++		for (int j = 0; j < stream.samples(); j++)
+ 		{
+-			const float v = stream.get(ch, j);
+-			if (m_rec_debug)
+-			{
+-				const u32 mag = u32(std::abs(v) * 32767.0f);
+-				if (mag > m_idle_peak)
+-					m_idle_peak = mag;
+-			}
++			const float a = std::abs(stream.get(0, j));
++			const float b = std::abs(stream.get(1, j));
++			if (a > p0) p0 = a;
++			if (b > p1) p1 = b;
+ 		}
+-	}
+-
+-	if (m_rec_debug)
+-	{
+-		m_idle_count += stream.samples();
+-		if (m_idle_count >= u32(m_sample_rate))
++		if ((p0 > 0.001f) || (p1 > 0.001f))
+ 		{
+-			osd_printf_info("mpc2000xl sampler: idle in_peak=%u key=%08x rd=%u wr=%u\n",
+-					m_idle_peak, m_key, m_rec_rd, m_rec_wr);
+-			m_idle_count = 0;
+-			m_idle_peak = 0;
++			static int throttle = 0;
++			if (!(throttle++ % 200))
++				osd_printf_info("mpc2000xl sampler: INPUT ch0=%.4f ch1=%.4f (L=%d R=%d)\n",
++						p0, p1, m_rec_left ? 1 : 0, m_rec_right ? 1 : 0);
+ 		}
+ 	}
+-}
+-
+-void l7a1045_sound_device::record_capture(sound_stream &stream)
+-{
+ 	for (int j = 0; j < stream.samples(); j++)
+ 	{
+ 		for (int ch = 0; ch < 2; ch++)
+@@ -922,6 +1000,7 @@
+ 			if (q > 32767) q = 32767;
+ 			if (q < -32768) q = -32768;
+ 
++
+ 			m_rec_ring[m_rec_wr & (REC_RING - 1)] = int16_t(q);
+ 			m_rec_wr++;
+ 			if (!m_dump_prefix.empty() && (m_dump_in.size() < 40u * 44100u * 2u))
+@@ -1062,6 +1141,26 @@
+ 	}
+ 	if (!on && m_rec_on)
+ 		dump_take();
++	// THE TAKE IS OVER: SILENCE THE VOICES IT KEYED ON.
++	//
++	// The firmware keys a voice on during a record transfer, and that
++	// key-on is what makes the input audible - suppressing it, which was
++	// the first attempt at this bug, killed monitoring outright. The fault
++	// is not the key-on but that nothing ever keys the voice off again: it
++	// is left running over the wave RAM the take just wrote, looping it.
++	//
++	// It is worse than a stuck note because the transfer programs voice 0
++	// and voice 0x10 as the two halves of a stereo take, so the voice left
++	// playing is a record destination as well - a Pi trace caught posR
++	// advancing at twice pos0 for exactly that reason. Measured on the
++	// desktop after a take, :speaker per channel against an idle baseline
++	// of rms 78-89: LEFT rms 131.6 (baseline, silent) and RIGHT rms 1327.0,
++	// about fifteen times baseline, looping. Only a voice left running can
++	// be loud in one ear and silent in the other; a rate error or an xrun
++	// degrades both alike.
++	if (!on && m_rec_on)
++		m_key &= ~((1U << 0) | (1U << REC_RIGHT_VOICE));
++
+ 	m_rec_on = on;
+ 	m_rec_left = left;
+ 	m_rec_right = right;
