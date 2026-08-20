@@ -111,7 +111,9 @@ page_tail() {
 </dl>
 <p style="color:var(--dim);margin-top:1.2rem">
 Verify with <code>sha256sum -c *.sha256</code> after downloading.
-Linux x86-64, PipeWire audio. ROMs are not included and never will be.</p>
+Linux x86-64 (PipeWire audio) and Windows 10/11 x86-64 (stock MAME
+audio; the audio-clock pacing port is the planned follow-up).
+ROMs are not included and never will be.</p>
 </div>
 </section>
 

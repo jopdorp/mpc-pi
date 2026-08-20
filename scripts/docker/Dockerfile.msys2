@@ -1,0 +1,15 @@
+# Toolchain image for cross-building the focused MAME target for Windows.
+# Upstream MAME documents MSYS2's UCRT64 environment for Windows builds.
+# MSYS2 publishes no Docker Hub image; this experimental image runs it on
+# Linux through Wine and carries the official prebuilt mingw-w64 packages,
+# so no MXE-style source bootstrap is needed. Package signature checks are
+# disabled upstream in this image - acceptable for a build box.
+FROM ghcr.io/msys2/msys2-docker-experimental:latest
+
+RUN msys2 -c "pacman -Syu --noconfirm \
+        make \
+        mingw-w64-ucrt-x86_64-gcc \
+        mingw-w64-ucrt-x86_64-SDL2 \
+        mingw-w64-ucrt-x86_64-SDL2_ttf \
+        mingw-w64-ucrt-x86_64-python \
+    && pacman -Scc --noconfirm"
