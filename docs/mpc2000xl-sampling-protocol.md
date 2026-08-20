@@ -160,6 +160,51 @@ are enabled - one word per enabled channel otherwise. Summing L+R to mono
 would make the stereo meter read alternate samples of one signal as if they
 were two channels.
 
+## A pointer that has not moved is a scan of nothing
+
+The meter does not simply scan whatever the ring holds. It scans from where it
+stopped last time up to where channel 2 has got to now, and if those are the
+same word it does not scan at all:
+
+    0x49738  mov si,[0x8c12]      ; where the last scan stopped
+    0x4973e  call 0x91d4          ; where channel 2 has got to now
+    0x49741  and al,0xfe          ; forced to an even word index
+    0x49743  mov [0x8c12],ax
+    0x49746  xor di,di            ; running maximum starts at zero
+    0x4974b  cmp byte [0xd7cd],2  ; stereo?
+    0x49752  cmp ax,si            ;   STEREO: has the pointer moved?
+    0x49756  jmp 0x97d9           ;     no -> report zero, for BOTH channels
+    0x497a6  cmp ax,si            ;   MONO: has the pointer moved?
+    0x497a8  jz 0x97d6            ;     no -> report zero
+
+That is the explanation for the one detail that never fitted a signal-level
+theory: **the left and right bars always emptied together and never
+separately.** A quiet input moves the two channels independently. A scan window
+of zero length reports silence on both at once, because it is the same `xor
+di,di` that both channels are read out of.
+
+The maximum the scan finds is not the bar. `call 0x9006` turns it into dB (a
+table lookup plus six units per octave of normalisation, floor -64), and that
+value is folded into `[0x8b52]`/`[0x8b54]` by **maximum**, so a skipped scan
+does not pull the bar down by itself - it fails to hold it up, and the periodic
+decay at `0x496f5` then takes it to the floor.
+
+So the meter is only as steady as channel 2's address register. On the real
+machine that register creeps: one conversion, one DRQ, one word, every 11.3us
+with both channels enabled. Measured on the emulated machine, the meter polls
+it **10,700 times a second** - and with the ADC DRQ driven by nothing but "the
+capture ring is not empty" it found the pointer **unchanged on 80% of those
+polls**, because `record_capture()` hands over a whole sound-stream block at a
+time and a level DRQ drains all sixty words at bus speed and then asks for
+nothing for the rest of the block period. In 99.6% of the frozen polls the
+channel had not transferred at all since the previous one.
+
+Patch 0058 gives the ADC its conversion clock back: a timer at
+`sample_rate x channels` makes one word available per conversion, and DRQ is
+asserted only when a converted word is both due and present in the ring.
+Starvation stays impossible - DRQ is still never raised over an empty ring - and
+the word count is unchanged at 88,200/s. What changes is the shape.
+
 ## What ends a take, and why it ended instantly
 
 The firmware does not time a recording with a clock. It polls the DSP, at
@@ -463,8 +508,30 @@ LCD read back to check the Mode field. Peak per 0.25 s window on `:speaker`,
 
 Before the pair key-on the left output carried nothing at all at any stage.
 
-Still open: the ADC ring occasionally drains, depth 30 dipping to 2 in about
-one report in seven, which is the residual level-meter flicker.
+The level-meter flicker is fixed, and the ring was never the cause. Across 318
+instrumented reports `starved` was zero in every one, `adc_words` advanced by
+exactly 44,100 per report and `in_peak` held constant; the "depth 30 dipping to
+2" reading was an artefact of sampling the ring depth at report time. What
+flickered was DMA channel 2's address register standing still between blocks,
+and the firmware skipping its scan whenever it had - see the section above.
+
+Measured on a quiet machine (load average 2.7), one binary, both arms run in
+both orders, 2801 exported LCD frames per arm at 80/s with no missed sequence
+numbers:
+
+| | before | after |
+| --- | --- | --- |
+| frames with both bars at the bottom | 61.7% | 0.0% |
+| address polls that saw no movement | 81.7% | 0.0% |
+| smallest bar seen, of 887 px | 52 | 472 |
+| median bar | 52 | 886 |
+| words channel 2 moved | 88,200/s | 88,200/s |
+| `starved` | 0 | 0 |
+
+The 61.7% is the figure an earlier run under load put at 63.5%, so that number
+was not a load artefact. Channel 3's phase against channel 2 tightens as a side
+effect - the lag 0056 measures goes from [59,114] to [59,60] - because what it
+was chasing stopped jumping.
 
 The digital gate fix is reasoned from the disassembly above and is traced, but
 **S/PDIF is not confirmed working**. Confirming it needs someone at the SAMPLE

@@ -1,0 +1,281 @@
+l7a1045: the ADC hands over one word per conversion, not a block at a time
+
+On the SAMPLE screen the input level bars drop to their bottom segment and
+come back, over and over, while a steady tone is being played in. The audio
+is not the problem - stereo separation and the absence of sidebands are both
+measured good, and 0056 settled the buzz. This is the meter.
+
+BOTH BARS, ALWAYS TOGETHER. That is the clue that names the fault. A level
+that really varied would move the two channels independently; measured over
+2801 frames the two agreed on "at the bottom" in 99.9% of them. Something was
+zeroing them from one place.
+
+That place is in the firmware, and it is not a level at all. The meter is a
+scan of the 0x7F000 capture ring, and it scans from where it stopped last time
+up to where DMA channel 2 has got to now:
+
+    0x49738  mov si,[0x8c12]      ; where the last scan stopped
+    0x4973e  call 0x91d4          ; where channel 2 has got to now
+    0x49741  and al,0xfe          ; forced to an even word index
+    0x49743  mov [0x8c12],ax
+    0x49746  xor di,di            ; running maximum starts at zero
+    0x4974b  cmp byte [0xd7cd],2  ; stereo?
+    0x49752  cmp ax,si            ;   STEREO: has the pointer moved?
+    0x49756  jmp 0x97d9           ;     no -> report zero, for BOTH channels
+    0x497a6  cmp ax,si            ;   MONO: has the pointer moved?
+    0x497a8  jz 0x97d6            ;     no -> report zero
+
+and 0x491d4 is where the pointer comes from - channel 2's CURRENT ADDRESS
+register, read under CLI so no interrupt can get between the select and the
+read:
+
+    mov ax,2 / mov dx,0xc031 / out dx,al   ; select channel 2
+    mov dx,0xc034 / in ax,dx               ; CURRENT ADDRESS
+    lea ax,[si+0x1000] / shr ax,1          ; -> word index 0..0x3ff
+
+A pointer that has not moved is a scan window of zero length, and a zero-length
+window reports silence on both channels at once out of the same xor di,di. The
+scanned maximum is folded into the bar by MAXIMUM, so a skipped scan does not
+push the bar down by itself; it fails to hold it up, and the periodic decay at
+0x496f5 takes it to the floor.
+
+SO THE METER IS ONLY AS STEADY AS THE ADDRESS REGISTER, AND OURS WAS NOT.
+0051 drives channel 2 from a level DRQ that is asserted whenever the capture
+ring is not empty. record_capture() fills that ring a whole sound-stream block
+at a time - thirty frames, sixty stereo words - so the DMAC takes all sixty
+back to back at bus speed and is then asked for nothing for the rest of the
+block period. The words are right, the rate is right, and the address register
+leaps and then stands still.
+
+On the real machine it does neither. The converter produces one word per
+enabled channel per sample period and each word raises DRQ by itself, so the
+address creeps forward every 11.3us and never stops while the input is armed.
+
+MEASURED, at the source, by counting what the guest's own read returns.
+Instrumented on upd71071_device::read for offset 4 with channel 2 selected -
+the exact access 0x491d4 makes - on the SAMPLE screen with a steady 440Hz-left
+/ 660Hz-right probe:
+
+    meter polls of the address register      10,700 per second
+    polls where the word index had not moved 80%
+    of those, with no channel-2 transfer     99.6%
+    words channel 2 moved                    88,200 per second
+
+Eight words of movement per poll is what the real converter delivers. Nothing
+at all, four polls in five, is what the burst delivered.
+
+THE FIX IS THE CONVERSION CLOCK, NOT THE METER. A timer at sample_rate x
+channels makes one word available per conversion; m_adc_due is the converted
+word the DMAC has not collected yet, capped at one frame because the converter
+holds a frame and not a queue; and DRQ is asserted only when a converted word
+is both due and present in the ring. Nothing about the meter, the bars or the
+decay is touched, and nothing is smoothed or held.
+
+The property the level DRQ was chosen for survives: DRQ is still never raised
+over an empty ring, so the DMAC is never handed a fabricated sample and still
+takes exactly as many words as the stream produced. starved stays 0.
+
+A/B ON ONE BINARY, both arms the same build with the same graph reset before
+each, run in both orders, on a quiet machine (load 2.7). 2801 exported LCD
+frames per arm at 80/s, no missed sequence numbers, counting frames where both
+bars are at their bottom segment:
+
+                                    before      after
+    both bars at the bottom         61.7%       0.0%
+    address polls that saw no move  81.7%       0.0%
+    smallest bar seen (of 887 px)   52          472
+    median bar                      52          886
+    words channel 2 moved           88,200/s    88,200/s
+    starved                         0           0
+
+The 61.7% is the figure a run under load put at 63.5%, so the earlier number
+was not a load artefact.
+
+Channel 3's phase against channel 2 tightens as a side effect, because the
+thing it was chasing stopped jumping: the lag 0056 measures went from [59,114]
+to [59,60], one block, flat.
+
+The rig is unchanged at all four stages; the switch that bypassed the clock
+existed only for the A/B above and is not in this diff.
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.h
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.h
+@@ -114,6 +114,10 @@
+ 	uint32_t        m_key;
+ 	uint16_t        m_control;
+ 	emu_timer       *m_dma_timer;
++	// The ADC's own conversion clock; see arm_adc_timer(). m_adc_due counts
++	// converted words the DMAC has not collected yet.
++	emu_timer       *m_adc_timer;
++	u32             m_adc_due = 0;
+ 
+ 	// Captured audio waiting for the CPU's DMA. A ring, not a growing
+ 	// buffer: if nothing drains it the OLDEST audio is what should be
+@@ -179,6 +183,7 @@
+ 	void update_adc_drq();
+ 	void record_capture(sound_stream &stream);
+ 	void arm_dma_timer();
++	void arm_adc_timer();
+ 	// Words channel 3 has pushed into wave RAM since this take began. Not
+ 	// only a statistic: its parity is which half of an interleaved stereo
+ 	// frame the next word belongs to, which is what dma_w16_cb steers on.
+@@ -245,6 +250,7 @@
+ 	void recalc_loop_start(int channel);
+ 
+ 	TIMER_CALLBACK_MEMBER(dma_timer_callback);
++	TIMER_CALLBACK_MEMBER(adc_timer_callback);
+ };
+ 
+ DECLARE_DEVICE_TYPE(L7A1045, l7a1045_sound_device)
+--- a/src/devices/sound/l7a1045_l6028_dsp_a.cpp
++++ b/src/devices/sound/l7a1045_l6028_dsp_a.cpp
+@@ -192,6 +192,7 @@
+ 	  m_key(0),
+ 	  m_control(0),
+ 	  m_dma_timer(nullptr),
++	  m_adc_timer(nullptr),
+ 	  m_cur_channel(0),
+ 	  m_cur_register(0),
+ 	  m_sample_rate(44100.0),
+@@ -241,6 +242,7 @@
+ 		m_trace = std::fopen(trace, "w");
+ 
+ 	m_dma_timer = timer_alloc(FUNC(l7a1045_sound_device::dma_timer_callback), this);
++	m_adc_timer = timer_alloc(FUNC(l7a1045_sound_device::adc_timer_callback), this);
+ 
+ 	save_item(STRUCT_MEMBER(m_voice, loop_start));
+ 	save_item(STRUCT_MEMBER(m_voice, start));
+@@ -937,6 +939,61 @@
+ 	m_dma_timer->adjust(time, 0, time);
+ }
+ 
++// THE ADC HAS A CONVERSION CLOCK, AND THE RING POINTER MOVES AT ITS RATE.
++//
++// On the real machine the converter produces one word per enabled channel per
++// sample period and each word raises DRQ on DMA channel 2 by itself, so the
++// channel's CURRENT ADDRESS register creeps forward every 11.3us and never
++// stands still while the input is armed.
++//
++// That register is not private. The SAMPLE screen's level meter is a scan of
++// the 0x7F000 ring bounded by it: the module reads it at 0x491d4
++//
++//     mov ax,2 / mov dx,0xc031 / out dx,al   ; select channel 2
++//     mov dx,0xc034 / in ax,dx               ; CURRENT ADDRESS
++//     lea ax,[si+0x1000] / shr ax,1          ; -> word index 0..0x3ff
++//
++// and then, at 0x49752 (stereo) and 0x497a6 (mono), compares it against the
++// index it scanned to last time and SKIPS THE SCAN ENTIRELY if they are
++// equal. A skipped scan reports zero for both channels at once, which is why
++// the left and right bars always emptied together and never separately.
++//
++// Draining the ring on nothing but "not empty" froze that pointer for the
++// rest of every block period. Measured on the SAMPLE screen with a steady
++// input, the meter polls the register 10,700 times a second and found it
++// unchanged on 80% of those polls - and in 99.6% of those the channel had not
++// transferred at all since the previous poll. Eight words of movement per
++// poll is what the real converter delivers; nothing at all four times in five
++// is what the burst delivered.
++//
++// So this timer is the converter, not a throttle. One tick makes one word
++// available; m_adc_due is the word it has converted and the DMAC has not
++// collected yet, and it is capped at one frame because the converter holds a
++// frame, not a queue - if the DMAC has not taken the last one by the next
++// conversion, the emulated ADC simply runs a frame slow and the ring, which
++// exists to absorb the difference between the host's block delivery and this
++// clock, gives it back.
++void l7a1045_sound_device::arm_adc_timer()
++{
++	if (!m_rec_on)
++	{
++		m_adc_timer->adjust(attotime::never);
++		m_adc_due = 0;
++		return;
++	}
++	const u32 channels = (m_rec_left && m_rec_right) ? 2 : 1;
++	const auto period = attotime::from_hz(m_sample_rate * channels);
++	m_adc_timer->adjust(period, 0, period);
++}
++
++TIMER_CALLBACK_MEMBER(l7a1045_sound_device::adc_timer_callback)
++{
++	const u32 channels = (m_rec_left && m_rec_right) ? 2 : 1;
++	if (m_adc_due < channels)
++		m_adc_due++;
++	update_adc_drq();
++}
++
+ void l7a1045_sound_device::atomic_w(uint16_t data)
+ {
+ 	LOGMASKED(LOG_REGISTERS, "%s atomic write %04x to reg %x\n", tag(), data, m_cur_register);
+@@ -1117,15 +1174,24 @@
+ 	m_drq_handler(ASSERT_LINE);
+ }
+ 
+-// DRQ IS LEVEL, NOT A PACED PULSE.
++// DRQ NEEDS BOTH: A WORD THAT EXISTS AND A CONVERSION THAT IS DUE.
++//
++// "The ring is not empty" alone was self-pacing in the average and wrong in
++// the instant. record_capture() hands over a whole sound-stream block at a
++// time - thirty frames, sixty stereo words - and a level DRQ drains all sixty
++// back to back at bus speed, then asks for nothing for the rest of the block
++// period. The words are right and the audio is right; the DMA channel-2
++// CURRENT ADDRESS register is not, because it leaps and then stands still.
++//
++// The firmware reads that register. arm_adc_timer() explains what the SAMPLE
++// screen does with it and what the burst cost. The condition here is the fix:
++// a word moves when the ADC has converted one (m_adc_due) and the ring holds
++// it, which is what one conversion, one DRQ means on the real machine.
+ //
+-// The obvious alternative was a timer ticking at the ADC rate, mirroring
+-// m_dma_timer. It is wrong here: the ring is filled in blocks by the sound
+-// stream and drained one word per DMA cycle, so a free-running timer and
+-// the block writer drift apart and the reader starves at every block
+-// boundary - audible as a chopped recording and a flickering meter. Holding
+-// DRQ while the ring has data makes the transfer self-pacing: the DMAC takes
+-// exactly as many words as the stream produced, no faster.
++// Starvation is still impossible, which is the property the level DRQ was
++// chosen for: DRQ is never asserted with an empty ring, so the DMAC is never
++// handed a fabricated sample, and it still takes exactly as many words as the
++// stream produced.
+ //
+ // Safe to call from sound_stream_update: device streams are generated by
+ // sound_manager::streams_update() on the EMULATION thread (only the speaker
+@@ -1133,7 +1199,7 @@
+ // device-to-device line change on the emulated timeline.
+ void l7a1045_sound_device::update_adc_drq()
+ {
+-	const bool want = m_rec_on && (m_rec_rd != m_rec_wr);
++	const bool want = m_rec_on && m_adc_due && (m_rec_rd != m_rec_wr);
+ 	if (want == m_adc_drq)
+ 		return;
+ 	m_adc_drq = want;
+@@ -1260,6 +1326,8 @@
+ 		m_rec_starved++;
+ 
+ 	m_adc_words++;
++	if (m_adc_due)
++		m_adc_due--;
+ 	if (m_rec_debug)
+ 	{
+ 		const u32 depth = m_rec_wr - m_rec_rd;
+@@ -1322,6 +1390,7 @@
+ 	{
+ 		m_rec_rd = m_rec_wr = 0;   // a fresh take, not the tail of the last
+ 		m_rec_last = 0;
++		m_adc_due = 0;
+ 		m_adc_words = 0;
+ 		// Zeroed together with the ring, which is what makes its parity
+ 		// meaningful: ADC word 0 is a LEFT word, so wave word 0 is too.
+@@ -1361,10 +1430,11 @@
+ 	m_rec_on = on;
+ 	m_rec_left = left;
+ 	m_rec_right = right;
+-	update_adc_drq();
+-	// The DMA period depends on whether we are recording and on how many
++	// Both record clocks depend on whether we are recording and on how many
+ 	// channels are enabled, so a transfer that is already running has to be
+ 	// re-timed here, not only when the guest next writes the control register.
++	arm_adc_timer();
++	update_adc_drq();
+ 	arm_dma_timer();
+ 
+ 	if (m_trace && on)
