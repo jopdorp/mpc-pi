@@ -321,8 +321,10 @@ if ! pactl list sinks short 2>/dev/null | grep -q "[[:space:]]$sink[[:space:]]";
     fi
 fi
 
-# :mic exists from machine start (patch 0053), but the machine still has to
-# get there - wait rather than race it.
+# :mic appears once the sink above exists, because the machine's saved
+# configuration points its sampling input at this very sink and patch 0057
+# stopped MAME discarding that mapping when the sink was not up yet. That is
+# a second or two after launch, not instantly - wait rather than race it.
 for _ in $(seq 30); do
     pw-link -i 2>/dev/null | grep -q '^:mic:input_FL$' && break
     sleep 1
