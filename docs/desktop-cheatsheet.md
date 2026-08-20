@@ -11,6 +11,13 @@ Anything typed after `./mpcpi` is handed straight to MAME: the wrapper appends
 its `exec` line with `"$@"`. So every MAME option works, and the launcher's
 tuning still applies.
 
+Launch through `./mpcpi`, not `./bin/mpc`. The raw binary skips the wrapper's
+audio tuning and realtime setup, and it also stops twice at boot on MAME's
+press-any-key screens (system info, then known problems) — both hang off the
+same `skip_gameinfo` option in MAME's UI, which the wrapper passes and a bare
+`./bin/mpc` does not. A raw launch that seems frozen at ~5% CPU with no sound
+is usually sitting on one of those screens.
+
 A handful of steps are keypresses in the focused emulator window and could not
 be executed from here. They are marked **[verify by hand]** and collected at the
 bottom.
@@ -174,7 +181,7 @@ this build's UI source; the menu itself could not be driven from here.
 
 To skip step 1 entirely, launch with the UI already on:
 
-    ./mpcpi -ui_active -flop project.img
+    ./mpcpi -ui_active
 
 That is MAME's own `ui_active` core option ("enable user interface on top of
 emulated keyboard"), and it does exactly that here — checked with a Lua probe,
