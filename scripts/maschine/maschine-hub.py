@@ -837,7 +837,24 @@ class Router:
             strip = self.strips[index] if index < len(self.strips) else None
             if strip:
                 return [("cmd", "knob %s %s %+d" % (self.page, strip, delta))]
-        return [("cmd", "knob %s %d %+d" % (self.page, index, delta))]
+        # EVERY OTHER PAGE COUNTS ITS KNOBS FROM THE RIGHT SCREEN. The page
+        # is drawn on screen R and its encoder bar names four knobs - the
+        # four physically under that screen, indices 4-7 - while daw-ctl's
+        # page handlers take targets 0-3. This used to pass the raw index
+        # through, so the knobs under the page answered NO KNOB EDIT 4 and
+        # the four that worked sat under the LEFT screen, which is showing
+        # the MPC. Same seam as every dead control this panel has shipped:
+        # both halves tested green and the wire between them counted from
+        # different ends.
+        #
+        # The left four do nothing here, and nothing is not a fault - the
+        # jog on MIX set that precedent. The labels for what they would do
+        # are on a screen currently showing another instrument.
+        split = len(control_map.KNOBS_LEFT)
+        if index < split:
+            return []
+        return [("cmd", "knob %s %d %+d" % (self.page, index - split,
+                                            delta))]
 
 
 def daw_pages():
@@ -1288,6 +1305,29 @@ def self_test():
     # worse than a key that does nothing.
     assert "daw:mark" not in control_map.DAW_BUTTONS.values(), \
         "MARK is bound and daw-ctl has no marker command to answer it"
+
+    # THE PAGE KNOBS COUNT FROM THE RIGHT SCREEN. daw-ctl's page handlers
+    # take targets 0-3 and the page's encoder bar is drawn on screen R, so
+    # the four knobs physically under it - indices 4-7 - are the ones that
+    # must arrive as 0-3. The raw index went through here once: the knobs
+    # under the page answered NO KNOB EDIT 4 while the four that worked
+    # sat under the screen showing the MPC.
+    _rk = Router()
+    _rk.button(control_map.SURFACE_TOGGLE, True)
+    _rk.button(control_map.SURFACE_TOGGLE, False)
+    _rk.button("group_h", True)
+    _rk.button("group_h", False)
+    assert _rk.page == "EDIT"
+    assert _rk.knob(4, 10) == [("cmd", "knob EDIT 0 +10")]
+    assert _rk.knob(7, -3) == [("cmd", "knob EDIT 3 -3")]
+    assert _rk.knob(0, 10) == [], \
+        "a knob under the MPC's screen reached a DAW page"
+    # ...and the strips page still spends all eight, one per strip.
+    _rk.button("group_e", True)
+    _rk.button("group_e", False)
+    for _i, _strip in enumerate(control_map.STRIPS):
+        assert _rk.knob(_i, 5) == \
+            [("cmd", "knob LOOP %s +5" % _strip)], _strip
 
     # REC arms; the strip buttons then punch instead of selecting, and punch
     # again to close. This is the whole reason the pads stay the MPC's.
