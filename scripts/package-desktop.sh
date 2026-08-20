@@ -56,6 +56,7 @@ fi
 
 cp -- "$repo_root/scripts/run-mpc.sh" "$repo_root/scripts/run-mpc2000xl-fast.sh" \
     "$repo_root/scripts/run-mpc2000xl-turbo.sh" "$staging/scripts/"
+cp -- "$repo_root/docs/keyboard-map.png" "$staging/"
 # The appliance's ExecStartPost fix: MAME's audio threads inherit the
 # emulation thread's SCHED_RR and starve behind it (9.7% -> 101.6% of
 # realtime audio when raised). The bundle runs it right after launch, as
@@ -508,9 +509,10 @@ P-cores for the tuned latency: \`MAME_CPUSET=0-11 ./mpcpi\` on a Core
 Ultra 7 155H.
 
 Pads, buttons and the data wheel follow MAME's default input for these
-machines; press Tab in the window for MAME's input menu. The panel's knobs
-and sliders are mouse-controlled through the bundled layout helper plugin,
-which \`./mpcpi\` enables; \`./mpcpi-accurate\` does not pass it, so add
+machines; see \`keyboard-map.png\` beside this README for the complete map,
+and press Tab in the window for MAME's input menu. The panel's knobs and
+sliders are mouse-controlled through the bundled layout helper plugin, which
+\`./mpcpi\` enables; \`./mpcpi-accurate\` does not pass it, so add
 \`-pluginspath plugins -plugin layout\` there if you want it.
 
 ## Device settings

@@ -1,0 +1,86 @@
+mpc2000xl: let the desktop DATA wheel follow vertical drag and scroll
+
+F14/F15 made the DATA wheel unreachable on an ordinary ANSI keyboard. F9
+and F10 are not substitutes here: this same matrix already assigns them to
+16 Levels and Next Seq. Put one-click decrement/increment on minus/equals,
+which are free and adjacent on that keyboard.
+
+The old zero key delta was not a mouse sensitivity setting. In
+analog_field::frame_update(), zero makes a digital direction add one count
+only on its first frame; a non-zero delta is added on every frame the key is
+held. Use one so a tap is one click and a held key repeats without jumping.
+Sensitivity stays at 100: for a relative dial that is one emulated count per
+mouse pixel and one per digital delta.
+
+The artwork explained the apparent one-click limit. Its raw input tag made
+render_target::update_pointer_fields() call set_value(1) while the marker was
+held, overriding the relative input. The layout helper then wrote user_value,
+but ioport_field::set_user_settings() only applies that value to adjusters and
+setting lists, not analog dials. Remove both broken paths from this marker and
+use IPT_DIAL_V, whose standard assignment is the mouse Y relative axis. A
+vertical drag can now contribute every pixel proportionally instead of
+holding the port at one.
+
+SDL already exposes vertical scroll as the mouse Z relative item. Bind its
+positive and negative switch views to the digital directions, rather than
+binding the raw Z axis: SDL expresses one notch as 120 relative units, while
+the switch feeds the one-count key delta. This needs no OSD change and keeps
+one notch equal to one wheel click.
+
+A binding-table collision check also found that A drove both Step < and Undo,
+and S drove both Step > and Erase. Keep A/S on the step pair and move the two
+editing controls to the previously unused Backspace/Delete keys so every key
+has one unambiguous panel action.
+--- a/src/mame/akai/mpc2000.cpp
++++ b/src/mame/akai/mpc2000.cpp
+@@ -1628,7 +1628,7 @@
+ 	PORT_BIT(0x02, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Soft Key 5") PORT_CODE(KEYCODE_F5)
+ 	PORT_BIT(0x04, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Main Screen") PORT_CODE(KEYCODE_Q)
+ 	PORT_BIT(0x08, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("4 / Sample") PORT_CODE(KEYCODE_4)
+-	PORT_BIT(0x10, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Undo") PORT_CODE(KEYCODE_A)
++	PORT_BIT(0x10, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Undo") PORT_CODE(KEYCODE_BACKSPACE)
+ 	PORT_BIT(0x20, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Over Dub") PORT_CODE(KEYCODE_X)
+ 	PORT_BIT(0x40, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_CODE(KEYCODE_LEFT) PORT_NAME("Left Arrow")
+ 	PORT_BIT(0x80, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Play Start") PORT_CODE(KEYCODE_B)
+@@ -1638,7 +1638,7 @@
+ 	PORT_BIT(0x02, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Soft Key 6") PORT_CODE(KEYCODE_F6)
+ 	PORT_BIT(0x04, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Window") PORT_CODE(KEYCODE_W)
+ 	PORT_BIT(0x08, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("7 / Mixer") PORT_CODE(KEYCODE_7)
+-	PORT_BIT(0x10, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Erase") PORT_CODE(KEYCODE_S)
++	PORT_BIT(0x10, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Erase") PORT_CODE(KEYCODE_DEL)
+ 	PORT_BIT(0x20, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Stop") PORT_CODE(KEYCODE_C)
+ 	PORT_BIT(0x40, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_CODE(KEYCODE_UP) PORT_NAME("Up Arrow")
+ 
+@@ -1690,7 +1690,9 @@
+ 	PORT_BIT( 0x01, IP_ACTIVE_HIGH, IPT_OTHER ) PORT_NAME("Velocity Curve Select") PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(mpc2000_state::velocity_curve_changed), 0)
+ 
+ 	PORT_START("DATAENTRY")
+-	PORT_BIT( 0xff, 0x00, IPT_DIAL) PORT_SENSITIVITY(100) PORT_KEYDELTA(0) PORT_CODE_DEC(KEYCODE_F14) PORT_CODE_INC(KEYCODE_F15)
++	PORT_BIT(0xff, 0x00, IPT_DIAL_V) PORT_NAME("DATA Wheel") PORT_SENSITIVITY(100) PORT_KEYDELTA(1)
++		PORT_CODE_DEC(KEYCODE_MINUS) PORT_CODE_DEC(MOUSECODE_Z_NEG_SWITCH)
++		PORT_CODE_INC(KEYCODE_EQUALS) PORT_CODE_INC(MOUSECODE_Z_POS_SWITCH)
+ INPUT_PORTS_END
+ 
+ ROM_START( mpc2000xl )
+--- a/src/mame/layout/mpc2000xl.lay
++++ b/src/mame/layout/mpc2000xl.lay
+@@ -1082,7 +1082,10 @@
+ 	<group ref="variationslider"><bounds x="290" y="3135" width="400" height="1000"/></group>
+ 	<element ref="text-data"><bounds x="2023" y="1760" width="131" height="65" /><color red="0" green="0" blue="0" /></element>
+ 	<element ref="dataknob" ><bounds x="1690" y="1855" width="800" height="800"/></element>
+-	<element ref="dataentry_knob" id="dataentry_knob" inputtag="DATAENTRY" inputmask="0xffff" inputraw="yes">
++	<!-- DATAENTRY is a relative vertical dial.  Leaving an input tag on this
++	     artwork makes the generic layout click path override it with the raw
++	     value 1, blocking proportional mouse-axis movement while dragging. -->
++	<element ref="dataentry_knob" id="dataentry_knob">
+ 		<bounds x="2015" y="2190" width="150" height="100"/></element>
+ 
+ 	<!-- Cursor Module -->
+@@ -1098,7 +1101,6 @@
+ 			function()
+ 				local view = file.views["Default Layout"]
+ 				install_slider_callbacks(view)
+-				add_simplecounter_knob(view, "dataentry_knob", "DATAENTRY", 1.5)
+ 				add_vertical_slider(view, "variation_area", "variation_knob", "VARIATION")
+ 				view.items["warning"]:set_state(0)
+ 			end)
