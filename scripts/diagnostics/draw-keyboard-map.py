@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 import sys
@@ -20,6 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE = ROOT / ".cache/mame/src/mame/akai/mpc2000.cpp"
+DEFAULT_PLUGIN_SOURCE = ROOT / "scripts/mame-plugins/mpcpi_settings/init.lua"
 DEFAULT_OUTPUT = ROOT / "docs/keyboard-map.png"
 
 WIDTH = 1490
@@ -36,6 +38,8 @@ BOUND = "#126e75"
 BOUND_EDGE = "#35b7be"
 PAD = "#7040a5"
 PAD_EDGE = "#c18bff"
+PLUGIN = "#8a541f"
+PLUGIN_EDGE = "#f0a85b"
 TEXT = "#f5f7fa"
 MUTED = "#8f99a8"
 ACCENT = "#efbd53"
@@ -154,6 +158,41 @@ def parse_bindings(source: Path) -> tuple[dict[str, str], bool, bool, bool]:
         and "MOUSECODE_Z_POS_SWITCH" in wheel_statement
     )
     return bindings, drag_enabled, drag_gated, scroll_enabled
+
+
+def parse_plugin_hotkeys(source: Path) -> list[str]:
+    try:
+        text = source.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"error: cannot read settings plugin {source}: {exc}")
+
+    fallback_re = re.compile(
+        r"env\(\s*(['\"])MPCPI_SETTINGS_HOTKEY\1\s*,\s*"
+        r"(['\"])(KEYCODE_[A-Z0-9_]+)\2\s*\)"
+    )
+    fallbacks = [match.group(3) for match in fallback_re.finditer(text)]
+    table = re.search(
+        r"local\s+DEFAULT_HOTKEYS\s*=\s*\{(?P<body>.*?)\}", text, re.DOTALL
+    )
+    if fallbacks and table:
+        raise SystemExit(
+            f"error: ambiguous Device Settings hotkey defaults in {source}"
+        )
+    if len(fallbacks) > 1:
+        raise SystemExit(
+            f"error: expected one MPCPI_SETTINGS_HOTKEY fallback in {source}, "
+            f"found {len(fallbacks)}"
+        )
+    matches = fallbacks
+    if table:
+        matches = re.findall(
+            r"['\"](KEYCODE_[A-Z0-9_]+)['\"]", table.group("body")
+        )
+    if not matches:
+        raise SystemExit(f"error: no Device Settings hotkey defaults found in {source}")
+    if len(matches) != len(set(matches)):
+        raise SystemExit(f"error: DEFAULT_HOTKEYS in {source} contains duplicates")
+    return matches
 
 
 def key_width(units: float) -> int:
@@ -312,28 +351,35 @@ def wrap_label(value: str, width: int) -> str:
     return "\n".join(textwrap.wrap(value, width=chars, break_long_words=False))
 
 
-def render(bindings: dict[str, str], source: Path, output: Path,
-           drag_enabled: bool, drag_gated: bool, scroll_enabled: bool) -> None:
+def render(bindings: dict[str, str], plugin_controls: dict[str, bool],
+           source: Path, output: Path, drag_enabled: bool,
+           drag_gated: bool, scroll_enabled: bool) -> None:
     keys = keyboard()
     placeable = {key.code for key in keys}
-    missing = sorted(set(bindings) - placeable)
+    missing = sorted((set(bindings) | set(plugin_controls)) - placeable)
     if missing:
-        detail = "\n".join(f"  {code}: {bindings[code]}" for code in missing)
-        raise SystemExit(f"error: unplaceable keycodes from {source}:\n{detail}")
+        detail = "\n".join(
+            f"  {code}: {bindings.get(code, 'Device Settings')}" for code in missing
+        )
+        raise SystemExit(f"error: unplaceable keyboard-map keycodes:\n{detail}")
 
     image = Image.new("RGB", (WIDTH, HEIGHT), BACKGROUND)
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((22, 104, WIDTH - 22, 720), radius=24, fill=PANEL)
     draw.rounded_rectangle((22, 744, WIDTH - 22, 1324), radius=24, fill=PANEL)
     draw.text((42, 24), "MPC2000XL desktop keyboard map", font=font(38, True), fill=TEXT)
-    draw.text((42, 69), "Bindings parsed from the stack-applied MAME driver", font=font(19), fill=MUTED)
+    draw.text((42, 69), "Bindings parsed from the stack-applied MAME driver and settings plugin", font=font(19), fill=MUTED)
     draw.text((42, 116), "BAND 1  ·  MAIN ANSI BLOCK", font=font(18, True), fill=ACCENT)
     draw.text((42, 762), "BAND 2  ·  NAVIGATION, ARROWS AND NUMPAD PAD GRID", font=font(18, True), fill=ACCENT)
 
     for key in keys:
         bound = bindings.get(key.code)
+        plugin_control = key.code in plugin_controls
+        local_override = plugin_controls.get(key.code, False)
         pad_number = PAD_NUMBERS.get(key.code) if bound else None
-        if pad_number:
+        if plugin_control:
+            fill, edge = PLUGIN, PLUGIN_EDGE
+        elif pad_number:
             fill, edge = PAD, PAD_EDGE
         elif bound:
             fill, edge = BOUND, BOUND_EDGE
@@ -341,8 +387,16 @@ def render(bindings: dict[str, str], source: Path, output: Path,
             fill, edge = UNBOUND, UNBOUND_EDGE
         box = (key.x, key.y, key.x + key.width, key.y + key.height)
         draw.rounded_rectangle(box, radius=9, fill=fill, outline=edge, width=2)
-        draw.text((key.x + 8, key.y + 6), key.cap, font=font(15, True), fill=TEXT if bound else MUTED)
-        if bound:
+        draw.text((key.x + 8, key.y + 6), key.cap, font=font(15, True), fill=TEXT if bound or plugin_control else MUTED)
+        if plugin_control:
+            label_bottom = key.y + key.height - (22 if local_override else 5)
+            label_box = (key.x + 5, key.y + 23, key.x + key.width - 5, label_bottom)
+            draw_centered(draw, label_box, wrap_label("Device Settings", key.width), font(13, True), TEXT)
+            if local_override:
+                badge = (key.x + 5, key.y + key.height - 20, key.x + key.width - 5, key.y + key.height - 4)
+                draw.rounded_rectangle(badge, radius=5, fill=ACCENT)
+                draw_centered(draw, badge, "LOCAL OVERRIDE", font(8, True), BACKGROUND)
+        elif bound:
             label_box = (key.x + 5, key.y + 23, key.x + key.width - 5, key.y + key.height - 5)
             draw_centered(draw, label_box, wrap_label(bound, key.width), font(13, True), TEXT)
         if pad_number:
@@ -356,6 +410,7 @@ def render(bindings: dict[str, str], source: Path, output: Path,
     for colour, edge, label in [
         (BOUND, BOUND_EDGE, "MPC panel control"),
         (PAD, PAD_EDGE, "MPC pad (badge is pad number)"),
+        (PLUGIN, PLUGIN_EDGE, "Device Settings plugin control"),
         (UNBOUND, UNBOUND_EDGE, "Unbound key"),
     ]:
         draw.rounded_rectangle((info_x, legend_y, info_x + 42, legend_y + 32), radius=6, fill=colour, outline=edge, width=2)
@@ -370,10 +425,17 @@ def render(bindings: dict[str, str], source: Path, output: Path,
             notes.append("DATA wheel: drag vertically with the mouse")
     if scroll_enabled:
         notes.append("DATA wheel: scroll down/up decreases/increases")
+    notes.append(
+        "Device Settings hotkeys are overridable via MPCPI_SETTINGS_HOTKEY in "
+        "~/.config/mpcpi/settings.env; the on-screen strip / Scroll Lock→Tab→Plugin "
+        "Options also open it"
+    )
     note_x = info_x
-    draw.text((note_x, 1032), "Mouse and modifiers", font=font(26, True), fill=TEXT)
+    draw.text((note_x, 1050), "Mouse and modifiers", font=font(26, True), fill=TEXT)
     for index, note in enumerate(notes):
-        draw.text((note_x, 1078 + index * 38), f"•  {note}", font=font(19), fill=TEXT)
+        wrapped = textwrap.wrap(note, width=67, break_long_words=False)
+        value = "•  " + "\n   ".join(wrapped)
+        draw.multiline_text((note_x, 1092 + index * 36), value, font=font(17), fill=TEXT, spacing=3)
 
     try:
         source_display = source.resolve().relative_to(ROOT.resolve())
@@ -393,12 +455,32 @@ def render(bindings: dict[str, str], source: Path, output: Path,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--plugin-source", type=Path, default=DEFAULT_PLUGIN_SOURCE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
     bindings, drag_enabled, drag_gated, scroll_enabled = parse_bindings(args.source)
-    render(bindings, args.source, args.output, drag_enabled, drag_gated, scroll_enabled)
-    print(f"Rendered {len(bindings)} collision-free bindings from {args.source}")
+    default_hotkeys = parse_plugin_hotkeys(args.plugin_source)
+    plugin_controls = {hotkey: False for hotkey in default_hotkeys}
+    local_override = os.environ.get("MPCPI_SETTINGS_HOTKEY")
+    if local_override:
+        if not re.fullmatch(r"KEYCODE_[A-Z0-9_]+", local_override):
+            raise SystemExit(
+                "error: MPCPI_SETTINGS_HOTKEY must be one KEYCODE_* token to render "
+                f"a local override, got {local_override!r}"
+            )
+        plugin_controls = {local_override: True}
+    render(
+        bindings, plugin_controls, args.source, args.output,
+        drag_enabled, drag_gated, scroll_enabled,
+    )
+    print(f"Rendered {len(bindings)} collision-free driver bindings from {args.source}")
+    print(
+        f"Rendered Device Settings plugin controls from {args.plugin_source}: "
+        f"{', '.join(default_hotkeys)}"
+    )
+    if local_override:
+        print(f"Rendered local Device Settings override: {local_override}")
     print(args.output)
     return 0
 
