@@ -178,12 +178,21 @@ sourced settings so the plugin receives it.
 
     ./mpcpi -flop ~/development/mpc-pi/results/projects/mpc-tutor-logic-mpc2000xl.img
 
+A ZIP containing one floppy image works the same way; MAME reads the image
+directly from the archive, so there is nothing to unpack first:
+
+    zip -j /tmp/mpc-tutor-logic.zip ~/development/mpc-pi/results/projects/mpc-tutor-logic-mpc2000xl.img
+    ./mpcpi -flop /tmp/mpc-tutor-logic.zip
+
 `flop` is the brief name of the media MAME calls `floppydisk`; there is one
-drive. `./bin/mpc -listmedia mpc2000xl` prints the accepted extensions:
+drive. `./bin/mpc -listmedia mpc2000xl` prints the floppy formats inside an
+image or archive:
 
     mpc2000xl  floppydisk  (flop)  .mfi .dfi .mfm .td0 .imd .dsk .ima .img .ufi .360 .ipf .hfe
 
-Test images live in `~/development/mpc-pi/results/projects/`.
+Test images live in `~/development/mpc-pi/results/projects/`. The Device
+Settings disk picker also accepts `.zip`; an archive with no supported floppy
+image is left unmounted and reports the load error.
 
 ## 4. Change the floppy while it is running
 

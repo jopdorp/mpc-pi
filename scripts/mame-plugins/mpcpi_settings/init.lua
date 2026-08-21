@@ -28,13 +28,14 @@ function mpcpi_settings.startplugin()
 
 	local MENU_NAME = 'Device Settings'
 
-	-- What -listmedia reports for this drive. A file that is not one of
-	-- these is refused by name instead of being handed to the FDC, which
-	-- answers a wrong-sized file with a silent empty drive.
+	-- What -listmedia reports for this drive, plus MAME's archive wrapper.
+	-- A file that is not one of these is refused by name instead of being
+	-- handed to the FDC, which answers a wrong-sized file with a silent empty
+	-- drive. MAME selects the supported floppy image inside a ZIP itself.
 	local DISK_EXTENSIONS = {
 		mfi = true, dfi = true, mfm = true, td0 = true, imd = true,
 		dsk = true, ima = true, img = true, ufi = true, ['360'] = true,
-		ipf = true, hfe = true }
+		ipf = true, hfe = true, zip = true }
 
 	local FRAME_CHOICES = { 32, 64, 128, 256, 512 }
 	local RATE_CHOICES = { 44100, 48000 }
