@@ -22,8 +22,8 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE = ROOT / ".cache/mame/src/mame/akai/mpc2000.cpp"
 DEFAULT_OUTPUT = ROOT / "docs/keyboard-map.png"
 
-WIDTH = 2400
-HEIGHT = 1100
+WIDTH = 1490
+HEIGHT = 1405
 UNIT = 86
 GAP = 8
 KEY_HEIGHT = 82
@@ -79,7 +79,7 @@ def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
         raise SystemExit(f"error: required font {family!r} is unavailable: {exc}")
 
 
-def parse_bindings(source: Path) -> tuple[dict[str, str], bool, bool]:
+def parse_bindings(source: Path) -> tuple[dict[str, str], bool, bool, bool]:
     try:
         text = source.read_text(encoding="utf-8")
     except OSError as exc:
@@ -140,11 +140,20 @@ def parse_bindings(source: Path) -> tuple[dict[str, str], bool, bool]:
         "",
     )
     drag_enabled = "IPT_DIAL_V" in wheel_statement
-    scroll_enabled = (
+    notch_statement = next(
+        (item.group(0) for item in statement_re.finditer(text) if 'PORT_NAME("DATA Wheel Notch")' in item.group(0)),
+        "",
+    )
+    drag_statement = next(
+        (item.group(0) for item in statement_re.finditer(text) if 'PORT_NAME("DATA Wheel Drag")' in item.group(0)),
+        "",
+    )
+    drag_gated = "MOUSECODE_BUTTON1" in drag_statement
+    scroll_enabled = "MOUSECODE_Z" in notch_statement or (
         "MOUSECODE_Z_NEG_SWITCH" in wheel_statement
         and "MOUSECODE_Z_POS_SWITCH" in wheel_statement
     )
-    return bindings, drag_enabled, scroll_enabled
+    return bindings, drag_enabled, drag_gated, scroll_enabled
 
 
 def key_width(units: float) -> int:
@@ -161,8 +170,9 @@ def add_row(keys: list[Key], x: int, y: int, specs: list[tuple[str, str, float]]
 def keyboard() -> list[Key]:
     keys: list[Key] = []
     x0 = 42
-    function_y = 118
-    main_y = 232
+    function_y = 154
+    main_y = 258
+    second_y = 820
 
     add_row(keys, x0, function_y, [("KEYCODE_ESC", "Esc", 1)])
     x = x0 + key_width(1.5)
@@ -178,12 +188,12 @@ def keyboard() -> list[Key]:
         keys.append(Key(f"KEYCODE_F{index}", f"F{index}", x, function_y))
         x += UNIT + GAP
 
-    nav_x = 1526
-    num_x = 1850
+    nav_x = 42
+    num_x = 390
     add_row(
         keys,
         nav_x,
-        function_y,
+        second_y,
         [
             ("KEYCODE_PRTSCR", "PrtSc", 1),
             ("KEYCODE_SCRLOCK", "Scroll", 1),
@@ -242,8 +252,8 @@ def keyboard() -> list[Key]:
         [("KEYCODE_DEL", "Delete", 1), ("KEYCODE_END", "End", 1), ("KEYCODE_PGDN", "PgDn", 1)],
     ]
     for row, specs in enumerate(nav_rows):
-        add_row(keys, nav_x, main_y + row * (KEY_HEIGHT + GAP), specs)
-    arrow_y = main_y + 3 * (KEY_HEIGHT + GAP)
+        add_row(keys, nav_x, second_y + (row + 1) * (KEY_HEIGHT + GAP), specs)
+    arrow_y = second_y + 3 * (KEY_HEIGHT + GAP)
     keys.extend(
         [
             Key("KEYCODE_UP", "Up", nav_x + UNIT + GAP, arrow_y),
@@ -256,7 +266,7 @@ def keyboard() -> list[Key]:
     add_row(
         keys,
         num_x,
-        main_y,
+        second_y,
         [
             ("KEYCODE_NUMLOCK", "Num", 1), ("KEYCODE_SLASH_PAD", "/", 1),
             ("KEYCODE_ASTERISK", "*", 1), ("KEYCODE_MINUS_PAD", "-", 1),
@@ -265,25 +275,25 @@ def keyboard() -> list[Key]:
     add_row(
         keys,
         num_x,
-        main_y + KEY_HEIGHT + GAP,
+        second_y + KEY_HEIGHT + GAP,
         [("KEYCODE_7_PAD", "7", 1), ("KEYCODE_8_PAD", "8", 1), ("KEYCODE_9_PAD", "9", 1)],
     )
-    keys.append(Key("KEYCODE_PLUS_PAD", "+", num_x + 3 * (UNIT + GAP), main_y + KEY_HEIGHT + GAP, UNIT, 2 * KEY_HEIGHT + GAP))
+    keys.append(Key("KEYCODE_PLUS_PAD", "+", num_x + 3 * (UNIT + GAP), second_y + KEY_HEIGHT + GAP, UNIT, 2 * KEY_HEIGHT + GAP))
     add_row(
         keys,
         num_x,
-        main_y + 2 * (KEY_HEIGHT + GAP),
+        second_y + 2 * (KEY_HEIGHT + GAP),
         [("KEYCODE_4_PAD", "4", 1), ("KEYCODE_5_PAD", "5", 1), ("KEYCODE_6_PAD", "6", 1)],
     )
     add_row(
         keys,
         num_x,
-        main_y + 3 * (KEY_HEIGHT + GAP),
+        second_y + 3 * (KEY_HEIGHT + GAP),
         [("KEYCODE_1_PAD", "1", 1), ("KEYCODE_2_PAD", "2", 1), ("KEYCODE_3_PAD", "3", 1)],
     )
-    keys.append(Key("KEYCODE_ENTER_PAD", "Enter", num_x + 3 * (UNIT + GAP), main_y + 3 * (KEY_HEIGHT + GAP), UNIT, 2 * KEY_HEIGHT + GAP))
-    keys.append(Key("KEYCODE_0_PAD", "0", num_x, main_y + 4 * (KEY_HEIGHT + GAP), 2 * UNIT + GAP))
-    keys.append(Key("KEYCODE_DEL_PAD", ".", num_x + 2 * (UNIT + GAP), main_y + 4 * (KEY_HEIGHT + GAP)))
+    keys.append(Key("KEYCODE_ENTER_PAD", "Enter", num_x + 3 * (UNIT + GAP), second_y + 3 * (KEY_HEIGHT + GAP), UNIT, 2 * KEY_HEIGHT + GAP))
+    keys.append(Key("KEYCODE_0_PAD", "0", num_x, second_y + 4 * (KEY_HEIGHT + GAP), 2 * UNIT + GAP))
+    keys.append(Key("KEYCODE_DEL_PAD", ".", num_x + 2 * (UNIT + GAP), second_y + 4 * (KEY_HEIGHT + GAP)))
     return keys
 
 
@@ -303,7 +313,7 @@ def wrap_label(value: str, width: int) -> str:
 
 
 def render(bindings: dict[str, str], source: Path, output: Path,
-           drag_enabled: bool, scroll_enabled: bool) -> None:
+           drag_enabled: bool, drag_gated: bool, scroll_enabled: bool) -> None:
     keys = keyboard()
     placeable = {key.code for key in keys}
     missing = sorted(set(bindings) - placeable)
@@ -313,9 +323,12 @@ def render(bindings: dict[str, str], source: Path, output: Path,
 
     image = Image.new("RGB", (WIDTH, HEIGHT), BACKGROUND)
     draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((22, 96, WIDTH - 22, 724), radius=24, fill=PANEL)
-    draw.text((42, 28), "MPC2000XL desktop keyboard map", font=font(38, True), fill=TEXT)
-    draw.text((42, 73), "Bindings parsed from the stack-applied MAME driver", font=font(19), fill=MUTED)
+    draw.rounded_rectangle((22, 104, WIDTH - 22, 720), radius=24, fill=PANEL)
+    draw.rounded_rectangle((22, 744, WIDTH - 22, 1324), radius=24, fill=PANEL)
+    draw.text((42, 24), "MPC2000XL desktop keyboard map", font=font(38, True), fill=TEXT)
+    draw.text((42, 69), "Bindings parsed from the stack-applied MAME driver", font=font(19), fill=MUTED)
+    draw.text((42, 116), "BAND 1  ·  MAIN ANSI BLOCK", font=font(18, True), fill=ACCENT)
+    draw.text((42, 762), "BAND 2  ·  NAVIGATION, ARROWS AND NUMPAD PAD GRID", font=font(18, True), fill=ACCENT)
 
     for key in keys:
         bound = bindings.get(key.code)
@@ -337,33 +350,37 @@ def render(bindings: dict[str, str], source: Path, output: Path,
             draw.rounded_rectangle(badge, radius=7, fill=ACCENT)
             draw_centered(draw, badge, str(pad_number), font(13, True), BACKGROUND)
 
-    draw.text((42, 760), "Legend", font=font(26, True), fill=TEXT)
-    legend_y = 806
+    info_x = 820
+    draw.text((info_x, 814), "Legend", font=font(26, True), fill=TEXT)
+    legend_y = 858
     for colour, edge, label in [
         (BOUND, BOUND_EDGE, "MPC panel control"),
         (PAD, PAD_EDGE, "MPC pad (badge is pad number)"),
         (UNBOUND, UNBOUND_EDGE, "Unbound key"),
     ]:
-        draw.rounded_rectangle((42, legend_y, 84, legend_y + 32), radius=6, fill=colour, outline=edge, width=2)
-        draw.text((98, legend_y + 4), label, font=font(18), fill=TEXT)
+        draw.rounded_rectangle((info_x, legend_y, info_x + 42, legend_y + 32), radius=6, fill=colour, outline=edge, width=2)
+        draw.text((info_x + 56, legend_y + 4), label, font=font(18), fill=TEXT)
         legend_y += 48
 
-    notes = ["LShift = MPC Shift", "DATA wheel: - decreases; = increases"]
+    notes = ["LShift = MPC Shift", "DATA wheel keys: - decreases; = increases"]
     if drag_enabled:
-        notes.append("DATA wheel: drag vertically on the on-screen wheel")
+        if drag_gated:
+            notes.append("DATA wheel drag: hold left button and move vertically")
+        else:
+            notes.append("DATA wheel: drag vertically with the mouse")
     if scroll_enabled:
         notes.append("DATA wheel: scroll down/up decreases/increases")
-    note_x = 690
-    draw.text((note_x, 760), "Mouse and modifiers", font=font(26, True), fill=TEXT)
+    note_x = info_x
+    draw.text((note_x, 1032), "Mouse and modifiers", font=font(26, True), fill=TEXT)
     for index, note in enumerate(notes):
-        draw.text((note_x, 808 + index * 38), f"•  {note}", font=font(19), fill=TEXT)
+        draw.text((note_x, 1078 + index * 38), f"•  {note}", font=font(19), fill=TEXT)
 
     try:
         source_display = source.resolve().relative_to(ROOT.resolve())
     except ValueError:
         source_display = source.resolve()
     draw.text(
-        (42, HEIGHT - 42),
+        (42, HEIGHT - 38),
         f"Generator source: {source_display}",
         font=font(16),
         fill=MUTED,
@@ -379,8 +396,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
-    bindings, drag_enabled, scroll_enabled = parse_bindings(args.source)
-    render(bindings, args.source, args.output, drag_enabled, scroll_enabled)
+    bindings, drag_enabled, drag_gated, scroll_enabled = parse_bindings(args.source)
+    render(bindings, args.source, args.output, drag_enabled, drag_gated, scroll_enabled)
     print(f"Rendered {len(bindings)} collision-free bindings from {args.source}")
     print(args.output)
     return 0
