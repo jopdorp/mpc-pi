@@ -112,6 +112,71 @@ if [ ! -f "$SESSION_DIR/$SESSION_NAME.ardour" ]; then
 	fi
 fi
 
+# THE LOOP LANES MUST TAKE THE INSTRUMENT ON EVERY START, NOT ONLY AT BUILD.
+#
+# session-template.lua points the lanes at the emulator's ":speaker" when it
+# BUILDS the desk, and that is the only place it has ever happened. A session
+# that is LOADED keeps whatever its saved XML says instead - and what this
+# one's XML said was the USB codec's capture ports, because Ardour auto-
+# connects a new track's input to the first physical input it finds and that
+# wiring got saved. Every take afterwards recorded the codec rather than the
+# MPC. It has been repaired by a hand-run pw-link after a restart twice now,
+# which is not a repair; this service restarting is enough to undo it again.
+#
+# From the shell with pw-link, deliberately, and not from the governor in
+# Lua: IO:disconnect(nil) segfaults luasession outright - no error, no
+# traceback, and pcall cannot catch it (measure-dsp.lua, "Unlinking the track
+# inputs is done from the shell, not from here"). Cutting a link from outside
+# the process costs an error message; cutting it from inside costs the
+# session host.
+#
+# Ardour's ports take a SLASH between node and port (":LOOP1/audio_in 1")
+# while MAME's take a COLON (":speaker:output_FL") - see mpc-usb-route.sh,
+# where getting this wrong read as "No such file or directory" for ports that
+# pw-link itself was listing.
+#
+# Disconnect before connect: connecting alone leaves the codec attached
+# ALONGSIDE the emulator and sums the two, which is the same class of fault
+# that once put 44 emulator links onto a measurement tone. Only physical
+# captures are cut, so a deliberate non-physical source survives, and
+# pw-link -d on a link that is not there is a no-op.
+#
+# Backgrounded with a retry because neither side exists yet: the lanes appear
+# only once the governor below has loaded the session, and ":speaker" only
+# once mpcpi-emulator has published it. It gives up after two minutes rather
+# than leaving a poller behind for the life of the service.
+lanes_take_the_instrument() {
+	lanes=$(echo "${MPCPI_STRIPS:-LOOP1,LOOP2,LOOP3,LOOP4,LOOP5}" | tr ',' ' ')
+	tries=0
+	while [ "$tries" -lt 60 ]; do
+		tries=$((tries + 1))
+		sleep 2
+		pw-link -o 2>/dev/null | grep -q '^:speaker:output_FL$' || continue
+		pw-link -i 2>/dev/null | grep -q '/audio_in 1$' || continue
+		caps=$(pw-link -o 2>/dev/null | grep '^alsa_input\.' || true)
+		fed=0
+		for lane in $lanes; do
+			ch=0
+			for src in FL FR; do
+				ch=$((ch + 1))
+				dst=":$lane/audio_in $ch"
+				for cap in $caps; do
+					pw-link -d "$cap" "$dst" 2>/dev/null || true
+				done
+				pw-link ":speaker:output_$src" "$dst" 2>/dev/null || true
+			done
+			fed=$((fed + 1))
+		done
+		echo "lanes take the emulator: $fed lane(s) on :speaker"
+		return 0
+	done
+	echo "WARNING: gave up pointing the loop lanes at :speaker" >&2
+}
+
+if [ "${MPCPI_LANE_INPUTS:-1}" != "0" ]; then
+	lanes_take_the_instrument &
+fi
+
 # pw-jack, so Ardour's JACK backend lands on PipeWire instead of hunting for
 # a jackd that is not running.
 exec pw-jack "$LUASESSION" "$SRC/scripts/daw/session-governor.lua"
