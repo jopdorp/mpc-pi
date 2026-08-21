@@ -8,6 +8,10 @@
 -- to a settings file the ./mpcpi wrapper sources and asks the wrapper for
 -- a fresh launch by leaving a marker behind. The menu says which is which
 -- on the row rather than pretending everything applies at once.
+--
+-- By default, Menu or Tab opens Device Settings while MAME's UI is inactive.
+-- MPCPI_SETTINGS_HOTKEY replaces that complete default set with one MAME
+-- input sequence.
 
 local exports = {
 	name = 'mpcpi_settings',
@@ -27,6 +31,7 @@ end
 function mpcpi_settings.startplugin()
 
 	local MENU_NAME = 'Device Settings'
+	local DEFAULT_HOTKEYS = { 'KEYCODE_MENU', 'KEYCODE_TAB' }
 
 	-- What -listmedia reports for this drive, plus MAME's archive wrapper.
 	-- A file that is not one of these is refused by name instead of being
@@ -703,10 +708,9 @@ function mpcpi_settings.startplugin()
 		end
 	end
 
-	-- This machine has a keyboard, so Tab belongs to the MPC panel until the
-	-- UI is toggled on with Scroll Lock. The artwork's visible menu bar and
-	-- this hotkey both open the menu directly, past that gate.
-	local hotkey_sequence
+	-- The UI owns Tab after Scroll Lock enables it. Never race MAME for a key
+	-- while its UI is active or any MAME menu is already showing.
+	local hotkey_sequences = {}
 	local hotkey_down = false
 	local menu_click_port
 	local menu_click_down = false
@@ -745,7 +749,7 @@ function mpcpi_settings.startplugin()
 			return
 		end
 		menu_click_down = true
-		if manager.ui.menu_active then
+		if manager.ui.ui_active or manager.ui.menu_active then
 			return
 		end
 		if bits & 0x02 ~= 0 then
@@ -760,11 +764,18 @@ function mpcpi_settings.startplugin()
 	end
 
 	local function poll_hotkey()
-		if not hotkey_sequence then
+		if #hotkey_sequences == 0 then
 			return
 		end
-		local pressed = manager.machine.input:seq_pressed(hotkey_sequence)
-		if pressed and not hotkey_down then
+		local pressed = false
+		for _, sequence in ipairs(hotkey_sequences) do
+			if manager.machine.input:seq_pressed(sequence) then
+				pressed = true
+				break
+			end
+		end
+		if pressed and not hotkey_down
+				and not manager.ui.ui_active and not manager.ui.menu_active then
 			show_device_menu(1)
 		end
 		hotkey_down = pressed
@@ -772,12 +783,18 @@ function mpcpi_settings.startplugin()
 
 	local function on_start()
 		load_settings()
-		local ok, sequence = pcall(function ()
-			return manager.machine.input:seq_from_tokens(
-				env('MPCPI_SETTINGS_HOTKEY', 'KEYCODE_MENU'))
-		end)
-		if ok then
-			hotkey_sequence = sequence
+		local hotkeys = DEFAULT_HOTKEYS
+		local override = os.getenv('MPCPI_SETTINGS_HOTKEY')
+		if override and override ~= '' then
+			hotkeys = { override }
+		end
+		for _, tokens in ipairs(hotkeys) do
+			local ok, sequence = pcall(function ()
+				return manager.machine.input:seq_from_tokens(tokens)
+			end)
+			if ok and sequence then
+				hotkey_sequences[#hotkey_sequences + 1] = sequence
+			end
 		end
 	end
 

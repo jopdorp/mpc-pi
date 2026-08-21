@@ -132,8 +132,9 @@ export MPC_PANEL_TIMER_MODE="\${MPC_PANEL_TIMER_MODE:-accurate}"
 if [ -n "\${MPCPI_DISABLE_ACP:-}" ]; then
     "\$here/scripts/mpcpi-audio-setup"
 fi
-# The Device Settings menu (the artwork menu bar, the menu key, or Scroll
-# Lock then Tab -> Plugin Options -> Device Settings). The disk, MIDI ports,
+# The Device Settings menu (the artwork menu bar, Menu or Tab while MAME's UI
+# is inactive, or Scroll Lock then Tab -> Plugin Options -> Device Settings).
+# The disk, MIDI ports,
 # and output device change live; the quantum and rate are read once, when the
 # audio stream is created and when the graph is forced, so it writes them here
 # and asks for a fresh launch by leaving a marker behind.
@@ -513,7 +514,7 @@ Ultra 7 155H.
 
 Pads, buttons and the data wheel follow MAME's default input for these
 machines; see \`keyboard-map.png\` beside this README for the complete map,
-and press Tab in the window for MAME's input menu. The panel's knobs and
+and press Scroll Lock then Tab in the window for MAME's input menu. The panel's knobs and
 sliders are mouse-controlled through the bundled layout helper plugin, which
 \`./mpcpi\` enables; \`./mpcpi-accurate\` does not pass it, so add
 \`-pluginspath plugins -plugin layout\` there if you want it.
@@ -523,12 +524,12 @@ sliders are mouse-controlled through the bundled layout helper plugin, which
 Click **DEVICE SETTINGS**, **DISK**, **MIDI** or **AUDIO** in the bar at the
 top of the panel. The first opens the whole menu; the other entries jump to
 their part of it. The menu covers the disk in the drive, the MIDI in and out
-ports, the audio output device and the audio buffer. The menu key also opens
-it. Set \`MPCPI_SETTINGS_HOTKEY\` to MAME sequence tokens -
-\`MPCPI_SETTINGS_HOTKEY=KEYCODE_F14 ./mpcpi\` - for a keyboard without one.
-The same menu is under Plugin Options in MAME's own menu, but these
-machines have a keyboard, so Tab belongs to the MPC panel until you press
-Scroll Lock to hand the UI its keys back.
+ports, the audio output device and the audio buffer. Menu or Tab opens it while
+MAME's UI is inactive. Set \`MPCPI_SETTINGS_HOTKEY\` to one MAME input sequence -
+\`MPCPI_SETTINGS_HOTKEY=KEYCODE_F14 ./mpcpi\` - to replace both defaults.
+The same menu is under Plugin Options in MAME's own menu. After Scroll Lock
+hands the keyboard to MAME's UI, Tab opens that menu only; it does not also
+open Device Settings.
 
 Disk, MIDI port and output device change immediately. The audio buffer and
 the sample rate are read once, when the audio stream is created and when

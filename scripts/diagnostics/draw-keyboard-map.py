@@ -426,9 +426,8 @@ def render(bindings: dict[str, str], plugin_controls: dict[str, bool],
     if scroll_enabled:
         notes.append("DATA wheel: scroll down/up decreases/increases")
     notes.append(
-        "Device Settings hotkeys are overridable via MPCPI_SETTINGS_HOTKEY in "
-        "~/.config/mpcpi/settings.env; the on-screen strip / Scroll Lock→Tab→Plugin "
-        "Options also open it"
+        "MPCPI_SETTINGS_HOTKEY in ~/.config/mpcpi/settings.env replaces both defaults; "
+        "the on-screen strip and MAME's Plugin Options menu remain available"
     )
     note_x = info_x
     draw.text((note_x, 1050), "Mouse and modifiers", font=font(26, True), fill=TEXT)
