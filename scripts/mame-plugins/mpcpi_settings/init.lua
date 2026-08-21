@@ -9,9 +9,9 @@
 -- a fresh launch by leaving a marker behind. The menu says which is which
 -- on the row rather than pretending everything applies at once.
 --
--- By default, Menu or Tab opens Device Settings while MAME's UI is inactive.
--- MPCPI_SETTINGS_HOTKEY replaces that complete default set with one MAME
--- input sequence.
+-- By default, Menu, Tab, or F12 opens Device Settings while MAME's UI is
+-- inactive. A non-empty MPCPI_SETTINGS_HOTKEY replaces that complete default
+-- set with one MAME input sequence.
 
 local exports = {
 	name = 'mpcpi_settings',
@@ -31,7 +31,7 @@ end
 function mpcpi_settings.startplugin()
 
 	local MENU_NAME = 'Device Settings'
-	local DEFAULT_HOTKEYS = { 'KEYCODE_MENU', 'KEYCODE_TAB' }
+	local DEFAULT_HOTKEYS = { 'KEYCODE_MENU', 'KEYCODE_TAB', 'KEYCODE_F12' }
 
 	-- What -listmedia reports for this drive, plus MAME's archive wrapper.
 	-- A file that is not one of these is refused by name instead of being

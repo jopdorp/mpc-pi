@@ -426,7 +426,7 @@ def render(bindings: dict[str, str], plugin_controls: dict[str, bool],
     if scroll_enabled:
         notes.append("DATA wheel: scroll down/up decreases/increases")
     notes.append(
-        "MPCPI_SETTINGS_HOTKEY in ~/.config/mpcpi/settings.env replaces both defaults; "
+        "MPCPI_SETTINGS_HOTKEY in ~/.config/mpcpi/settings.env replaces all three defaults; "
         "the on-screen strip and MAME's Plugin Options menu remain available"
     )
     note_x = info_x

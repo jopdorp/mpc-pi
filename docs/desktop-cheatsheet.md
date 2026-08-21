@@ -169,13 +169,13 @@ three entries open the same menu at the relevant section, and work while MAME's
 keyboard UI remains switched off. The bar, full-menu click, direct disk click,
 normal panel click and normal panel key were verified on a private Xvfb display.
 
-Press **Menu** or **Tab** while MAME's UI is inactive to open Device Settings.
-After Scroll Lock enables MAME's UI, Tab opens only MAME's own menu; the plugin
-does not double-open. `MPCPI_SETTINGS_HOTKEY` replaces both defaults with one
-MAME input sequence. For example, putting
-`MPCPI_SETTINGS_HOTKEY=KEYCODE_F12` in `~/.config/mpcpi/settings.env` makes only
-F12 open the full menu; the wrapper exports sourced settings so the plugin
-receives it.
+Press **F12**, **Tab**, or **Menu** while MAME's UI is inactive to open Device
+Settings. After Scroll Lock enables MAME's UI, these hotkeys belong to MAME and
+the plugin does not double-open. A non-empty `MPCPI_SETTINGS_HOTKEY` replaces
+all three defaults with one MAME input sequence. For example, putting
+`MPCPI_SETTINGS_HOTKEY=KEYCODE_F12` in `~/.config/mpcpi/settings.env` leaves F12
+as the only hotkey; specifying a key already in the default set is harmless.
+The wrapper exports sourced settings so the plugin receives it.
 
 ## 3. Load a floppy at launch
 
