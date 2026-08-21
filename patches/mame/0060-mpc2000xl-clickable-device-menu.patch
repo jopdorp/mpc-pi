@@ -16,10 +16,10 @@ click without affecting panel inputs underneath it.
 diff --git a/src/mame/akai/mpc2000.cpp b/src/mame/akai/mpc2000.cpp
 --- a/src/mame/akai/mpc2000.cpp
 +++ b/src/mame/akai/mpc2000.cpp
-@@ -1767,6 +1767,13 @@
- 	// hides and captures the pointer.
+@@ -1769,6 +1769,13 @@
+ 	// and this physical button without hiding or capturing the pointer.
  	PORT_START("MPCPI_WHEEL")
- 	PORT_BIT(0x01, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("DATA Wheel Drag")
+ 	PORT_BIT(0x01, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("DATA Wheel Drag") PORT_CODE(MOUSECODE_BUTTON1)
 +
 +	PORT_START("MPCPI_MENU")
 +	PORT_BIT(0x01, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("Device Settings")

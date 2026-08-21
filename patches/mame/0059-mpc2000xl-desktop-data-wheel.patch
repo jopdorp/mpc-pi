@@ -14,23 +14,24 @@ existing 60 Hz panel dial timer gives an edge one detent, waits 300 ms, then
 repeats every six ticks (10 detents/second). Add the keyboard offset to both
 the accurate panel and optional panel-HLE reads, and save it with the machine.
 
-A wheel notch rides its own small IPT_DIAL field, so notch delivery keeps
-the dial-device mouse path (mouse switches on non-dial fields are only
-delivered under the global -mouse option, which hides and captures the
-pointer). One notch is exactly one detent, whatever the drag sensitivity
-is set to; keeping notches on the drag field's key delta made every drag
-retune silently change the notch too.
+A wheel notch rides its own small IPT_DIAL field with an explicit mouse-Z
+axis, so it cannot inherit the dial type's default horizontal mouse axis.
+Sensitivity 1 converts SDL's 120-unit wheel motion to one retained analog
+detent without relying on a one-frame digital pulse. One notch is exactly one
+detent, whatever the drag sensitivity is set to; keeping notches on the drag
+field's key delta made every drag retune silently change the notch too.
 
-The drag is gated on the left mouse button. X11 only delivers relative
-axis motion while a button is held, so the raw axis looked correctly gated
-there, but Wayland delivers it whenever the pointer moves: the wheel turned
-on every pass across the window, recorded no click at all, and kept turning
-after a drag released outside the window - the "stuck drag" report. The
-gate bit is asserted by an invisible full-panel artwork element, the same
-mechanism the device-menu bar uses, because it is the one mouse-button
-path that does not need -mouse. The timer folds the axis into a drag
-accumulator only while that bit is set, on every platform; the wheel and
-the keyboard work without the button, only the drag asks for it.
+The drag is gated on the physical left mouse button. X11 only delivers
+relative axis motion while a button is held, so the raw axis looked correctly
+gated there, but Wayland delivers it whenever the pointer moves: the wheel
+turned on every pass across the window, recorded no click at all, and kept
+turning after a drag released outside the window - the "stuck drag" report.
+The dial-device mouse option enables the mouse class for both the dial axis
+and a dedicated MOUSECODE_BUTTON1 gate without the global -mouse option that
+hides and captures the pointer. This avoids a full-panel artwork input and
+cannot obscure the menu bar or panel buttons. The timer folds the axis into
+a drag accumulator only while the physical button is down, on every platform;
+the wheel and the keyboard work without the button, only the drag asks for it.
 
 Use sensitivity 7 so a slow 100-pixel vertical drag gives about seven
 detents; at the previous 20 the drag read as roughly three times too fast.
@@ -49,11 +50,13 @@ Measured on the MAIN screen Sq field with a private Xvfb, LCD export,
 private configuration, and the same focused build. Keyboard: an exact
 50 ms emulated key press moves one step; a two-second hold moves 17
 steps in total (the edge plus steady 10/second repeat after 300 ms).
-Scroll: each notch moves exactly one step in both directions. Drag:
-with the button held, a slow 50-pixel drag moves 3-4 steps (~7 per 100
-pixels); with no button, and with only the middle button held, vertical
-motion moves nothing. All values were captured in one run of the same
-binary.
+Scroll: one notch moves Sq01 to Sq02 and the opposite notch returns it
+to Sq01. Drag: an unheld 200-pixel move leaves Sq50 at Sq50, while the
+same held move reaches Sq63 (~7 detents per 100 pixels). Mouse-up, a
+second unheld 200-pixel move, an unrelated click, and another unheld
+move all leave Sq63 unchanged. A stationary menu-bar click asserts its
+menu input without changing Sq01. All values were captured from the
+same binary used for the full patch-stack build.
 
 A binding-table collision check also found that A drove both Step < and
 Undo, and S drove both Step > and Erase. Keep A/S on the step pair and
@@ -61,7 +64,7 @@ move the two editing controls to the previously unused Backspace/Delete
 keys so every key has one unambiguous panel action.
 --- a/src/mame/akai/mpc2000.cpp
 +++ b/src/mame/akai/mpc2000.cpp
-@@ -96,12 +96,20 @@
+@@ -96,12 +96,21 @@
  		, m_keys(*this, "Y%u", 0)
  		, m_drums(*this, "PB%u", 0)
  		, m_dataentry(*this, "DATAENTRY")
@@ -79,10 +82,11 @@ keys so every key has one unambiguous panel action.
 +		, m_mouse_dial_offset(0)
 +		, m_mouse_dial_last(0)
 +		, m_notch_dial_last(0)
++		, m_digital_drag_state(0)
  		, m_fdc_ata(0)
  		, m_fdc_irq(0)
  		, m_fdc_drq(0)
-@@ -149,6 +157,8 @@
+@@ -149,6 +158,8 @@
  	required_ioport_array<8> m_keys;
  	required_ioport_array<4> m_drums;
  	required_ioport m_dataentry;
@@ -91,17 +95,17 @@ keys so every key has one unambiguous panel action.
  
  	static void floppies(device_slot_interface &device);
  
-@@ -227,6 +237,9 @@
+@@ -227,6 +238,9 @@
  
  	uint8_t m_key_scan_row, m_drum_scan_row, m_variation_slider;
  	int m_last_dial, m_count_dial, m_quadrature_phase;
 +	int m_keyboard_dial_offset, m_digital_dial_state, m_keyboard_dial_ticks;
 +	int m_mouse_dial_offset, m_mouse_dial_last;
-+	uint8_t m_notch_dial_last;
++	uint8_t m_notch_dial_last, m_digital_drag_state;
  	int m_fdc_ata, m_fdc_irq, m_fdc_drq, m_ata_irq, m_ata_drq;
  
  	uint8_t m_wadcsn;
-@@ -300,6 +313,11 @@
+@@ -300,6 +314,13 @@
  	save_item(NAME(m_fast_pad_queue));
  	save_item(NAME(m_fast_pad_head));
  	save_item(NAME(m_fast_pad_count));
@@ -110,10 +114,12 @@ keys so every key has one unambiguous panel action.
 +	save_item(NAME(m_keyboard_dial_ticks));
 +	save_item(NAME(m_mouse_dial_offset));
 +	save_item(NAME(m_mouse_dial_last));
++	save_item(NAME(m_notch_dial_last));
++	save_item(NAME(m_digital_drag_state));
  }
  
  void mpc2000_state::machine_reset()
-@@ -311,6 +329,12 @@
+@@ -311,6 +332,13 @@
  	m_fast_pad_count = 0;
  	m_fast_pad_timer->adjust(attotime::never);
  	m_lcd_dirty = true;
@@ -122,11 +128,12 @@ keys so every key has one unambiguous panel action.
 +	m_mouse_dial_offset = 0;
 +	m_mouse_dial_last = 0;
 +	m_notch_dial_last = 0;
++	m_digital_drag_state = 0;
 +	m_keyboard_dial_ticks = 0;
  
  	// all CTS lines are connected to GND
  	m_sio->write_cts<0>(CLEAR_LINE);
-@@ -590,7 +614,47 @@
+@@ -590,7 +618,49 @@
  
  TIMER_DEVICE_CALLBACK_MEMBER(mpc2000_state::dial_timer_tick)
  {
@@ -140,9 +147,8 @@ keys so every key has one unambiguous panel action.
 +	// repeats on every 60 Hz tick, so it cannot provide both behaviours.
 +	m_keyboard_dial_offset += BIT(pressed, 1) - BIT(pressed, 0);
 +
-+	// A wheel notch rides its own dial field, so notch delivery keeps the
-+	// dial-device mouse path and stays exactly one detent per notch at any
-+	// drag sensitivity.
++	// The notch dial has an explicit mouse-Z axis, avoiding the default
++	// horizontal axis while retaining a wheel event until this timer reads it.
 +	const ioport_value notch = m_dial_notch->read() & 0xff;
 +	m_keyboard_dial_offset += int(int8_t(uint8_t(notch - m_notch_dial_last)));
 +	m_notch_dial_last = uint8_t(notch);
@@ -162,12 +168,15 @@ keys so every key has one unambiguous panel action.
 +	// delivers relative motion while a button is held, but Wayland delivers
 +	// it whenever the pointer moves, which turned the wheel on every pass
 +	// across the window and left it feeling stuck after a drag.  Gate the
-+	// axis on the artwork's drag bit, so the wheel follows only a deliberate
++	// axis on the physical left button, so the wheel follows only a deliberate
 +	// drag on every platform.  The offset freezes while the button is up,
-+	// so the transition adds and drops nothing.
++	// so the transition adds and drops nothing.  Establish a fresh baseline
++	// on the button edge in case motion and mouse-down arrive in one tick.
 +	const uint8_t axis = uint8_t(dataentry & 0xff);
-+	if (m_dial_drag->read() & 1)
++	const uint8_t digital_drag_state = m_dial_drag->read() & 1;
++	if (digital_drag_state && m_digital_drag_state)
 +		m_mouse_dial_offset = uint8_t(m_mouse_dial_offset + axis - m_mouse_dial_last);
++	m_digital_drag_state = digital_drag_state;
 +	m_mouse_dial_last = axis;
 +
 +	m_keyboard_dial_offset &= 0xff;
@@ -175,7 +184,7 @@ keys so every key has one unambiguous panel action.
  
  	if (new_dial != m_last_dial)
  	{
-@@ -964,7 +1028,7 @@
+@@ -964,7 +1034,7 @@
  			m_panel_key_state[port] = m_keys[port]->read();
  		for (int port = 0; port < 4; port++)
  			m_panel_pad_state[port] = m_drums[port]->read();
@@ -184,7 +193,7 @@ keys so every key has one unambiguous panel action.
  	}
  
  	if (m_panel_hle_boot_ticks < (PANEL_HLE_BOOT_COUNT * PANEL_HLE_BOOT_STRIDE))
-@@ -1020,7 +1084,7 @@
+@@ -1020,7 +1090,7 @@
  		m_panel_pad_state[port] = now;
  	}
  
@@ -193,7 +202,7 @@ keys so every key has one unambiguous panel action.
  	if (dial != m_panel_hle_last_dial)
  	{
  		int delta = dial - m_panel_hle_last_dial;
-@@ -1628,7 +1692,7 @@
+@@ -1628,7 +1698,7 @@
  	PORT_BIT(0x02, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Soft Key 5") PORT_CODE(KEYCODE_F5)
  	PORT_BIT(0x04, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Main Screen") PORT_CODE(KEYCODE_Q)
  	PORT_BIT(0x08, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("4 / Sample") PORT_CODE(KEYCODE_4)
@@ -202,7 +211,7 @@ keys so every key has one unambiguous panel action.
  	PORT_BIT(0x20, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Over Dub") PORT_CODE(KEYCODE_X)
  	PORT_BIT(0x40, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_CODE(KEYCODE_LEFT) PORT_NAME("Left Arrow")
  	PORT_BIT(0x80, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Play Start") PORT_CODE(KEYCODE_B)
-@@ -1638,7 +1702,7 @@
+@@ -1638,7 +1708,7 @@
  	PORT_BIT(0x02, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Soft Key 6") PORT_CODE(KEYCODE_F6)
  	PORT_BIT(0x04, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Window") PORT_CODE(KEYCODE_W)
  	PORT_BIT(0x08, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("7 / Mixer") PORT_CODE(KEYCODE_7)
@@ -211,7 +220,7 @@ keys so every key has one unambiguous panel action.
  	PORT_BIT(0x20, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_NAME("Stop") PORT_CODE(KEYCODE_C)
  	PORT_BIT(0x40, IP_ACTIVE_LOW, IPT_KEYBOARD) PORT_CODE(KEYCODE_UP) PORT_NAME("Up Arrow")
  
-@@ -1690,7 +1754,19 @@
+@@ -1690,7 +1760,16 @@
  	PORT_BIT( 0x01, IP_ACTIVE_HIGH, IPT_OTHER ) PORT_NAME("Velocity Curve Select") PORT_CHANGED_MEMBER(DEVICE_SELF, FUNC(mpc2000_state::velocity_curve_changed), 0)
  
  	PORT_START("DATAENTRY")
@@ -220,15 +229,12 @@ keys so every key has one unambiguous panel action.
 +	PORT_BIT(0x100, IP_ACTIVE_HIGH, IPT_KEYBOARD) PORT_NAME("DATA Wheel -") PORT_CODE(KEYCODE_MINUS)
 +	PORT_BIT(0x200, IP_ACTIVE_HIGH, IPT_KEYBOARD) PORT_NAME("DATA Wheel +") PORT_CODE(KEYCODE_EQUALS)
 +	PORT_START("DATAENTRY_NOTCH")
-+	PORT_BIT(0xff, 0x00, IPT_DIAL) PORT_NAME("DATA Wheel Notch") PORT_SENSITIVITY(100) PORT_KEYDELTA(1)
-+		PORT_CODE_DEC(MOUSECODE_Z_NEG_SWITCH) PORT_CODE_INC(MOUSECODE_Z_POS_SWITCH)
++	PORT_BIT(0xff, 0x00, IPT_DIAL) PORT_NAME("DATA Wheel Notch") PORT_SENSITIVITY(1) PORT_CODE(MOUSECODE_Z)
 +
-+	// Asserted by the artwork while the left button is held over the panel,
-+	// the same mechanism the menu bar uses.  No host code: mouse switches on
-+	// non-dial fields are only delivered with the global -mouse option, which
-+	// hides and captures the pointer.
++	// The dial-device mouse option enables the mouse class for both the axis
++	// and this physical button without hiding or capturing the pointer.
 +	PORT_START("MPCPI_WHEEL")
-+	PORT_BIT(0x01, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("DATA Wheel Drag")
++	PORT_BIT(0x01, IP_ACTIVE_HIGH, IPT_OTHER) PORT_NAME("DATA Wheel Drag") PORT_CODE(MOUSECODE_BUTTON1)
  INPUT_PORTS_END
  
  ROM_START( mpc2000xl )
@@ -245,31 +251,7 @@ keys so every key has one unambiguous panel action.
  	<!-- MPC Logo (simple lines) -->
  	<element name="text-mpc">
  		<image><data><![CDATA[
-@@ -947,6 +943,14 @@
- 	</group>
- 
- 	<!-- Box / Screen -->
-+	<!-- Invisible, covers the whole panel.  It exists only to assert the
-+	     MPCPI_WHEEL bit while the left button is held, which the driver
-+	     reads as the DATA-wheel drag gate.  Drawn first so the menu bar
-+	     and every panel control are hit-tested ahead of it. -->
-+	<element name="wheel-drag-gate">
-+		<rect><color red="0" green="0" blue="0" alpha="0" /></rect>
-+	</element>
-+
- 	<element name="box-topedge">
- 		<image><data><![CDATA[
- 		<svg width="6000" height="180">
-@@ -984,6 +988,8 @@
- 	<!-- Show Everything -->
- 	<view name="Default Layout">
- 
-+	<element ref="wheel-drag-gate" inputtag="MPCPI_WHEEL" inputmask="0x01"><bounds x="0" y="0" width="6000" height="4326" /></element>
-+
- 	<!-- Box and Screen -->
- 	<element ref="box-topedge"><bounds x="0" y="0" width="6000" height="180" /></element>
- 	<element ref="rect"><bounds x="0" y="180" width="6000" height="4146" /><color red="0.87" green="0.858" blue="0.847"/></element>
-@@ -1082,8 +1088,6 @@
+@@ -1082,8 +1078,6 @@
  	<group ref="variationslider"><bounds x="290" y="3135" width="400" height="1000"/></group>
  	<element ref="text-data"><bounds x="2023" y="1760" width="131" height="65" /><color red="0" green="0" blue="0" /></element>
  	<element ref="dataknob" ><bounds x="1690" y="1855" width="800" height="800"/></element>
@@ -278,7 +260,7 @@ keys so every key has one unambiguous panel action.
  
  	<!-- Cursor Module -->
  	<element ref="text-cursor"><bounds x="1978" y="2775" width="230" height="65" /><color red="0" green="0" blue="0" /></element>
-@@ -1098,7 +1102,6 @@
+@@ -1098,7 +1092,6 @@
  			function()
  				local view = file.views["Default Layout"]
  				install_slider_callbacks(view)
